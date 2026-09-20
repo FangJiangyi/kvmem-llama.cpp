@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
-project(kvmem_llamacpp LANGUAGES CXX)
+
+# CMake must enable HIP from the top-level project. Enabling it first in the
+# ggml subdirectory leaves CMAKE_HIP_COMPILE_OBJECT unset on CMake 3.28.
+option(KVMEM_ROCM "Build the KVMem adapter with llama.cpp's HIP/ROCm backend" OFF)
+if (KVMEM_ROCM)
+    project(kvmem_llamacpp LANGUAGES CXX HIP)
+else()
+    project(kvmem_llamacpp LANGUAGES CXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,14 +26,27 @@ add_subdirectory(kvmem)
 
 option(KVMEM_BUILD_LLAMA "Build llama.cpp with the KVMem adapter" ON)
 if (KVMEM_BUILD_LLAMA)
-    if (NOT CMAKE_CUDA_COMPILER AND EXISTS "/home/leye/kvmem_qw3/.cu13-env/bin/nvcc")
-        set(CMAKE_CUDA_COMPILER "/home/leye/kvmem_qw3/.cu13-env/bin/nvcc" CACHE FILEPATH "nvcc")
+    if (KVMEM_ROCM)
+        set(GGML_CUDA OFF CACHE BOOL "ggml: use CUDA" FORCE)
+        set(GGML_HIP ON CACHE BOOL "ggml: use HIP" FORCE)
+        # Keep locally built tools runnable without requiring callers to
+        # reconstruct ROCm's library path before invoking CTest or a binary.
+        if (NOT DEFINED ROCM_PATH)
+            set(ROCM_PATH "/opt/rocm" CACHE PATH "ROCm installation root")
+        endif()
+        set(CMAKE_BUILD_RPATH "${ROCM_PATH}/lib")
+        if (NOT DEFINED CMAKE_HIP_ARCHITECTURES)
+            set(CMAKE_HIP_ARCHITECTURES "gfx1100" CACHE STRING "AMD GPU target")
+        endif()
+    else()
+        if (NOT CMAKE_CUDA_COMPILER AND EXISTS "/home/leye/kvmem_qw3/.cu13-env/bin/nvcc")
+            set(CMAKE_CUDA_COMPILER "/home/leye/kvmem_qw3/.cu13-env/bin/nvcc" CACHE FILEPATH "nvcc")
+        endif()
+        if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+            set(CMAKE_CUDA_ARCHITECTURES "120a-real" CACHE STRING "Blackwell sm_120")
+        endif()
+        option(GGML_CUDA "ggml: use CUDA" ON)
     endif()
-    if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        set(CMAKE_CUDA_ARCHITECTURES "120a-real" CACHE STRING "Blackwell sm_120")
-    endif()
-
-    option(GGML_CUDA "ggml: use CUDA" ON)
     # Default llama.cpp FA vec kernels are only F16/Q4_0/Q8_0/BF16. q5_0 KV
     # (and q4_1/q5_1) need this or FlashAttention refuses those types and
     # Qwen3.8 hybrid prefill collapses (~75 t/s vs ~500).
@@ -104,7 +125,7 @@ if (KVMEM_BUILD_LLAMA)
     add_test(NAME kvmem-server-progress-test COMMAND kvmem-server-progress-test)
 
     add_executable(kvmem-output-limit-test tests/output-limit-test.cpp)
-    target_include_directories(kvmem-output-limit-test PRIVATE tools)
+    target_include_directories(kvmem-output-limit-test PRIVATE tools llama.cpp/vendor/cpp-httplib)
     target_link_libraries(kvmem-output-limit-test PRIVATE llama-common cpp-httplib)
     add_test(NAME kvmem-output-limit-test COMMAND kvmem-output-limit-test)
 endif()
