@@ -134,6 +134,17 @@ was about 11,992 MiB. This validates the bounded-memory invariant on ROCm,
 but is not a performance or absolute-memory comparison with the CUDA results
 on the different RTX 5060 Ti hardware.
 
+The full README-aligned ROCm IQ3/IQ4 Task 1 and 256K Task 2 measurements,
+including a metric-by-metric comparison with the RTX 5060 Ti baseline, are in
+[docs/rocm-recommended-config-performance.md](docs/rocm-recommended-config-performance.md).
+Both tasks use IQ3 `36864 + 16384` and IQ4 `32768 + 12288` unchanged. On the
+RX 7900 XTX, these runs reached 16011--16313 MiB peak VRAM and
+4372--13068 MiB runtime RSS. Task 1 IQ3/IQ4 passed, while Task 2 IQ4 passed
+the benchmark's 512-token length check. Task 2 IQ3 completed all tool rounds
+but stopped naturally at 232 final tokens, so it is reported as a diagnostic
+result rather than a 512-token equivalent. Free-VRAM figures are not directly
+comparable because this GPU has 24 GiB rather than 16 GiB.
+
 On the RX 7900 XTX test with Qwen3-0.6B Q8_0, native 8K KV peaked at
 1587.0 MiB whole-GPU VRAM; KVMem peaked at 1142.0 MiB and kept its GPU KV at
 23,396,352 bytes / 384 cells for both 1K and 8K prompts. Its RSS increased
