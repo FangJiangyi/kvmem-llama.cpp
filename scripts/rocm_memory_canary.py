@@ -22,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 KV_RE = re.compile(r"KVMEM_KV_BYTES bytes=(\d+) cells=(\d+).*")
+MTP_RE = re.compile(r"KVMEM_TRACE mtp_pool cells=(\d+).* bytes=(\d+).*")
 PROMPT_RE = re.compile(r"n_prompt=(\d+)")
 
 
@@ -53,7 +54,7 @@ def rss_mib(pid: int) -> float | None:
 
 
 def run_case(cli: Path, model: Path, words: int, gpu: int, kvmem: bool,
-             budget: int, reserve: int, batch: int) -> dict:
+             budget: int, reserve: int, batch: int, mtp_draft_n_max: int) -> dict:
     prompt = " memory" * words
     with tempfile.NamedTemporaryFile("w", prefix="kvmem_rocm_", suffix=".txt", delete=False) as handle:
         handle.write(prompt)
@@ -62,6 +63,8 @@ def run_case(cli: Path, model: Path, words: int, gpu: int, kvmem: bool,
         ctx = words + reserve + 128
         command = [str(cli), "-m", str(model), "-f", prompt_file, "-n", "1", "-c", str(ctx),
                    "-b", str(batch), "-ngl", "99", "--temp", "0", "--no-prompt", "--kv-dtype", "q8_0"]
+        if mtp_draft_n_max:
+            command += ["--spec-type", "draft-mtp", "--spec-draft-n-max", str(mtp_draft_n_max)]
         if kvmem:
             command += ["--kvmem", "--kvmem-method", "recency", "--kvmem-budget", str(budget),
                         "--kvmem-gen-reserve", str(reserve), "--kvmem-block-tokens", "32"]
@@ -87,6 +90,9 @@ def run_case(cli: Path, model: Path, words: int, gpu: int, kvmem: bool,
         if match := KV_RE.search(stderr):
             info["kv_bytes"] = int(match.group(1))
             info["kv_cells"] = int(match.group(2))
+        if match := MTP_RE.search(stderr):
+            info["mtp_cells"] = int(match.group(1))
+            info["mtp_bytes"] = int(match.group(2))
         if match := PROMPT_RE.search(stderr):
             info["n_prompt"] = int(match.group(1))
         return info
@@ -96,7 +102,8 @@ def run_case(cli: Path, model: Path, words: int, gpu: int, kvmem: bool,
 
 def summary(name: str, row: dict) -> None:
     print(f"{name}: rc={row['rc']} prompt={row.get('n_prompt')} vram_peak={row['vram_mib']:.1f} MiB "
-          f"rss_peak={row['rss_mib']:.1f} MiB kv_bytes={row.get('kv_bytes')} cells={row.get('kv_cells')}")
+          f"rss_peak={row['rss_mib']:.1f} MiB kv_bytes={row.get('kv_bytes')} cells={row.get('kv_cells')} "
+          f"mtp_bytes={row.get('mtp_bytes')} mtp_cells={row.get('mtp_cells')}")
 
 
 def main() -> int:
@@ -108,6 +115,8 @@ def main() -> int:
     parser.add_argument("--budget", type=int, default=256)
     parser.add_argument("--reserve", type=int, default=128)
     parser.add_argument("--batch", type=int, default=128)
+    parser.add_argument("--mtp-draft-n-max", type=int, default=0,
+                        help="enable model-internal MTP speculative decoding with this many draft tokens")
     args = parser.parse_args()
     if not args.model.is_file():
         raise SystemExit(f"model not found: {args.model}")
@@ -115,9 +124,12 @@ def main() -> int:
         raise SystemExit("--long-words must exceed --short-words")
 
     cli = find_cli()
-    native = run_case(cli, args.model, args.long_words, args.gpu, False, args.budget, args.reserve, args.batch)
-    short = run_case(cli, args.model, args.short_words, args.gpu, True, args.budget, args.reserve, args.batch)
-    long = run_case(cli, args.model, args.long_words, args.gpu, True, args.budget, args.reserve, args.batch)
+    native = run_case(cli, args.model, args.long_words, args.gpu, False, args.budget, args.reserve, args.batch,
+                      args.mtp_draft_n_max)
+    short = run_case(cli, args.model, args.short_words, args.gpu, True, args.budget, args.reserve, args.batch,
+                     args.mtp_draft_n_max)
+    long = run_case(cli, args.model, args.long_words, args.gpu, True, args.budget, args.reserve, args.batch,
+                    args.mtp_draft_n_max)
     summary("native-long", native)
     summary("kvmem-short", short)
     summary("kvmem-long", long)
@@ -133,6 +145,11 @@ def main() -> int:
         failures.append("KVMEM_KV_BYTES log missing")
     elif (short["kv_bytes"], short["kv_cells"]) != (long["kv_bytes"], long["kv_cells"]):
         failures.append("KVMem GPU KV bytes/cells grew with prompt length")
+    if args.mtp_draft_n_max:
+        if short.get("mtp_bytes") is None or long.get("mtp_bytes") is None:
+            failures.append("KVMem MTP pool log missing")
+        elif (short["mtp_bytes"], short["mtp_cells"]) != (long["mtp_bytes"], long["mtp_cells"]):
+            failures.append("KVMem MTP GPU KV bytes/cells grew with prompt length")
     if long["vram_mib"] > native["vram_mib"]:
         failures.append("KVMem long-run VRAM peak exceeded native KV peak")
     if failures:

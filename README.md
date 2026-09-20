@@ -124,6 +124,16 @@ python3 scripts/rocm_memory_canary.py -m /path/to/model.gguf \
   --short-words 1024 --long-words 8192 --budget 256 --reserve 128
 ```
 
+For models with an embedded MTP head, add `--mtp-draft-n-max 2`; the canary
+then verifies that both the target and MTP slot pools remain fixed. On the
+tested RX 7900 XTX, Qwen3.8-27B GSQ-RCO IQ3_S MTP at 1,024 and 8,192 prompt
+words used a fixed target pool of 44,564,480 bytes / 1,280 cells and a fixed
+MTP pool of 2,785,280 bytes / 1,280 cells. Sampled whole-device peak VRAM was
+12,430 MiB for KVMem at 8,192 words versus 12,727 MiB for native KV; peak RSS
+was about 11,992 MiB. This validates the bounded-memory invariant on ROCm,
+but is not a performance or absolute-memory comparison with the CUDA results
+on the different RTX 5060 Ti hardware.
+
 On the RX 7900 XTX test with Qwen3-0.6B Q8_0, native 8K KV peaked at
 1587.0 MiB whole-GPU VRAM; KVMem peaked at 1142.0 MiB and kept its GPU KV at
 23,396,352 bytes / 384 cells for both 1K and 8K prompts. Its RSS increased
