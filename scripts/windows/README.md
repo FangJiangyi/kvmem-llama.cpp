@@ -1,16 +1,27 @@
-# Windows x64 CUDA preview — v0.16.0-rc2
+# Windows x64 CUDA preview — v0.16.0-rc3
+
+This document describes the **rc3 prerelease**, available with CUDA 13.2.86 and CUDA 12.9.86.
 
 ## Download and run
 
-Download the **windows-x86_64-cuda13.2.86.zip** runtime from
-[v0.16.0-rc2](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc2).
+Download the **windows-x86_64-cuda13.2.86.zip** runtime (recommended), or the
+**windows-x86_64-cuda12.9.86.zip** alternative, from
+[v0.16.0-rc3](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3).
 It contains the server, CLI, matching CUDA DLLs and browser UI. It does **not**
 contain model weights or the quantization tool. The separate **quantizer** ZIP
 is optional; it is unnecessary when your GGUF files are already prepared.
 
+Updated rc3 runtime ZIPs include the full UI (default, `share/kvmem/ui`) and
+lightweight UI (`share/kvmem/ui-lightweight`). Normal IQ3/IQ4 launch scripts
+enable the full UI automatically. From the extracted package directory, append
+`-UiDir '.\share\kvmem\ui-lightweight'` to select the lightweight UI, or `-NoUi`
+to disable UI. Existing rc3 users should download the updated runtime ZIP again.
+Full UI does not add backend tool execution or stream resumption support.
+
 Requirements: Windows x64, a compatible NVIDIA driver, Microsoft Visual C++ x64
 runtime, and an AVX2/FMA/F16C/BMI2 CPU. The package contains CUDA targets `sm_75`, `sm_80`, `sm_86`, `sm_89`, `sm_90`
-and `sm_120a`; the tested GPU is RTX 5060 Ti 16 GiB. CUDA Toolkit,
+and `sm_120a`; the CUDA 12.9.86 package additionally contains `sm_70` for Volta.
+The tested GPU is RTX 5060 Ti 16 GiB; other targets have not been physically tested. CUDA Toolkit,
 Visual Studio and Node.js are not needed to run the package. Tested driver: 610.62.
 
 ### Text-only quick start (no model conversion)
@@ -30,7 +41,16 @@ $env:CUDA_VISIBLE_DEVICES = '0'
 ```
 
 Open http://127.0.0.1:18200/ after loading. Keep the terminal open; Ctrl+C stops
-the server. The command uses default block size 128.
+the server. The command uses default block size 128. To serve the API on your
+LAN, change `--host 127.0.0.1` to `--host 0.0.0.0` (and allow the port in
+Windows Defender Firewall).
+
+For K=Q8 and V=Q4, replace the cache flags with `-ctk q8_0 -ctv q4_0`.
+The PowerShell recipe scripts also accept `-CacheTypeK q8_0 -CacheTypeV q4_0`.
+These options override the recipe K/V defaults independently; MTP KV remains
+F16 by default. K and V may independently use Q8, Q5 or Q4. GPU-tested pairs
+are Q8/Q8, Q5/Q5, Q4/Q4 and Q8/Q4 on CUDA; the remaining mixed pairs have only
+argument-parsing coverage, not full inference/quality/performance validation.
 
 ### Ready-made vision projector (no local quantization)
 
@@ -144,18 +164,27 @@ for testers with prepared files.
 | Block size | 128 | 128 |
 | Thinking budget | 4096 | 4096 |
 
-Other switches include `-Port`, `-Mtp`, `-VisionDevice cpu|gpu`,
+IQ3 defaults to CPU vision with `--no-mmproj-offload`, leaving more GPU memory for inference. To use GPU vision explicitly, pass `-VisionDevice gpu`. IQ4 continues to default to CPU vision.
+
+Other switches include `-Port`, `-ListenHost`, `-ApiKey`, `-Mtp`, `-VisionDevice cpu|gpu`,
 `-ReasoningBudget`, `-ChatTemplateFile`, `-ChatTemplateKwargs`, `-UiDir`, `-NoUi`.
+`-ListenHost` (or `HOST` / `LLAMA_ARG_HOST`) selects the bind address; the
+default `127.0.0.1` only serves this machine, so pass `-ListenHost 0.0.0.0` to
+serve the API on your LAN.
+`-ApiKey KEY` (or `-ApiKeyFile PATH`, mirroring llama-server) requires
+`Authorization: Bearer KEY` / `X-Api-Key` on protected routes. `/health`,
+`/v1/health`, OPTIONS requests and mounted UI static assets remain public.
 Reasoning effort follows the model template unless explicitly set. Sampling uses
 the same server defaults as Linux and remains configurable per API request.
 
 
 When invoking `bin/llama-kvmem-server.exe` or `bin/llama-kvmem-cli.exe` directly,
 llama.cpp-style `-ctk TYPE -ctv TYPE` (or `--cache-type-k` / `--cache-type-v`)
-is supported. **Quantized K and V must use the same cache type**: use
-`-ctk q8_0 -ctv q8_0`, for example. Mixed pairs such as `q8_0/q4_0` or
+is supported. Quantized K and V may independently use `q8_0`, `q5_0` or
+`q4_0`, for example `-ctk q8_0 -ctv q5_0`. Float/quantized pairs such as
 `q8_0/f16` are rejected before model loading. `--kv-dtype TYPE` sets both
-together; the recipe launchers already select matching K/V types.
+together; the recipe defaults still select matching K/V types. See the
+validation scope above before using a newly enabled pair.
 
 ## UI
 
