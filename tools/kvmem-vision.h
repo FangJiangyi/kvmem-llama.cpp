@@ -40,7 +40,8 @@ private:
 class kvmem_vision {
 public:
     kvmem_vision(llama_model * model, const std::string & path, bool gpu,
-                 ggml_backend_dev_t device, int min_tokens, int max_tokens, int n_threads);
+                 ggml_backend_dev_t device, int min_tokens, int max_tokens, int n_threads,
+                 float video_fps);
     ~kvmem_vision();
     std::shared_ptr<kvmem_prompt> tokenize(const std::string & prompt, const std::vector<std::vector<uint8_t>> & files);
     int decode(llama_context * ctx, const kvmem_prompt & prompt, size_t row, int n_batch,
@@ -52,6 +53,7 @@ public:
 private:
     mtmd_context * ctx_ = nullptr;
     int n_embd_ = 0;
+    float video_fps_ = 2.0f;
     size_t cache_bytes_ = 0;
     struct entry { std::vector<float> embd; uint64_t used = 0; };
     std::map<std::string, entry> cache_;

@@ -70,6 +70,7 @@ static void print_usage(const char * argv0) {
             "  -mmdev, --mmproj-device DEVICE  select vision device, e.g. CUDA1 or Vulkan0 (none = CPU)\n"
             "  --image-min-tokens N       native minimum image token count\n"
             "  --image-max-tokens N       native maximum image token count\n"
+            "  --video-fps F              video sampling fps for video input (default 2.0; <=0 uses the video's native fps)\n"
             "  -lv, --verbosity N         log level: 0 silent, 1 error, 2 warn, 3 info (default), 4 trace, 5 debug\n"
             "  --log-verbosity N          alias of --verbosity\n"
             "  --kvmem-trace              raw KVMEM_* diagnostics (or KVMEM_TRACE=1)\n"
@@ -2251,6 +2252,7 @@ int main(int argc, char ** argv) {
     json template_defaults = json::object();
     bool mmproj_gpu = true;
     int image_min_tokens = -1, image_max_tokens = -1;
+    float video_fps = 2.0f;
     std::string host = "127.0.0.1";
     std::string nvme_dir;
     int port = 8080;
@@ -2323,6 +2325,17 @@ int main(int argc, char ** argv) {
                 (eq(arg, "--image-min-tokens") ? image_min_tokens : image_max_tokens) = n;
             } catch (...) {
                 fprintf(stderr, "%s requires a positive integer\n", arg);
+                return 1;
+            }
+        } else if (eq(arg, "--video-fps")) {
+            const std::string value = need(arg);
+            try {
+                size_t used = 0;
+                const float f = std::stof(value, &used);
+                if (used != value.size()) throw std::invalid_argument("number required");
+                video_fps = f;
+            } catch (...) {
+                fprintf(stderr, "%s requires a number (<=0 uses the video's native fps)\n", arg);
                 return 1;
             }
         } else if (eq(arg, "--ui-dir")) {
@@ -2676,7 +2689,8 @@ int main(int argc, char ** argv) {
                    {"sink_tokens", st.kparams.sink_tokens}, {"block_tokens", st.kparams.block_tokens}}},
         {"spec_type", st.spec_mtp ? "draft-mtp" : "none"},
         {"vision", {{"enabled", !mmproj_path.empty()}, {"projector", mmproj_path}, {"gpu", mmproj_gpu},
-                    {"device", mmproj_gpu ? (mmproj_device_name.empty() ? "auto" : mmproj_device_name) : "CPU"}}},
+                    {"device", mmproj_gpu ? (mmproj_device_name.empty() ? "auto" : mmproj_device_name) : "CPU"},
+                    {"video_fps", video_fps}}},
         {"http", {{"host", host}, {"port", port}, {"timeout", options.timeout}, {"slots", 1}}},
         {"auth", {{"enabled", !options.api_keys.empty()}, {"key_count", options.api_keys.size()}}},
         {"sources", config_sources}, {"unlisted_sources", "default"}
@@ -2747,7 +2761,7 @@ int main(int argc, char ** argv) {
                 throw std::invalid_argument("image-min-tokens exceeds image-max-tokens");
             st.vision = std::make_unique<kvmem_vision>(
                     st.model, mmproj_path, mmproj_gpu, mmproj_device,
-                    image_min_tokens, image_max_tokens, options.threads);
+                    image_min_tokens, image_max_tokens, options.threads, video_fps);
         } catch (const std::exception & e) {
             fprintf(stderr, "%s\n", e.what());
             return 1;
@@ -2876,7 +2890,7 @@ int main(int argc, char ** argv) {
         // 中文：当前 kvmem 的 llama.cpp 尚无 llama_model_ftype_name()，保留空字段以兼容上游 UI 展示
         {"model_ftype", ""},
         {"model_path", model_path},
-        {"modalities", {{"vision", st.vision != nullptr}, {"audio", false}, {"video", false}}},
+        {"modalities", {{"vision", st.vision != nullptr}, {"audio", false}, {"video", st.vision != nullptr}}},
         {"media_marker", mtmd_default_marker()},
         {"endpoint_slots", true}, {"endpoint_props", false}, {"endpoint_metrics", false},
         {"ui", !no_ui},
