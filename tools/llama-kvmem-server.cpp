@@ -2971,7 +2971,17 @@ int main(int argc, char ** argv) {
     svr.Get("/v1/models", [&](const httplib::Request &, httplib::Response & res) {
         json j = {
             {"object", "list"},
-            {"data", json::array({json{{"id", st.model_name}, {"name", st.model_name}, {"object", "model"}, {"status", {{"value", "loaded"}}}}})},
+            {"data", json::array({json{
+                {"id", st.model_name},
+                {"name", st.model_name},
+                {"object", "model"},
+                {"status", {{"value", "loaded"}}},
+                {"meta", {
+                    {"n_ctx", llama_n_ctx(st.ctx)},
+                    {"n_ctx_train", llama_model_n_ctx_train(st.model)},
+                    {"n_embd", llama_model_n_embd(st.model)},
+                }},
+            }})},
         };
         res.set_content(j.dump(), "application/json");
     });
