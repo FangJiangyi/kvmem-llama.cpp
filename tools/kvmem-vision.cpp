@@ -100,13 +100,13 @@ size_t kvmem_prompt::index_bytes() const {
     return bytes;
 }
 
-std::string kvmem_parse_media_messages(const std::string & body, bool allow_images,
+std::string kvmem_parse_media_messages(const std::string & body, bool allow_images, bool allow_video,
                                       std::vector<std::vector<uint8_t>> & files) {
     auto parsed = common_json::parse(body);
     server_chat_params params;
     params.allow_image = allow_images;
     params.allow_audio = false;
-    params.allow_video = allow_images;
+    params.allow_video = allow_video;
     oaicompat_chat_process_media(parsed, params, files);
     return parsed.dump();
 }
@@ -133,6 +133,10 @@ kvmem_vision::kvmem_vision(llama_model * model, const std::string & path, bool g
 }
 
 kvmem_vision::~kvmem_vision() { mtmd_free(ctx_); }
+
+bool kvmem_vision::supports_video() const {
+    return mtmd_helper_support_video(ctx_);
+}
 
 std::shared_ptr<kvmem_prompt> kvmem_vision::tokenize(const std::string & prompt,
                                                  const std::vector<std::vector<uint8_t>> & files) {
