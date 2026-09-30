@@ -94,13 +94,23 @@ jobs:
         with:
           submodules: true
       - run: bash scripts/apply-patches.sh
+      - name: Identify the compiler toolchain
+        id: toolchain
+        run: |
+          c++ --version > "$RUNNER_TEMP/compiler-versions.txt"
+          nvcc --version >> "$RUNNER_TEMP/compiler-versions.txt"
+          ccache --version >> "$RUNNER_TEMP/compiler-versions.txt"
+          sha256sum "$(command -v c++)" "$(command -v nvcc)" "$(command -v ccache)" >> "$RUNNER_TEMP/compiler-versions.txt"
+          printf 'id=%s\n' "$(sha256sum "$RUNNER_TEMP/compiler-versions.txt" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
       - name: Restore compiler cache
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
           # Keep one snapshot per build/kernel configuration, rather than per commit.
-          key: cuda12.8.1-120a-ccache-v1-${{ hashFiles('.github/workflows/server-compat.yml', 'CMakeLists.txt', 'kvmem/CMakeLists.txt', 'patches/**', 'llama.cpp/ggml/src/ggml-cuda/**') }}
-          restore-keys: cuda12.8.1-120a-ccache-v1-
+          key: cuda12.8.1-120a-ccache-v1-${{ steps.toolchain.outputs.id }}-${{ hashFiles('.github/workflows/server-compat.yml', 'CMakeLists.txt', 'kvmem/CMakeLists.txt', 'patches/**', 'llama.cpp/ggml/src/ggml-cuda/**') }}
+          restore-keys: |
+            cuda12.8.1-120a-ccache-v1-${{ steps.toolchain.outputs.id }}-
+            cuda12.8.1-120a-ccache-v1-
       - name: Prepare the CUDA driver stub for linking
         run: |
           mkdir -p "$RUNNER_TEMP/cuda-driver-stubs"
