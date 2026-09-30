@@ -78,17 +78,29 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     container: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 1G
+      CCACHE_COMPILERCHECK: content
     steps:
       - name: Install build dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build libssl-dev python3 time
+          apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build libssl-dev python3 time ccache zstd
       - uses: actions/checkout@v4
         with:
           submodules: true
       - run: bash scripts/apply-patches.sh
+      - name: Restore compiler cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          # Keep one snapshot per build/kernel configuration, rather than per commit.
+          key: cuda12.8.1-120a-ccache-v1-${{ hashFiles('.github/workflows/server-compat.yml', 'CMakeLists.txt', 'kvmem/CMakeLists.txt', 'patches/**', 'llama.cpp/ggml/src/ggml-cuda/**') }}
+          restore-keys: cuda12.8.1-120a-ccache-v1-
       - name: Prepare the CUDA driver stub for linking
         run: |
           mkdir -p "$RUNNER_TEMP/cuda-driver-stubs"
@@ -99,18 +111,23 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DBUILD_SHARED_LIBS=ON -DKVMEM_BUILD_LLAMA=ON
           -DKVMEM_ENABLE_NVME=ON -DGGML_CUDA=ON -DGGML_NATIVE=OFF
+          -DGGML_CCACHE=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
           -DCMAKE_CUDA_ARCHITECTURES=120a-real
           -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,$RUNNER_TEMP/cuda-driver-stubs"
       - name: Build and link all targets
-        # Standard public-repository Linux runners provide 4 CPUs and 16 GB RAM.
         run: |
           nproc
           free -h
-          /usr/bin/time -v cmake --build build --parallel 4
+          ccache --zero-stats
+          /usr/bin/time -v cmake --build build --parallel 2
           if [ -r /sys/fs/cgroup/memory.peak ]; then
             printf 'Container peak memory (bytes): '
             cat /sys/fs/cgroup/memory.peak
           fi
+      - name: Compiler cache statistics
+        if: ${{ always() }}
+        run: ccache --show-stats
   # Keep the existing required check name and fail if any backend check is skipped or fails.
   host-and-server-units-linux:
     if: ${{ always() }}
