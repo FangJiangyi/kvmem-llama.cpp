@@ -106,13 +106,14 @@ std::string kvmem_parse_media_messages(const std::string & body, bool allow_imag
     server_chat_params params;
     params.allow_image = allow_images;
     params.allow_audio = false;
-    params.allow_video = false;
+    params.allow_video = allow_images;
     oaicompat_chat_process_media(parsed, params, files);
     return parsed.dump();
 }
 
 kvmem_vision::kvmem_vision(llama_model * model, const std::string & path, bool gpu,
-                           ggml_backend_dev_t device, int min_tokens, int max_tokens, int n_threads) {
+                           ggml_backend_dev_t device, int min_tokens, int max_tokens, int n_threads,
+                           float video_fps) : video_fps_(video_fps) {
     auto params = mtmd_context_params_default();
     params.media_marker = get_media_marker();
     params.use_gpu = gpu;
@@ -135,7 +136,9 @@ kvmem_vision::~kvmem_vision() { mtmd_free(ctx_); }
 
 std::shared_ptr<kvmem_prompt> kvmem_vision::tokenize(const std::string & prompt,
                                                  const std::vector<std::vector<uint8_t>> & files) {
-    auto native = std::make_shared<server_tokens>(process_mtmd_prompt(ctx_, prompt, files, mtmd_helper_init_opt_default()));
+    auto opt = mtmd_helper_init_opt_default();
+    opt.video_params.fps_target = video_fps_;
+    auto native = std::make_shared<server_tokens>(process_mtmd_prompt(ctx_, prompt, files, opt));
     return std::make_shared<kvmem_prompt>(std::move(native));
 }
 
