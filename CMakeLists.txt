@@ -329,6 +329,12 @@ if (KVMEM_BUILD_LLAMA)
     add_test(NAME kvmem-gdn-replay-test COMMAND kvmem-gdn-replay-test)
     set_tests_properties(kvmem-gdn-replay-test PROPERTIES SKIP_RETURN_CODE 77)
 
+    add_executable(kvmem-gdn-output-fusion-test tests/gdn-output-fusion-test.cpp)
+    target_link_libraries(kvmem-gdn-output-fusion-test PRIVATE ggml)
+    add_test(NAME kvmem-gdn-output-fusion-test COMMAND ${CMAKE_COMMAND} -E env
+        --unset=KVMEM_GDN_OUT_FUSION $<TARGET_FILE:kvmem-gdn-output-fusion-test>)
+    set_tests_properties(kvmem-gdn-output-fusion-test PROPERTIES SKIP_RETURN_CODE 77)
+
 elseif (KVMEM_BUILD_SERVER_TESTS)
     # These tests use llama-common and mtmd, without the GPU-only KVMem adapter.
     set(LLAMA_KVMEM OFF CACHE BOOL "" FORCE)

@@ -318,10 +318,11 @@ def main():
     nvml = None
     if gpu_api == 'rocm':
         sampler = RocmSampler(args.gpu_index, folder)
-    elif os.name == 'nt':
+    elif os.name == 'nt' and not Path(os.environ.get('WINDIR', r'C:\Windows'), 'System32', 'nvml.dll').is_file():
         sampler = WindowsNvidiaSampler(args.gpu_index, folder)
     else:
-        nvml = ctypes.CDLL('libnvidia-ml.so.1')
+        nvml = ctypes.CDLL(str(Path(os.environ.get('WINDIR', r'C:\Windows'), 'System32', 'nvml.dll'))
+                          if os.name == 'nt' else 'libnvidia-ml.so.1')
         assert nvml.nvmlInit_v2() == 0
         device = ctypes.c_void_p()
         assert nvml.nvmlDeviceGetHandleByIndex_v2(
@@ -336,7 +337,8 @@ def main():
     baseline_swap, _ = system_swap()
     swap_stop = {}
     with (folder / 'server.stderr.log').open('w') as fh:
-        proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=fh)
+        proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=fh,
+                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
     (folder / 'pid').write_text(str(proc.pid))
     sampler.start()
     rss_stop = threading.Event()
@@ -344,9 +346,32 @@ def main():
     rss_phase_peaks = {}
     def sample_rss():
         if os.name == 'nt':
+            class ProcessMemory(ctypes.Structure):
+                _fields_ = [('cb', ctypes.c_ulong), ('faults', ctypes.c_ulong)] + [
+                    (name, ctypes.c_size_t) for name in ('peak_working_set', 'working_set',
+                    'peak_paged_pool', 'paged_pool', 'peak_nonpaged_pool', 'nonpaged_pool',
+                    'pagefile', 'peak_pagefile', 'private')]
+            psapi = ctypes.WinDLL('psapi', use_last_error=True)
+            psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessMemory), ctypes.c_ulong]
+            psapi.GetProcessMemoryInfo.restype = ctypes.c_int
+            start = time.monotonic()
             with (folder / 'rss.csv').open('w') as output:
-                csv.writer(output).writerow(
-                    ['elapsed_s', 'phase', 'rss_mib', 'anon_mib', 'file_mib', 'swap_mib'])
+                writer = csv.writer(output)
+                writer.writerow(['elapsed_s', 'phase', 'rss_mib', 'anon_mib', 'file_mib', 'swap_mib', 'private_mib'])
+                while not rss_stop.is_set():
+                    memory = ProcessMemory()
+                    memory.cb = ctypes.sizeof(memory)
+                    if not psapi.GetProcessMemoryInfo(ctypes.c_void_p(int(proc._handle)), ctypes.byref(memory), memory.cb):
+                        if proc.poll() is not None:
+                            break
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    value = memory.working_set / 2**20
+                    phase = sampler.phase
+                    rss_samples.append(value)
+                    rss_phase_peaks[phase] = max(rss_phase_peaks.get(phase, 0), value)
+                    writer.writerow([time.monotonic() - start, phase, value, None, None, None, memory.private / 2**20])
+                    output.flush()
+                    rss_stop.wait(.2)
             return
         start = time.monotonic()
         with (folder / 'rss.csv').open('w') as output:
