@@ -84,7 +84,7 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build libssl-dev python3
+          apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build libssl-dev python3 time
       - uses: actions/checkout@v4
         with:
           submodules: true
@@ -102,7 +102,15 @@ jobs:
           -DCMAKE_CUDA_ARCHITECTURES=120a-real
           -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,$RUNNER_TEMP/cuda-driver-stubs"
       - name: Build and link all targets
-        run: cmake --build build --parallel 2
+        # Standard public-repository Linux runners provide 4 CPUs and 16 GB RAM.
+        run: |
+          nproc
+          free -h
+          /usr/bin/time -v cmake --build build --parallel 4
+          if [ -r /sys/fs/cgroup/memory.peak ]; then
+            printf 'Container peak memory (bytes): '
+            cat /sys/fs/cgroup/memory.peak
+          fi
   # Keep the existing required check name and fail if any backend check is skipped or fails.
   host-and-server-units-linux:
     if: ${{ always() }}
