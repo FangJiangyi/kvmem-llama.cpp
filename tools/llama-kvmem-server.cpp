@@ -35,6 +35,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <cstdlib>
@@ -2332,10 +2333,10 @@ int main(int argc, char ** argv) {
             try {
                 size_t used = 0;
                 const float f = std::stof(value, &used);
-                if (used != value.size()) throw std::invalid_argument("number required");
+                if (used != value.size() || !std::isfinite(f)) throw std::invalid_argument("finite number required");
                 video_fps = f;
             } catch (...) {
-                fprintf(stderr, "%s requires a number (<=0 uses the video's native fps)\n", arg);
+                fprintf(stderr, "%s requires a finite number (<=0 uses the video's native fps)\n", arg);
                 return 1;
             }
         } else if (eq(arg, "--ui-dir")) {
@@ -2890,7 +2891,8 @@ int main(int argc, char ** argv) {
         // 中文：当前 kvmem 的 llama.cpp 尚无 llama_model_ftype_name()，保留空字段以兼容上游 UI 展示
         {"model_ftype", ""},
         {"model_path", model_path},
-        {"modalities", {{"vision", st.vision != nullptr}, {"audio", false}, {"video", st.vision != nullptr}}},
+        {"modalities", {{"vision", st.vision != nullptr}, {"audio", false},
+                        {"video", st.vision && st.vision->supports_video()}}},
         {"media_marker", mtmd_default_marker()},
         {"endpoint_slots", true}, {"endpoint_props", false}, {"endpoint_metrics", false},
         {"ui", !no_ui},
@@ -3033,7 +3035,8 @@ int main(int argc, char ** argv) {
         }        json body;
         std::vector<std::vector<uint8_t>> media_files;
         try {
-            body = json::parse(kvmem_parse_media_messages(body_text, st.vision != nullptr, media_files));
+            body = json::parse(kvmem_parse_media_messages(body_text, st.vision != nullptr,
+                                                        st.vision && st.vision->supports_video(), media_files));
         } catch (const std::exception & e) {
             res.status = 400;
             res.set_content(json{{"error", e.what()}}.dump(), "application/json");
