@@ -31,8 +31,8 @@ slot; only `stage_out` cells are `seq_rm`'d. Flash Attention is not
 modified. P1 recency does not re-RoPE and does not resurrect dropped
 blocks.
 
-The host store is per conversation; the GPU working set and the `llama_context`
-stay single. `--kvmem-conversations N` keeps N host stores alive and
+With the default `--parallel 1`, the host store is per conversation; the GPU
+working set and the `llama_context` stay single. `--kvmem-conversations N` keeps N host stores alive and
 time-multiplexes them, so a conversation that returns after another was served
 does not have to be reprocessed. A switch drains the whole working set to host
 and rebuilds the incoming store's through the drain-and-restage path that
@@ -41,6 +41,26 @@ already runs inside a conversation (the host fallback in
 `src/adapter/llama-memory-kvmem.cpp`), not a second implementation. Requests
 stay serialized and `n_seq_max` stays 1; the recurrent half is still a
 server-side byte snapshot restored per request.
+
+### Two text lanes
+
+`--kvmem --parallel 2` creates two independent target contexts sharing immutable
+model weights. Each lane owns its KV window, host store, recurrent state, MTP
+follower (when enabled), capture state and transfer scratch. The configured context,
+retrieval budget, generation reserve and host RAM budget apply **per lane**.
+Account for both lanes when sizing memory; this does not make one shared window
+twice as large. CUDA transfers use an execution-owned stream with explicit waits.
+
+HTTP requests acquire a lane through FIFO admission. Disconnects cancel queued
+admission, and completion/error/stream teardown release the lease. `/slots` reports
+both physical lanes and response header `X-KVMem-Lane` identifies the selected lane.
+Repeated conversations can land on a different lane; there is no session affinity.
+
+This mode currently accepts text requests on one GPU, with at least four HTTP
+workers. Vision, multiple conversation stores, NVMe session storage and multiple
+GPUs are rejected at startup. It uses independent context execution rather than a
+fused decode batch; throughput improvement depends on the device and workload and
+is not guaranteed. The default single-lane conversation path remains available.
 
 Hardware split on this machine: RTX 5050 (GPU 0) for models < 27B;
 RTX 5090 (GPU 1) for 27B. Details in `scripts/gpu.sh` and

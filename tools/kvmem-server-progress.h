@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <mutex>
+#include <functional>
 
 // HTTP status readers never acquire the model's long-running inference lock.
 class kvmem_server_progress {
@@ -52,14 +53,17 @@ private:
 // Finish the public status before releasing the slot, including error/disconnect paths.
 class kvmem_server_slot_guard {
 public:
-    kvmem_server_slot_guard(std::mutex & mu, kvmem_server_progress & progress)
-        : lock_(mu), progress_(progress) { progress_.start(); }
+    kvmem_server_slot_guard(std::mutex & mu, kvmem_server_progress & progress,
+                            std::function<void()> release = {})
+        : lock_(mu), progress_(progress), release_(std::move(release)) { progress_.start(); }
     ~kvmem_server_slot_guard() { if (lock_.owns_lock()) unlock(); }
     void unlock() {
         progress_.finish();
         lock_.unlock();
+        if (release_) release_();
     }
 private:
     std::unique_lock<std::mutex> lock_;
     kvmem_server_progress & progress_;
+    std::function<void()> release_;
 };
