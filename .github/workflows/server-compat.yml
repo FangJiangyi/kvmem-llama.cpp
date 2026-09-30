@@ -89,6 +89,10 @@ jobs:
         with:
           submodules: true
       - run: bash scripts/apply-patches.sh
+      - name: Prepare the CUDA driver stub for linking
+        run: |
+          mkdir -p "$RUNNER_TEMP/cuda-driver-stubs"
+          ln -s /usr/local/cuda/lib64/stubs/libcuda.so "$RUNNER_TEMP/cuda-driver-stubs/libcuda.so.1"
       - name: Configure the complete CUDA build
         # Compile for Blackwell without probing for a GPU on the standard runner.
         run: >-
@@ -96,6 +100,7 @@ jobs:
           -DBUILD_SHARED_LIBS=ON -DKVMEM_BUILD_LLAMA=ON
           -DKVMEM_ENABLE_NVME=ON -DGGML_CUDA=ON -DGGML_NATIVE=OFF
           -DCMAKE_CUDA_ARCHITECTURES=120a-real
+          -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,$RUNNER_TEMP/cuda-driver-stubs"
       - name: Build and link all targets
         run: cmake --build build --parallel 2
   # Keep the existing required check name and fail if any backend check is skipped or fails.
