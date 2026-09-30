@@ -268,6 +268,13 @@ $env:LLAMA_ARG_API_KEY_FILE = 'C:\config\kvmem-api-keys.txt'
 
 Enable `--kvmem-trace` (or `KVMEM_TRACE=1`) to emit the structured startup records described below. Without tracing, normal startup messages and errors remain available.
 
+CUDA GDN output normalization and SiLU gating fuse by default for supported F32,
+128-column graphs, including Qwen35 dense. Unsupported patterns keep the existing
+operators. No GGUF conversion is needed. Set `KVMEM_GDN_OUT_FUSION=0` before
+starting the server to disable this fusion; an unset variable or `1` enables it.
+`KVMEM_GDN_OUT_FUSION_TRACE=1` logs fusion dispatches for diagnostics; leave it
+unset for timing. See the [implementation and measurements](docs/gdn-output-fusion.md).
+
 Startup first validates configuration, model/projector/UI files and incompatible
 settings before loading model weights. `KVMEM_STARTUP requested=...` records the
 requested configuration. After initialization and a successful port bind,
