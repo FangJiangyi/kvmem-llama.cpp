@@ -70,6 +70,7 @@ if (!$HostOnly) {
     $patch = Join-Path $SourceDir 'patches/llama-kvmem-current.patch'
     $graph = Join-Path $SourceDir 'patches/cuda-graph-decode.patch'
     $gdnOutput = Join-Path $SourceDir 'patches/gdn-output-fusion.patch'
+    $graphReactivation = Join-Path $SourceDir 'patches/cuda-graph-reactivation.patch'
     function Test-PatchApplied([string]$PatchPath) {
         $savedPreference = $ErrorActionPreference
         try {
@@ -91,6 +92,10 @@ if (!$HostOnly) {
     if (!(Test-PatchApplied $gdnOutput)) {
         Invoke-Checked git @('-C', $llama, 'apply', '--ignore-space-change', '--check', $gdnOutput)
         Invoke-Checked git @('-C', $llama, 'apply', '--ignore-space-change', $gdnOutput)
+    }
+    if (!(Test-PatchApplied $graphReactivation)) {
+        Invoke-Checked git @('-C', $llama, 'apply', '--check', $graphReactivation)
+        Invoke-Checked git @('-C', $llama, 'apply', $graphReactivation)
     }
 }
 $options = @('-S', $SourceDir, '-B', $BuildDir, '-G', 'Ninja',
