@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--model', required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--mtp', action='store_true')
+    parser.add_argument('--device', default='CUDA0')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     with socket.socket() as sock:
@@ -28,7 +29,7 @@ def main():
     base = f'http://127.0.0.1:{port}'
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     command = [args.server, '-m', args.model, '--host', '127.0.0.1', '--port', str(port),
-               '-c', '8192', '--parallel', '2', '--threads-http', '8',
+               '-c', '8192', '--device', args.device, '--parallel', '2', '--threads-http', '8',
                '--kvmem', '--kvmem-budget', '2048', '--kvmem-gen-reserve', '1024',
                '--kvmem-cpu-gb', '2', '--kvmem-nvme-gb', '0',
                '-fa', 'on', '--reasoning-effort', 'none', '--temp', '0',
@@ -110,7 +111,8 @@ def main():
                 long_prompts = []
                 for secret in secrets:
                     item = payload(secret, 512)
-                    item['messages'][-1]['content'] += (
+                    item['messages'][-1]['content'] = item['messages'][-1]['content'].replace(
+                        ' What is the secret word? Reply with the word only.', '') + (
                         ' First print the secret word, then count every integer from 1 '
                         'to 10000. Do not skip or abbreviate.')
                     long_prompts.append(item)

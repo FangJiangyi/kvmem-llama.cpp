@@ -68,6 +68,10 @@ struct llama_memory_kvmem::GdnReplay {
 // a condition variable and an io thread, so both travel as unique_ptr, which is
 // how they are already held.
 struct llama_memory_kvmem::ConvStore {
+    const llama_model * model = nullptr;
+    ggml_type type_k = GGML_TYPE_F16, type_v = GGML_TYPE_F16;
+    uint32_t slots = 0;
+    bool has_mtp = false;
     bool cold = false;
     std::unique_ptr<kvmem::KvMemRuntime> runtime;
     std::unique_ptr<kvmem::RawKvStore>   raw;
@@ -79,6 +83,10 @@ struct llama_memory_kvmem::ConvStore {
     std::unique_ptr<kvmem::RawKvStore>   mtp_raw;
     // Block ids that were GPU-resident at detach, ascending.
     std::vector<uint32_t>                resident;
+};
+
+struct llama_kvmem_store_bundle {
+    std::unique_ptr<llama_memory_kvmem::ConvStore> store;
 };
 
 // Detached stores, keyed by an opaque handle. Handle 0 is the store the
@@ -1131,9 +1139,23 @@ bool llama_memory_kvmem::conv_can_drain(std::string & reason) const {
     return true;
 }
 
+bool llama_memory_kvmem::conv_compatible(const llama_memory_kvmem & other) const {
+    return &model_ == &other.model_ && kv_->type_k() == other.kv_->type_k() &&
+        kv_->type_v() == other.kv_->type_v() && n_slots_ == other.n_slots_ &&
+        (mtp_ != nullptr) == (other.mtp_ != nullptr) &&
+        rt_cfg_.store.block_tokens == other.rt_cfg_.store.block_tokens &&
+        rt_cfg_.store.select_budget == other.rt_cfg_.store.select_budget &&
+        rt_cfg_.cpu_bytes == other.rt_cfg_.cpu_bytes;
+}
+
 std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::make_conv() {
     auto conv = std::make_unique<ConvStore>();
-    conv->runtime = std::make_unique<kvmem::KvMemRuntime>(rt_cfg_, &backend_);
+    conv->model = &model_;
+    conv->type_k = kv_->type_k();
+    conv->type_v = kv_->type_v();
+    conv->slots = n_slots_;
+    conv->has_mtp = mtp_ != nullptr;
+    conv->runtime = std::make_unique<kvmem::KvMemRuntime>(rt_cfg_);
     conv->raw = std::make_unique<kvmem::RawKvStore>(raw_cfg_);
     conv->q_sum.assign(n_layer_, std::vector<float>(n_head_ * n_embd_head_, 0.0f));
     conv->q_count.assign(n_layer_, 0);
@@ -1334,11 +1356,18 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv()
         mtp_->harvest_flush();
     }
 
+    // Unbind before moving ownership; this validates that the drain finished.
+    runtime_->rebind_backend(nullptr);
     // Nothing from here to the return may throw. Past these two moves this
     // object owns no store at all and swap_conv's drain catch cannot put them
     // back: the move-assignments are noexcept, swap_raw() only waits on the
     // follower's io thread and fills a vector it sized at construction, and
     // reset_turn_policy() assigns scalars.
+    conv->model = &model_;
+    conv->type_k = kv_->type_k();
+    conv->type_v = kv_->type_v();
+    conv->slots = n_slots_;
+    conv->has_mtp = mtp_ != nullptr;
     conv->runtime = std::move(runtime_);
     conv->raw = std::move(raw_);
     // One statement after the trunk's own mirror, the way truncate_cached()
@@ -1376,6 +1405,7 @@ bool llama_memory_kvmem::attach_conv(std::unique_ptr<ConvStore> conv) {
     row_positions_ = std::move(conv->row_positions);
     q_sum_ = std::move(conv->q_sum);
     q_count_ = std::move(conv->q_count);
+    runtime_->rebind_backend(&backend_);
     if (q_sum_.size() != n_layer_ || q_count_.size() != n_layer_) {
         q_sum_.assign(n_layer_, std::vector<float>(n_head_ * n_embd_head_, 0.0f));
         q_count_.assign(n_layer_, 0);
@@ -1594,6 +1624,13 @@ void llama_memory_kvmem::conv_reset_to_empty(const char * what) noexcept {
 bool llama_memory_kvmem::swap_conv(std::unique_ptr<ConvStore> & conv) {
     if (!conv) {
         return false;
+    }
+    if (conv->model != &model_ || conv->type_k != kv_->type_k() || conv->type_v != kv_->type_v() ||
+            conv->slots != n_slots_ || conv->has_mtp != (mtp_ != nullptr) ||
+            conv->runtime->config().store.block_tokens != rt_cfg_.store.block_tokens ||
+            conv->runtime->config().store.select_budget != rt_cfg_.store.select_budget ||
+            conv->runtime->config().cpu_bytes != rt_cfg_.cpu_bytes) {
+        throw std::invalid_argument("incompatible conversation bundle");
     }
     std::string reason;
     if (!conv_can_drain(reason)) {
@@ -5034,6 +5071,68 @@ bool llama_kvmem_store_swap_supported(void) {
     }
     std::string reason;
     return mem->conv_swap_supported(reason);
+}
+
+bool llama_kvmem_store_compatible_with_execution(const llama_kvmem_execution_state * other) {
+    auto * mem = kvmem_capture_active();
+    return mem && other && other->memory && mem->conv_compatible(*other->memory);
+}
+
+llama_kvmem_store_bundle * llama_kvmem_store_bundle_create() {
+    auto * mem = kvmem_capture_active();
+    std::string reason;
+    if (!mem || !mem->conv_swap_supported(reason)) {
+        throw std::runtime_error("portable conversation bundles require flash attention and host KV");
+    }
+    auto result = std::make_unique<llama_kvmem_store_bundle>();
+    result->store = mem->make_conv();
+    return result.release();
+}
+
+void llama_kvmem_store_bundle_free(llama_kvmem_store_bundle * bundle) {
+    delete bundle;
+}
+
+bool llama_kvmem_store_bundle_swap(llama_kvmem_store_bundle * bundle) {
+    auto * mem = kvmem_capture_active();
+    if (!mem || !bundle || !bundle->store) {
+        throw std::invalid_argument("missing portable conversation bundle");
+    }
+    return mem->swap_conv(bundle->store);
+}
+
+uint32_t llama_kvmem_store_bundle_rows(const llama_kvmem_store_bundle * bundle) {
+    return bundle && bundle->store && bundle->store->runtime
+        ? bundle->store->runtime->store().total_tokens() : 0;
+}
+
+void llama_kvmem_store_bundle_reset(llama_kvmem_store_bundle * bundle) {
+    if (!bundle || !bundle->store) throw std::invalid_argument("missing portable conversation bundle");
+    auto & store = *bundle->store;
+    store.runtime->truncate_to(0);
+    store.raw->truncate_to(0);
+    if (store.mtp_raw) store.mtp_raw->truncate_to(0);
+    store.row_positions.clear();
+    store.resident.clear();
+    for (auto & sum : store.q_sum) std::fill(sum.begin(), sum.end(), 0.0f);
+    std::fill(store.q_count.begin(), store.q_count.end(), 0);
+}
+
+uint64_t llama_kvmem_store_active_bytes() {
+    auto * mem = kvmem_capture_active();
+    return mem ? mem->host_bytes() : 0;
+}
+
+uint64_t llama_kvmem_store_bundle_bytes(const llama_kvmem_store_bundle * bundle) {
+    if (!bundle || !bundle->store) return 0;
+    const auto & store = *bundle->store;
+    uint64_t bytes = store.runtime ? store.runtime->allocated_bytes() : 0;
+    bytes += store.raw ? store.raw->allocated_bytes() : 0;
+    bytes += store.mtp_raw ? store.mtp_raw->allocated_bytes() : 0;
+    bytes += store.row_positions.capacity()*sizeof(store.row_positions.front());
+    bytes += store.resident.capacity()*sizeof(uint32_t) + store.q_count.capacity()*sizeof(uint32_t);
+    for (const auto & sum : store.q_sum) bytes += sizeof(sum) + sum.capacity()*sizeof(float);
+    return bytes;
 }
 
 int32_t llama_kvmem_store_create(void) {

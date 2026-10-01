@@ -181,6 +181,18 @@ LLAMA_API void llama_kvmem_dump_kv_writeback(struct llama_context * ctx, int32_t
 #include <string>
 
 namespace kvmem { class SnapshotWriter; class SnapshotReader; struct SnapshotBuffer; }
+// Portable host bundle. The active bundle is borrowed by a lane; swapping
+// exchanges it with a parked bundle from an identically configured context.
+// Startup-only: both execution domains must be quiescent.
+LLAMA_API bool llama_kvmem_store_compatible_with_execution(const llama_kvmem_execution_state * other);
+struct llama_kvmem_store_bundle;
+LLAMA_API llama_kvmem_store_bundle * llama_kvmem_store_bundle_create();
+LLAMA_API void llama_kvmem_store_bundle_free(llama_kvmem_store_bundle * bundle);
+LLAMA_API bool llama_kvmem_store_bundle_swap(llama_kvmem_store_bundle * bundle);
+LLAMA_API void llama_kvmem_store_bundle_reset(llama_kvmem_store_bundle * bundle);
+LLAMA_API uint64_t llama_kvmem_store_active_bytes();
+LLAMA_API uint32_t llama_kvmem_store_bundle_rows(const llama_kvmem_store_bundle * bundle);
+LLAMA_API uint64_t llama_kvmem_store_bundle_bytes(const llama_kvmem_store_bundle * bundle);
 // Process-local disk-cache hooks. Park leaves an empty, valid execution store
 // attached so the outgoing RAM can be released before a cold store is read.
 LLAMA_API bool llama_kvmem_store_park();

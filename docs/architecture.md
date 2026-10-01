@@ -42,25 +42,28 @@ already runs inside a conversation (the host fallback in
 stay serialized and `n_seq_max` stays 1; the recurrent half is still a
 server-side byte snapshot restored per request.
 
-### Two text lanes
+### Multiple lanes and conversations
 
-`--kvmem --parallel 2` creates two independent target contexts sharing immutable
-model weights. Each lane owns its KV window, host store, recurrent state, MTP
-follower (when enabled), capture state and transfer scratch. The configured context,
-retrieval budget, generation reserve and host RAM budget apply **per lane**.
-Account for both lanes when sizing memory; this does not make one shared window
-twice as large. CUDA transfers use an execution-owned stream with explicit waits.
+`--kvmem --parallel 2 --kvmem-conversations N` creates two independent target
+contexts sharing immutable model weights, with one global host conversation
+pool. Effective N is at least P. Each lane owns its GPU window, recurrent state,
+MTP follower (when enabled), capture state and transfer scratch. GPU context,
+retrieval and generation budgets apply per lane; `--kvmem-cpu-gb` applies per
+host store. Startup verifies compatible KV geometry across lanes.
 
-HTTP requests acquire a lane through FIFO admission. Disconnects cancel queued
-admission, and completion/error/stream teardown release the lease. `/slots` reports
-both physical lanes and response header `X-KVMem-Lane` identifies the selected lane.
-Repeated conversations can land on a different lane; there is no session affinity.
+Admission uses FIFO among ready, eligible conversation heads. Same-ID requests
+serialize; unrelated ready requests can use any free lane. A warm residency is
+preferred, but is never a permanent assignment. A switch quiesces the outgoing
+lane, invalidates its attention/MTP cells and transfers a backend-neutral host
+bundle by ownership, then restores incoming checkpoints. GPU buffers are reused.
 
-This mode currently accepts text requests on one GPU, with at least four HTTP
-workers. Vision, multiple conversation stores, NVMe session storage and multiple
-GPUs are rejected at startup. It uses independent context execution rather than a
-fused decode batch; throughput improvement depends on the device and workload and
-is not guaranteed. The default single-lane conversation path remains available.
+One shared projector can run on CPU or another device, including the lane GPU.
+Stateful tokenization/encoding is serialized before lane admission; immutable
+prepared embeddings are decoded independently. The embedding cache and in-flight
+references share a 128 MiB bound. Text and image requests support optional MTP on
+one CUDA target GPU with at least four HTTP workers. Video/audio, multiple target
+GPUs and NVMe/session disk are outside two-lane support. Throughput depends on the
+workload and device. See [the complete design](multi-lane-conversations.md).
 
 Hardware split on this machine: RTX 5050 (GPU 0) for models < 27B;
 RTX 5090 (GPU 1) for 27B. Details in `scripts/gpu.sh` and

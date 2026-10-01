@@ -42,7 +42,7 @@ Core flags (what the 16 GiB recipes still pass):
 | `--kvmem-budget` | How many historical tokens retrieval may keep on GPU. |
 | `--kvmem-sink-tokens N` | Server and CLI: always keep the prefix in the GPU working set. Default `0` keeps one block (not disabled). Positive values round down to whole blocks, with a minimum of one block. For example, with block size 128, `1024` keeps 1024 tokens and `129` keeps 128. These blocks count toward `--kvmem-budget`. |
 | `--kvmem-gen-reserve` | GPU slots reserved for new tokens so retrieval cannot fill the pool. **One generation cannot exceed this length** (including thinking). |
-| `--kvmem-conversations N` | How many conversations retain their KV in host RAM or the optional session disk cache. Default `1` reproduces earlier behavior, where a different conversation discards the previous one. Higher values let the server switch between conversations without reprocessing them; requests are still served one at a time. Needs flash attention. |
+| `--kvmem-conversations N` | How many conversations retain their KV in host RAM or the optional session disk cache. Default `1` reproduces earlier behavior, where a different conversation discards the previous one. Higher values let the server switch between conversations without reprocessing them. With `--parallel P`, the effective count is `max(N, P)` and up to P requests run together. Needs flash attention. |
 | `--kvmem-conversations-gb GB` | Soft cap on accounted RAM summed over active and inactive sessions. Move inactive sessions to NVMe by LRU when enabled, or evict them when RAM-only; an oversized active session continues with a warning. Default `0` means no byte cap. Requires `--kvmem-conversations N` with `N > 1`. |
 | `--kvmem-session-ram-gb GB` | Alias for the total active + inactive session RAM **soft** cap. Active KV may exceed it; idle KV moves to NVMe by LRU when enabled. `0` remains unlimited. |
 | `--kvmem-session-nvme-gb GB` | Enable disk storage for inactive sessions with this total quota. RAM pressure spills sessions to disk; disk pressure discards them by LRU. Default `0` disables it. |
@@ -54,7 +54,7 @@ Core flags (what the 16 GiB recipes still pass):
 
 KVMem retrieval is on by default, with 128-token blocks, query replay `auto`, query policy `user`, MTP draft length 3, F16 draft KV, and ReplaySSM. You do not need to pass those unless you are overriding them. GPU KV size is `budget + gen_reserve`. When history exceeds `--kvmem-budget`, retrieval picks blocks for the current last-user query. Clients should send the full `messages` history each turn.
 
-With `--kvmem-conversations` above 1, that history is also the conversation's identity: no client API change and no conversation id are required. A request that continues a stored conversation extends it, while a request that only shares a system prompt or chat template starts a separate one instead of truncating the stored tail. A match is usable only when a recurrent checkpoint exists at or before it; otherwise the request is an ordinary cache miss. Details and limits are in [Multi-conversation KV cache](docs/multi-conversation-kv-cache.md).
+With `--kvmem-conversations` above 1, that history is also the conversation's identity: no client API change and no conversation id are required. A request that continues a stored conversation extends it, while a request that only shares a system prompt or chat template starts a separate one instead of truncating the stored tail. A match is usable only when a recurrent checkpoint exists at or before it; otherwise the request is an ordinary cache miss. Details and limits are in [Multi-conversation KV cache](docs/multi-conversation-kv-cache.md). Combine `--parallel 2 --kvmem-conversations 3` for two GPU working sets and three host caches with dynamic lane assignment; see [Multi-lane conversations](docs/multi-lane-conversations.md).
 
 For example, add `--kvmem-conversations 3 --kvmem-session-ram-gb 12 --kvmem-session-nvme-gb 40 --kvmem-session-cache-dir D:/KVMem/session-cache` to retain sessions across RAM and disk. The active session must fit the machine's actual RAM. A new server run reclaims marked, unlocked cache directories left by earlier runs, while preserving live servers' caches. Legacy directories without a marker and files that fail deletion need manual attention. See [Session disk cache](docs/session-disk-cache.md) for accounting and recovery, the [1:10 multi-session stability test](docs/session-exchange-stability.md) for the large exchange check, and the [three-session 5 GiB K8/V4 test](docs/three-session-5g-k8v4-stability.md) for a real-model 10 GiB NVMe and cold-prefill comparison.
 
@@ -154,9 +154,9 @@ yet accept every `llama-server` option.
 | `-a`, `--alias` | Model name returned by `/v1/models`, `/props` and chat responses. |
 | `--api-key`, `--api-key-file` | API authentication; details below. |
 | `-lm`, `--load-mode` | `auto`, `none`, `mmap`, `mlock`, `mmap+mlock`, `dio`; legacy `--mmap`, `--no-mmap`, `--mlock` map to the corresponding mode. Last loading-mode flag wins. |
-| `-np`, `--parallel` | `1` (default), or `2` independent text lanes sharing model weights. Two lanes require one GPU and no vision, conversation or NVMe cache; budgets apply per lane. See [architecture](docs/architecture.md#two-text-lanes). |
+| `-np`, `--parallel` | `1` (default), or `2` independent inference lanes sharing model weights and a global conversation pool. Supports text/images and optional MTP on one CUDA device, with a shared CPU/GPU projector. NVMe/session disk remains single-lane. KV budgets apply per lane; host RAM budgets apply per conversation. See [design](docs/multi-lane-conversations.md). |
 | `-to`, `--timeout` | HTTP read/write timeout in seconds; KVMem retains its 1800-second default. |
-| `--threads-http` | HTTP worker count; <= 0 selects automatically. This does not enable parallel inference slots. |
+| `--threads-http` | HTTP worker count; <= 0 selects automatically. Use `--parallel` to enable two inference lanes; two lanes require at least four HTTP workers. |
 | `-dev`, `--device`; `--list-devices` | Select one device or an explicit CUDA list such as `CUDA0,CUDA1`; `none` selects CPU. List devices without loading a model. |
 | `-mg`, `--main-gpu`; `-sm`, `--split-mode` | Experimental CUDA multi-GPU supports `layer` or `tensor` with `--gpu-layers all`. `none` remains available for one GPU. |
 | `-ts`, `--tensor-split` | Split proportions, with one value for each explicitly selected GPU. |
@@ -220,6 +220,9 @@ Regression checks: `kvmem-server-options-test` and
 `python scripts/test_server_compat.py --server /path/to/llama-kvmem-server`.
 Add `--model PATH` for live auth/inference checks, `--mtp` for MTP, and
 `--mmproj PATH --image PATH` for the optional vision fixture containing `6037`.
+Dynamic lane/conversation integration (optional `--mmproj`, `--mmproj-device`, `--mtp`):
+`python scripts/test_server_lane_conversations.py --server PATH --model PATH --output DIR`.
+
 Interleaved conversations need a model of their own:
 `python scripts/test_server_conversations.py --server PATH --model PATH --output DIR`.
 

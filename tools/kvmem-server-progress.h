@@ -50,7 +50,7 @@ private:
     state data_;
 };
 
-// Finish the public status before releasing the slot, including error/disconnect paths.
+// Finalize cached state while the slot lock is still held, including error/disconnect paths.
 class kvmem_server_slot_guard {
 public:
     kvmem_server_slot_guard(std::mutex & mu, kvmem_server_progress & progress,
@@ -58,9 +58,9 @@ public:
         : lock_(mu), progress_(progress), release_(std::move(release)) { progress_.start(); }
     ~kvmem_server_slot_guard() { if (lock_.owns_lock()) unlock(); }
     void unlock() {
+        if (release_) release_();
         progress_.finish();
         lock_.unlock();
-        if (release_) release_();
     }
 private:
     std::unique_lock<std::mutex> lock_;
