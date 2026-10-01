@@ -152,6 +152,103 @@ static void test_tools_max_tokens_and_reasoning() {
     CHECK(out["tools"][0]["function"]["name"] == "f");
 }
 
+// ---------------------------------------------------------------------------
+// System/developer message placement
+//
+// The Jinja templates of the hybrid models this server targets raise
+//     'System message must be at the beginning.'
+// unless they see exactly one system message, first. Two separate things can
+// put a system message in front of the template:
+//
+//   * `instructions` is converted upstream into a leading system message;
+//   * a system/developer item inside `input` is passed through untouched.
+//
+// and upstream then rewrites `developer` to `system` unconditionally
+// (common/chat.cpp, workaround::map_developer_role_to_system). The only
+// workaround that would merge the two, system_message_not_supported, is gated
+// on the template *not* declaring support for a system role -- which is
+// exactly the case that never needs it. So both messages reach the template
+// and the render throws.
+//
+// The tests below pin the request shapes it came from. tools/kvmem-responses.cpp
+// now folds the extra system/developer turn into the leading one, so each of
+// these asserts exactly one system message, with both texts preserved, sitting
+// at messages[0]. See tests/test_responses_wire.py for the live-server half.
+// ---------------------------------------------------------------------------
+
+static size_t system_message_count(const json & out) {
+    size_t n = 0;
+    for (const auto & m : out["messages"]) {
+        if (m["role"] == "system") {
+            n++;
+        }
+    }
+    return n;
+}
+
+static void test_instructions_plus_input_developer_merge_into_one_system() {
+    // The shape @ai-sdk/openai replays once a developer note has been sent: the
+    // note comes back inside `input` and `instructions` is set as well. Upstream
+    // would rewrite the developer item to a second system message after this
+    // bridge, so the merge has to happen here.
+    const auto out = convert(R"({
+        "instructions": "be brief",
+        "input": [
+            {"role": "user", "content": "hi"},
+            {"role": "developer", "content": "be formal"}
+        ]
+    })");
+    CHECK(system_message_count(out) == 1);
+    CHECK(out["messages"].size() == 2);
+    CHECK(out["messages"][0]["role"] == "system");
+    CHECK(out["messages"][0]["content"] == "be brief\n\nbe formal");
+    CHECK(out["messages"][1]["role"] == "user");
+}
+
+static void test_instructions_plus_input_system_merge_into_one_system() {
+    // `instructions` plus a system item in `input`: upstream turns the first into
+    // a leading system turn and passes the second through, so the template is
+    // handed two and raises 'System message must be at the beginning.'
+    const auto out = convert(R"({
+        "instructions": "be brief",
+        "input": [
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "be formal"}
+        ]
+    })");
+    CHECK(system_message_count(out) == 1);
+    CHECK(out["messages"].size() == 2);
+    CHECK(out["messages"][0]["role"] == "system");
+    CHECK(out["messages"][0]["content"] == "be brief\n\nbe formal");
+    CHECK(out["messages"][1]["role"] == "user");
+}
+
+static void test_input_system_without_instructions_becomes_the_system_turn() {
+    // No `instructions`: the input system item is the only one, but it still has
+    // to become the leading system turn rather than a later one.
+    const auto out = convert(R"({"input": [
+        {"role": "user", "content": "hi"},
+        {"role": "system", "content": "be formal"}
+    ]})");
+    CHECK(system_message_count(out) == 1);
+    CHECK(out["messages"].size() == 2);
+    CHECK(out["messages"][0]["role"] == "system");
+    CHECK(out["messages"][0]["content"] == "be formal");
+    CHECK(out["messages"][1]["role"] == "user");
+}
+
+static void test_input_system_first_is_left_alone() {
+    // A system item that is already the only one, first, has nothing to merge
+    // with; its text must survive.
+    const auto out = convert(R"({"input": [
+        {"role": "system", "content": "be formal"},
+        {"role": "user", "content": "hi"}
+    ]})");
+    CHECK(system_message_count(out) == 1);
+    CHECK(out["messages"][0]["role"] == "system");
+    CHECK(out["messages"][0]["content"] == "be formal");
+}
+
 static void test_stream_passthrough() {
     // The server rejects streaming Responses itself; the bridge must not drop it.
     const auto out = convert(R"({"input": "hi", "stream": true})");
@@ -531,6 +628,10 @@ int main() {
     test_reasoning_item_with_content_is_left_alone();
     test_assistant_message_without_type_is_typed();
     test_tools_max_tokens_and_reasoning();
+    test_instructions_plus_input_developer_merge_into_one_system();
+    test_instructions_plus_input_system_merge_into_one_system();
+    test_input_system_without_instructions_becomes_the_system_turn();
+    test_input_system_first_is_left_alone();
     test_stream_passthrough();
     test_rejects_bad_input();
     test_stream_created();

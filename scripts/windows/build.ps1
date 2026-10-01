@@ -7,6 +7,7 @@ param(
     [switch]$ExperimentalCuda129,
     [switch]$Vulkan,
     [string]$CudaArchitectures = '75-real;80-real;86-real;89-real;90-real;120a-real',
+    [string]$BuildType = 'Release',
     [ValidateRange(1, 64)][int]$Jobs = 4,
     [switch]$HostOnly,
     [switch]$BuildOnly
@@ -61,7 +62,14 @@ if (Test-Path -LiteralPath $ninjaRules) {
 }
 $rulesOverride = Join-Path $BuildDir 'kvmem-msvc-rules.cmake'
 $escapedPrefix = $includePrefix.Replace('\', '\\').Replace('"', '\"')
-[IO.File]::WriteAllText($rulesOverride, "set(CMAKE_CL_SHOWINCLUDES_PREFIX `"$escapedPrefix`")`n", [Text.UTF8Encoding]::new($false))
+# CMAKE_USER_MAKE_RULES_OVERRIDE replaces MSVC's whole default rule set, which
+# drops the /EHsc that CMake normally seeds CMAKE_CXX_FLAGS_INIT with. Without
+# it a throw unwinds into std::terminate, so any test that expects an exception
+# dies with 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN) and prints nothing. Put it
+# back, in every configuration.
+$rulesBody = "set(CMAKE_CL_SHOWINCLUDES_PREFIX `"$escapedPrefix`")`n" +
+             "set(CMAKE_CXX_FLAGS_INIT `"/EHsc`")`n"
+[IO.File]::WriteAllText($rulesOverride, $rulesBody, [Text.UTF8Encoding]::new($false))
 
 
 if (!$HostOnly) {
@@ -99,7 +107,7 @@ if (!$HostOnly) {
     }
 }
 $options = @('-S', $SourceDir, '-B', $BuildDir, '-G', 'Ninja',
-    '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_CXX_COMPILER=cl',
+    '-DCMAKE_BUILD_TYPE=' + $BuildType, '-DCMAKE_CXX_COMPILER=cl',
     "-DCMAKE_USER_MAKE_RULES_OVERRIDE=$rulesOverride",
     '-DBUILD_SHARED_LIBS=OFF', '-DKVMEM_ENABLE_NVME=OFF')
 if (!$HostOnly) {
