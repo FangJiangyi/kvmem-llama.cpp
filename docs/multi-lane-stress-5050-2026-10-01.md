@@ -126,3 +126,79 @@ nothing, and terminates only its own server. This run's local evidence is in
 one-second `samples.jsonl`, and `server.log`. Regression evidence is in
 `artifacts/single-lane-conversations-stress-fix/` and
 `artifacts/lane-conversations-vision-gpu-stress-fix/`. Artifacts are ignored by Git.
+
+## Four-lane follow-up
+
+At the user's request, commit `67624c7056a3ab52ffd0595ce3fc7ac72be2f9c7`
+extends the CLI to `--parallel 1..4`. The lane pool, context creation and global
+conversation scheduler already use dynamic collections. Multi-lane startup
+restrictions now apply to every P>1 instead of only P=2. Explicit HTTP worker
+counts must be at least `2 * P`, and automatic/default selection enforces the
+same floor. N is still normalized to `max(N, P)`.
+
+The follow-up also fixes the patch file's checkout line endings. Removing
+space-only context lines exposed a Git parser failure when Windows checkout
+converted empty context lines to CRLF. `.gitattributes` now keeps this patch LF.
+A simulated `core.autocrlf=true` checkout and reverse/apply/repeat checks passed;
+all seven CI jobs, including Windows and the Linux CUDA build, passed for the
+four-lane code commit.
+
+The RTX 5050/model, prompts, eight-store cap, 24 logical IDs, client ramps,
+ten-minute churn duration and default graph settings match the two-lane test.
+The stress script now accepts `--parallel`, validates the full lane-ID range,
+fails on serial-output mismatches, and verifies that every physical lane served
+load and that all lanes were simultaneously active in at least one sample.
+
+| P=4 phase | Clients | Duration (s) | Completed | Canceled | Expected HTTP 400 | Output tokens/s | First-token P95 (s) | Completion P95 (s) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Ramp | 2 | 61.835 | 45 | 2 | 3 | 121.24 | 1.706 | 3.541 |
+| Ramp | 4 | 63.802 | 53 | 1 | 3 | 123.74 | 4.707 | 9.014 |
+| Ramp | 8 | 68.205 | 50 | 2 | 3 | 121.27 | 17.126 | 22.717 |
+| Ramp | 16 | 76.705 | 62 | 3 | 3 | 120.50 | 23.169 | 25.207 |
+| Ten-minute churn | 16 | 621.344 | 461 | 21 | 39 | 112.76 | 24.008 | 28.789 |
+
+The full run took 965.453 seconds. Including calibration and recovery, 743
+requests completed, 29 were deliberately canceled and 53 were rejected as
+expected. There were zero errors and zero secret/hash mismatches. All 671
+completed load requests and 24 recovery requests matched their serial hashes.
+All 24 IDs recovered, invalid requests left the idle pool untouched, and all
+four lanes became idle. The host-store count stayed at or below eight, ending
+with 613 switches, 251 evictions, 513 extends and 259 forks.
+
+Churn completed 111/113/122/115 requests on lanes 0/1/2/3 respectively. All four
+lanes were active in 594 of 598 samples. Sampled RTX 5050 usage peaked at
+3412 MiB (3.33 GiB), about 1.25 GiB above the P=2 run, and returned to zero after
+cleanup. Whole-run temperature peaked at 75 degrees C. Working-set/private-byte
+peaks were 3138.93/7599.26 MiB. Churn first-minute medians were
+1801.11/7400.15 MiB; last-minute medians were 1110.00/7360.36 MiB. No sustained
+private-byte or GPU-memory growth was observed. Working-set reductions alone
+do not establish reclamation by the application.
+
+The other GPU had an independent intermittent workload during this follow-up.
+It was idle in all sampled P=4 two-client and sixteen-client ramp readings,
+but active in 60/65 eight-client ramp samples and 115/598 churn samples; churn
+utilization on that other GPU averaged 13.5%. Shared CPU/system-memory activity
+can affect results. These are successive stability runs, not an isolated
+performance A/B benchmark. The observed four-lane run used more GPU memory
+without a throughput increase; additional lanes do not automatically multiply
+the card's compute capacity.
+
+| Four-lane-related regression | Result |
+|---|---|
+| Windows CTest, including four-lane admission/FIFO and option bounds | 16/16 passed |
+| CLI compatibility, bounds, startup restrictions and worker minimums | 90/90 passed |
+| P=4, N=5: parked KV, actual cross-lane migration and queue/cancel recovery | 42/42 passed |
+| P=4, requested N=1: N becomes 4, full-capacity recycling and recovery | 35/35 passed |
+| P=3, N=4: intermediate lane count and cross-lane restoration | 38/38 passed |
+| P=4, N=4 short pressure, 4/8/16 clients and eight logical IDs | 92 completed, zero errors |
+| Four-lane code commit CI | 7/7 jobs passed |
+
+These four-lane hardware checks use text without MTP/projector. The earlier
+27B MTP/projector results above used P=2; sustained multimedia/MTP pressure and
+multi-hour four-lane runs remain unmeasured.
+
+Reproduce with the earlier command plus `--parallel 4`, using a fresh output
+directory. Local evidence is in `artifacts/stress-5050-p4-full/`,
+`artifacts/stress-5050-p4-smoke-2/`, `artifacts/lane-conversations-p4-n5/`,
+`artifacts/lane-conversations-p4-n1/`, `artifacts/lane-conversations-p3-n4/`, and
+`artifacts/cli-compat-parallel4/`.

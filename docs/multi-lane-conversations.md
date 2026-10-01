@@ -131,8 +131,11 @@ images; they verify correctness and overlap, not a throughput improvement.
 Linux builds and host tests remain covered by the repository's GitHub workflow.
 
 The [RTX 5050 stress-test report](multi-lane-stress-5050-2026-10-01.md) records
-2/4/8/16-client ramps, ten minutes of cache churn, the decode-graph bug found
-under load, its correction and the subsequent recovery/regression checks.
+2/4/8/16-client ramps and ten minutes of cache churn for P=2 and P=4, the
+decode-graph bug found under load, its correction and subsequent recovery/
+regression checks. The four-lane run completed 743 requests with zero errors;
+P=4/N=5 migration and P=4/N=1 normalization also passed. It observed no
+throughput gain on this small-model workload and used about 1.25 GiB more VRAM.
 
 This builds on [qzshch's PR #94](https://github.com/kvmem/kvmem-llama.cpp/pull/94).
 Its original commit `3cc1c651d5ea64c36e3880ea71c7713823730423` is retained as an
