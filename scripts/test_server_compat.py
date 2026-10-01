@@ -37,7 +37,7 @@ def check(name, ok):
 try:
     invalid = [
         ['--gpu-layers', 'auto'], ['-ngl', '-1'], ['-ngl', 'abc'],
-        ['--parallel', '2'], ['-np', '0'], ['--threads', '4oops'],
+        ['--parallel', '3'], ['-np', '0'], ['--threads', '4oops'],
         ['--threads-batch', '2147483648'], ['-ub', '0'], ['-ub', '-1'],
         ['--batch-size', 'abc'], ['--ctx-size', '-1'], ['--port', '65536'],
         ['--flash-attn', 'maybe'], ['--alias', ''], ['--api-key', ''],
@@ -76,6 +76,19 @@ try:
         text = r.stderr.decode(errors='replace')
         check('reject ' + ' '.join(flags), r.returncode != 0 and
               'failed to load model' not in text and ('invalid' in text or 'missing value' in text))
+    for flags in [
+            ['--parallel', '2', '--no-kvmem'],
+            ['--parallel', '2', '--mmproj', '__missing_projector__.gguf'],
+            ['--parallel', '2', '--device', 'none'],
+            ['--parallel', '2', '--gpu-layers', '0'],
+            ['--parallel', '2', '--kvmem-conversations', '2'],
+            ['--parallel', '2', '--threads-http', '3']]:
+        r = subprocess.run([a.server, '-m', '__nonexistent__.gguf', *flags], env=env,
+                           capture_output=True, timeout=20)
+        text = r.stderr.decode(errors='replace')
+        check('reject unsupported two-lane combination ' + ' '.join(flags),
+              r.returncode != 0 and 'failed to load model' not in text and
+              'KVMEM_STARTUP_ERROR --parallel 2 requires' in text)
     # Accepted aliases must get as far as the missing model, not silently become zero.
     for flags in [['-ngl', 'all'], ['--gpu-layers', '0'],
                   ['-t', '2', '-tb', '3', '-ub', '64', '-fa', 'on', '-np', '1'],

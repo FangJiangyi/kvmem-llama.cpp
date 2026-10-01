@@ -142,7 +142,7 @@ Chat histories stay in this browser. Switching histories can require recomputing
 
 The rc3 version of `llama-kvmem-server` accepts the common flags below with
 their llama.cpp meanings. Use the rc3 binaries or rebuild from source; rc2
-binaries predate these additions. This is an independent, single-slot server, so it does not
+binaries predate these additions. This is an independent server with one lane by default, so it does not
 yet accept every `llama-server` option.
 
 | Options | Meaning |
@@ -154,7 +154,7 @@ yet accept every `llama-server` option.
 | `-a`, `--alias` | Model name returned by `/v1/models`, `/props` and chat responses. |
 | `--api-key`, `--api-key-file` | API authentication; details below. |
 | `-lm`, `--load-mode` | `auto`, `none`, `mmap`, `mlock`, `mmap+mlock`, `dio`; legacy `--mmap`, `--no-mmap`, `--mlock` map to the corresponding mode. Last loading-mode flag wins. |
-| `-np`, `--parallel` | Only `1` is supported. Automatic or multiple slots produce an error. |
+| `-np`, `--parallel` | `1` (default), or `2` independent text lanes sharing model weights. Two lanes require one GPU and no vision, conversation or NVMe cache; budgets apply per lane. See [architecture](docs/architecture.md#two-text-lanes). |
 | `-to`, `--timeout` | HTTP read/write timeout in seconds; KVMem retains its 1800-second default. |
 | `--threads-http` | HTTP worker count; <= 0 selects automatically. This does not enable parallel inference slots. |
 | `-dev`, `--device`; `--list-devices` | Select one device or an explicit CUDA list such as `CUDA0,CUDA1`; `none` selects CPU. List devices without loading a model. |
@@ -239,7 +239,7 @@ A CLI key does not revoke an environment key.
 | `LLAMA_ARG_HOST`, `LLAMA_ARG_PORT`, `LLAMA_ARG_TIMEOUT`, `LLAMA_ARG_THREADS_HTTP` | HTTP server |
 | `LLAMA_ARG_CTX_SIZE`, `LLAMA_ARG_N_PREDICT`, `LLAMA_ARG_BATCH`, `LLAMA_ARG_UBATCH`, `LLAMA_ARG_THREADS` | Context, output and CPU/batch configuration |
 | `LLAMA_ARG_DEVICE`, `LLAMA_ARG_N_GPU_LAYERS`, `LLAMA_ARG_MAIN_GPU`, `LLAMA_ARG_SPLIT_MODE`, `LLAMA_ARG_TENSOR_SPLIT` | GPU selection; the same CUDA layer/tensor multi-GPU restrictions apply |
-| `LLAMA_ARG_FLASH_ATTN`, `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CACHE_TYPE_V`, `LLAMA_ARG_N_PARALLEL` | Attention, KV types and single-slot configuration |
+| `LLAMA_ARG_FLASH_ATTN`, `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CACHE_TYPE_V`, `LLAMA_ARG_N_PARALLEL` | Attention, KV types and lane count |
 | `LLAMA_ARG_LOAD_MODE`, `LLAMA_ARG_MMAP`, `LLAMA_ARG_MLOCK` | Model loading; legacy environment options apply before `LOAD_MODE` |
 | `LLAMA_ARG_MMPROJ`, `LLAMA_ARG_MMPROJ_OFFLOAD`, `LLAMA_ARG_IMAGE_MIN_TOKENS`, `LLAMA_ARG_IMAGE_MAX_TOKENS` | Vision |
 | `LLAMA_ARG_UI`, `LLAMA_ARG_STATIC_PATH` | UI enabled/disabled and static directory |
