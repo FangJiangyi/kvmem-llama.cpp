@@ -124,6 +124,10 @@ The GPU tests used an RTX 5060 Ti 16 GiB for the 27B target and synthetic color
 images; they verify correctness and overlap, not a throughput improvement.
 Linux builds and host tests remain covered by the repository's GitHub workflow.
 
+The [RTX 5050 stress-test report](multi-lane-stress-5050-2026-10-01.md) records
+2/4/8/16-client ramps, ten minutes of cache churn, the decode-graph bug found
+under load, its correction and the subsequent recovery/regression checks.
+
 This builds on [qzshch's PR #94](https://github.com/kvmem/kvmem-llama.cpp/pull/94).
 Its original commit `3cc1c651d5ea64c36e3880ea71c7713823730423` is retained as an
 ancestor, with its original author, so GitHub shows the contributor's work.
