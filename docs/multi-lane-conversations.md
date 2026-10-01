@@ -1,6 +1,6 @@
 # Multi-lane conversations
 
-`--parallel P` is the number of independent GPU execution lanes (1 or 2).
+`--parallel P` is the number of independent GPU execution lanes (1 through 4).
 `--kvmem-conversations N` is the global number of host conversation stores.
 After environment/CLI parsing and before validation, N becomes `max(N, P)`.
 The server logs an adjustment once and exposes requested/effective values.
@@ -21,6 +21,11 @@ exist at startup; additional stores are lazy, with a hard global N limit.
 `--kvmem-conversations-gb` is a soft cap on accounted retained host bytes, not
 process RSS. Idle parked, unreferenced stores are evicted by LRU; resident or
 queued stores can keep the total above the cap, with a warning.
+
+For four lanes, use `--parallel 4 --kvmem-conversations 8 --threads-http 16`.
+Multiple lanes require at least `2 * P` HTTP workers; automatic worker selection
+also enforces that floor. More lanes increase GPU working-set/scratch memory
+and permit more simultaneous execution, but do not guarantee higher throughput.
 
 ## Scheduling
 
@@ -88,7 +93,7 @@ encoder mutex during target decode. Identical media reuse the bounded embedding
 cache. Cache plus in-flight embeddings share a 128 MiB ceiling; an individual
 prepared request exceeding it is rejected, and other preparers wait with
 cancellation support when live references occupy the ceiling. Native video/audio
-concurrency is outside this first two-lane implementation.
+concurrency is outside this multi-lane implementation.
 
 ## Status and validation
 
@@ -104,6 +109,7 @@ on the new backend. `scripts/test_server_lane_conversations.py` checks real KV
 hits and secret/image isolation across a lane migration, capacity normalization,
 invalid input, disconnect recovery and mixed projector/decode work; use
 `--conversations 1` for N<P and `--mmproj ... --mmproj-device ... --mtp` for vision/MTP.
+Add `--parallel 4 --conversations 5` to exercise four lanes and a parked store.
 
 Local validation on 2026-10-01 used Windows/MSVC, CUDA 13.2.86 and Vulkan:
 

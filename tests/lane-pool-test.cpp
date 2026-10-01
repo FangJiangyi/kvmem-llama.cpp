@@ -62,8 +62,8 @@ int main() {
     third->release(); // explicit completion plus destruction is idempotent
     auto reused = pool.acquire(available);
     assert(reused->index == freed);
-    {
-        kvmem_lane_pool sessions(2);
+    for (size_t count : {2, 4}) {
+        kvmem_lane_pool sessions(count);
         auto choose = [](const std::vector<bool> & busy, bool) {
             for (size_t n = 0; n < busy.size(); ++n) if (!busy[n]) return (int)n;
             return -1;
@@ -87,6 +87,28 @@ int main() {
         assert(!sessions.acquire(preparing, available, [](const std::vector<bool> &, bool) { return -2; }));
         auto ready = sessions.acquire(preparing, available, choose);
         assert(ready); // The original queue position survives extra preparation.
+    }
+    {
+        kvmem_lane_pool wider(4);
+        std::vector<std::shared_ptr<kvmem_lane_pool::lease>> occupied;
+        for (size_t lane = 0; lane < 4; ++lane) {
+            auto held = wider.acquire(available);
+            assert(held && held->index == lane);
+            occupied.push_back(std::move(held));
+        }
+        std::promise<void> queued_four;
+        bool reported = false;
+        auto fifth = std::async(std::launch::async, [&] {
+            return wider.acquire([&] {
+                if (!reported) { reported = true; queued_four.set_value(); }
+                return false;
+            });
+        });
+        queued_four.get_future().wait();
+        assert(fifth.wait_for(100ms) == std::future_status::timeout);
+        occupied[3].reset();
+        assert(fifth.wait_for(2s) == std::future_status::ready);
+        assert(fifth.get()->index == 3); // Only the fourth lane became free.
     }
     std::cout << "lane pool: passed\n";
 }

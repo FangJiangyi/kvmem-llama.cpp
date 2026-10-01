@@ -10,7 +10,8 @@ ramps, ten minutes of sustained cache churn, and recovery probes. It lasted
 - Windows/MSVC, CUDA 13.2.86, NVIDIA driver 610.62.
 - RTX 5050 Laptop GPU, 8 GiB; Qwen3.5-0.8B-Q8_0.gguf.
 - `--parallel 2`, eight host stores, 24 logical conversation IDs during churn.
-  Parallel is currently restricted to 1 or 2; client concurrency is independent.
+  At the time of this measurement, parallel was restricted to 1 or 2; client
+  concurrency is independent. Subsequent four-lane measurements are recorded below.
 - Context 8192, GPU KV budget 2048 plus generation reserve 1024 per lane,
   64 MiB CPU arena per host store, no NVMe, user query policy, 32 HTTP threads.
 - CUDA graphs and llama graph reuse enabled with their normal defaults.

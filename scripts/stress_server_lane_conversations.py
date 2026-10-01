@@ -82,6 +82,7 @@ def main():
     parser.add_argument('--model', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--clients', default='2,4,8,16')
+    parser.add_argument('--parallel', type=int, choices=(2, 3, 4), default=2)
     parser.add_argument('--ramp-seconds', type=float, default=60)
     parser.add_argument('--soak-seconds', type=float, default=600)
     parser.add_argument('--conversations', type=int, default=8)
@@ -95,15 +96,15 @@ def main():
     parser.add_argument('--sanitizer-kernel', help='optional mangled kernel name regex to check')
     args = parser.parse_args()
     clients = [int(x) for x in args.clients.split(',')]
-    if not clients or min(clients) < 1 or not 2 <= args.conversations <= args.logical_conversations <= len(WORDS):
-        parser.error('positive clients and 2 <= host stores <= logical conversations <= 24 required')
+    if not clients or min(clients) < 1 or not args.parallel <= args.conversations <= args.logical_conversations <= len(WORDS):
+        parser.error('positive clients and parallel <= host stores <= logical conversations <= 24 required')
     args.output.mkdir(parents=True, exist_ok=False)
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
     base = f'http://127.0.0.1:{port}'
     command = [str(args.server.resolve()), '-m', str(args.model.resolve()), '--device', 'CUDA0',
-        '--host', '127.0.0.1', '--port', str(port), '--parallel', '2', '--threads-http', str(max(clients) + 16),
+        '--host', '127.0.0.1', '--port', str(port), '--parallel', str(args.parallel), '--threads-http', str(max(clients) + 16),
         '-c', '8192', '--kvmem-conversations', str(args.conversations), '--kvmem-cpu-gb', args.cpu_gb,
         '--kvmem-budget', '2048', '--kvmem-gen-reserve', '1024', '--kvmem-nvme-gb', '0',
         '--kvmem-query-policy', 'user', '-fa', 'on', '--reasoning-effort', 'none', '--temp', '0',
@@ -174,7 +175,7 @@ def main():
             with opener().open(request, timeout=args.request_timeout) as response:
                 record['status'] = response.status
                 record['lane'] = response.headers.get('X-KVMem-Lane')
-                if record['lane'] not in ('0', '1'):
+                if record['lane'] not in {str(index) for index in range(args.parallel)}:
                     raise AssertionError('invalid physical lane')
                 for line in response:
                     if not line.startswith(b'data:'):
@@ -213,6 +214,8 @@ def main():
             reference = baseline_hashes.get((index, kind))
             if reference and not cancel:
                 record['matches_serial_baseline'] = reference == record['content_sha256']
+                if not record['matches_serial_baseline']:
+                    raise AssertionError('output differs from serial baseline')
         except Exception as error:
             record['error'] = f'{type(error).__name__}: {error}'
             record['content_prefix'] = content[:200]
@@ -253,7 +256,7 @@ def main():
             try:
                 slots = get('/slots', timeout=5)
                 stores = slots[0]['kvmem']['conversations']
-                if len(slots) != 2 or stores['count'] > args.conversations:
+                if len(slots) != args.parallel or stores['count'] > args.conversations:
                     raise AssertionError('physical lane/global host-store cap violated')
                 if time.monotonic() >= next_gpu:
                     gpu = gpu_memory()
@@ -319,7 +322,7 @@ def main():
             'lanes': dict(Counter(r['lane'] for r in complete)),
             'cache_hit_requests': sum(r['cache_tokens'] > 0 for r in complete),
             'baseline_matches': sum(r.get('matches_serial_baseline', False) for r in complete),
-            'both_busy_samples': sum(s['active_lanes'] == 2 for s in readings),
+            'all_busy_samples': sum(s['active_lanes'] == args.parallel for s in readings),
             'monitor_samples': len(readings), 'end_slots': get('/slots')}
         for key in ('working_mib', 'private_mib'):
             values = [s[key] for s in readings if key in s]
@@ -359,7 +362,7 @@ def main():
                     raise TimeoutError('server startup')
                 time.sleep(.5)
             summary['props'] = get('/props')
-            assert summary['props']['total_slots'] == 2
+            assert summary['props']['total_slots'] == args.parallel
             assert summary['props']['kvmem']['conversations'] == args.conversations
             monitor = threading.Thread(target=observe, daemon=True)
             monitor.start()
@@ -385,6 +388,11 @@ def main():
             after = get('/slots')[0]['kvmem']['conversations']
             assert (before['switches'], before['evictions']) == (after['switches'], after['evictions'])
             summary['final_slots'] = get('/slots')
+            if max(clients) >= args.parallel:
+                used = {lane for phase in summary['phases'] for lane in phase['lanes']}
+                summary['all_lanes_exercised'] = used == {str(index) for index in range(args.parallel)}
+                assert summary['all_lanes_exercised'], 'some physical lanes served no completed load requests'
+                assert any(phase['all_busy_samples'] for phase in summary['phases']), 'no sample had all lanes active'
             summary['memory_after_load'] = process_memory(proc.pid)
             # Let outstanding socket cleanup complete before the final memory reading.
             for _ in range(10):

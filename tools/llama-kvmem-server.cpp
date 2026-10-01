@@ -95,7 +95,7 @@ static void print_usage(const char * argv0) {
             "  -a, --alias NAME           model name exposed by the API\n"
             "  --api-key KEY[,KEY...]     allowed API keys\n"
             "  --api-key-file PATH        one key per line; blank/# lines ignored\n"
-            "  -np, --parallel N          1 (default) or 2 independent inference lanes\n"
+            "  -np, --parallel N          1..4 independent inference lanes (default: 1)\n"
             "                            context and KV budgets are per lane\n"
             "  -lm, --load-mode MODE      auto | none | mmap | mlock | mmap+mlock | dio\n"
             "  --mmap / --no-mmap         legacy aliases for load-mode mmap / none\n"
@@ -2690,14 +2690,15 @@ int main(int argc, char ** argv) {
         LOG_INF("srv    KVMEM conversations adjusted requested=%d effective=%d parallel=%d\n",
                 requested_conversations, options.conversations, options.parallel);
     }
-    if (options.parallel == 2 && (!st.kparams.enabled ||
+    if (options.parallel > 1 && (!st.kparams.enabled ||
             options.device_names == "none" || mparams.n_gpu_layers == 0 ||
             options.session_disk_bytes ||
             st.kparams.nvme_bytes || st.kparams.raw_k_nvme ||
             device_config.devices.size() > 2 || mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR ||
-            (options.threads_http > 0 && options.threads_http < 4))) {
-        fprintf(stderr, "KVMEM_STARTUP_ERROR --parallel 2 requires KVMem, one target GPU, "
-                "no NVMe/session disk cache, and at least 4 HTTP workers\n");
+            (options.threads_http > 0 && options.threads_http < 2 * options.parallel))) {
+        fprintf(stderr, "KVMEM_STARTUP_ERROR --parallel %d requires KVMem, one target GPU, "
+                "no NVMe/session disk cache, and at least %d HTTP workers\n",
+                options.parallel, 2 * options.parallel);
         return 1;
     }
     // Check resources before spending time/VRAM on loading model weights.
@@ -2925,11 +2926,15 @@ int main(int argc, char ** argv) {
     httplib::Server svr;
     svr.set_read_timeout(options.timeout, 0);
     svr.set_write_timeout(options.timeout, 0);
-    if (options.threads_http_set) {
-        const int n = options.threads_http > 0 ? options.threads_http :
-            std::max(5, static_cast<int>(std::thread::hardware_concurrency()) - 1);
-        svr.new_task_queue = [n] { return new httplib::ThreadPool(n, static_cast<size_t>(n) + 1024); };
-        kvmem_diag("KVMEM_HTTP threads=%d timeout=%d\n", n, options.timeout);
+    const int http_workers = options.threads_http_set ?
+        (options.threads_http > 0 ? options.threads_http :
+            std::max(2 * options.parallel, std::max(5, static_cast<int>(std::thread::hardware_concurrency()) - 1))) :
+        std::max(2 * options.parallel, static_cast<int>(CPPHTTPLIB_THREAD_POOL_COUNT));
+    if (options.threads_http_set || options.parallel > 1) {
+        svr.new_task_queue = [http_workers] {
+            return new httplib::ThreadPool(http_workers, static_cast<size_t>(http_workers) + 1024);
+        };
+        kvmem_diag("KVMEM_HTTP threads=%d timeout=%d\n", http_workers, options.timeout);
     }
     svr.set_idle_interval(0, 100000);
     svr.set_default_headers({
@@ -2954,9 +2959,7 @@ int main(int argc, char ** argv) {
     startup["flash_attn_requested"] = llama_flash_attn_type_name(cparams.flash_attn_type);
     startup["generation_limit"] = generation_limit;
     startup["default_max_tokens"] = std::min(st.n_predict_default > 0 ? st.n_predict_default : generation_limit, generation_limit);
-    startup["http"]["threads"] = options.threads_http_set ?
-        (options.threads_http > 0 ? options.threads_http : std::max(5, static_cast<int>(std::thread::hardware_concurrency()) - 1)) :
-        static_cast<int>(CPPHTTPLIB_THREAD_POOL_COUNT);
+    startup["http"]["threads"] = http_workers;
     if (!config_sources.contains("--threads-batch") && options.threads > 0)
         startup["sources"]["--threads-batch"] = "inherited:--threads";
     if (!config_sources.contains("--ubatch-size")) startup["sources"]["--ubatch-size"] = "inherited:--batch-size";

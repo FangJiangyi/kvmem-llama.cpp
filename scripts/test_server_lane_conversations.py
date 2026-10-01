@@ -32,6 +32,7 @@ def main():
     p.add_argument('--model', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--device', default='CUDA0')
+    p.add_argument('--parallel', type=int, choices=(2, 3, 4), default=2)
     p.add_argument('--cpu-gb', default='0.125')
     p.add_argument('--soft-gb', type=float, default=0)
     p.add_argument('--conversations', type=int, default=3)
@@ -46,7 +47,7 @@ def main():
         port = s.getsockname()[1]
     base = f'http://127.0.0.1:{port}'
     command = [str(a.server.resolve()), '-m', str(a.model.resolve()), '--device', a.device,
-        '--host', '127.0.0.1', '--port', str(port), '-c', '8192', '--parallel', '2',
+        '--host', '127.0.0.1', '--port', str(port), '-c', '8192', '--parallel', str(a.parallel),
         '--threads-http', '8', '--kvmem-query-policy', a.query_policy, '--kvmem-conversations', str(a.conversations),
         '--kvmem-cpu-gb', a.cpu_gb, '--kvmem-conversations-gb', str(a.soft_gb), '--kvmem-budget', '2048', '--kvmem-gen-reserve', '1024',
         '-fa', 'on', '--reasoning-effort', 'none', '--temp', '0', '--presence-penalty', '0',
@@ -87,7 +88,7 @@ def main():
         record = {'name': name, 'lane': lane, 'response': response}
         evidence['requests'].append(record)
         check('request succeeds ' + name, status == 200)
-        check('hard global store cap', stats()['count'] <= max(2, a.conversations))
+        check('hard global store cap', stats()['count'] <= max(a.parallel, a.conversations))
         return record
 
     def text(record):
@@ -96,8 +97,9 @@ def main():
     def hit(record):
         return record['response']['usage']['prompt_cache_hit_tokens']
 
-    codes = {'A': 'AMBER', 'B': 'VIOLET', 'C': 'GREEN'}
-    colors = {'A': (255, 0, 0), 'B': (0, 0, 255), 'C': (0, 255, 0)}
+    codes = dict(zip('ABCDE'[:a.parallel + 1], ('AMBER', 'VIOLET', 'GREEN', 'BLUE', 'RED')))
+    colors = {'A': (255, 0, 0), 'B': (0, 0, 255), 'C': (0, 255, 0),
+              'D': (255, 255, 0), 'E': (255, 255, 255)}
     histories = {}
     for name, code in codes.items():
         background = '\n'.join(f'Channel {name} routing note {i:03d}: this entry is stable.' for i in range(110))
@@ -145,12 +147,13 @@ def main():
                 time.sleep(.5)
             props = get('/props')
             evidence['props'] = props
-            check('P and normalized N exposed', props['total_slots'] == 2 and
-                  props['kvmem']['conversations'] == max(2, a.conversations) and
+            check('P and normalized N exposed', props['total_slots'] == a.parallel and
+                  props['kvmem']['conversations'] == max(a.parallel, a.conversations) and
                   props['kvmem']['conversations_requested'] == a.conversations)
-            check('physical slots remain P', len(get('/slots')) == 2)
+            check('physical slots remain P', len(get('/slots')) == a.parallel)
             initial = {name: ask(name, history) for name, history in histories.items()}
-            expected = {'A': 'RED', 'B': 'BLUE', 'C': 'GREEN'} if a.mmproj else codes
+            expected = ({name: {'A': 'RED', 'B': 'BLUE', 'C': 'GREEN', 'D': 'YELLOW', 'E': 'WHITE'}[name]
+                         for name in codes} if a.mmproj else codes)
             for name, record in initial.items():
                 check('cold output isolation ' + name, expected[name] in text(record).upper())
                 check('new ID is cold ' + name, hit(record) == 0)
@@ -158,7 +161,7 @@ def main():
             restored = ask('A', histories['A'])
             check('restored output isolation', expected['A'] in text(restored).upper())
             check('parked conversation resumes when capacity permits',
-                  (hit(restored) > 1024) if a.conversations >= 3 and a.soft_gb == 0 else (hit(restored) == 0))
+                  (hit(restored) > 1024) if a.conversations > a.parallel and a.soft_gb == 0 else (hit(restored) == 0))
             append_followup('A', restored)
             # Invalid input must leave the full pool untouched.
             before = stats()
@@ -172,14 +175,16 @@ def main():
             check('invalid request does not switch/evict', status == 400 and
                   before['switches'] == after['switches'] and before['evictions'] == after['evictions'])
 
-            if a.conversations >= 3 and a.soft_gb == 0:
-                # C replaces A on its original lane and keeps decoding there.
-                # A must resume on the other lane, evicting its GPU residency.
-                c = ask('C', histories['C'])
-                append_followup('C', c)
-                stream = long_stream('C')
+            if a.conversations > a.parallel and a.soft_gb == 0:
+                # The last ID replaces A on its original lane and decodes there.
+                # A must resume on another lane, replacing its GPU residency.
+                last = next(reversed(histories))
+                c = ask(last, histories[last])
+                append_followup(last, c)
+                stream = long_stream(last)
                 try:
                     busy_lane = stream.headers.get('X-KVMem-Lane')
+                    check('old A residency is occupied by another conversation', busy_lane == restored['lane'])
                     moved = ask('A', histories['A'])
                     check('restored A uses any idle lane', moved['lane'] != busy_lane)
                     check('moved A keeps host KV', hit(moved) > 1024 and expected['A'] in text(moved).upper())
@@ -206,16 +211,16 @@ def main():
                     stream.close()
                 check('same-ID waiter recovers', text(pending.result(timeout=120)) == '5')
             if a.mmproj:
-                first, second = long_stream('ENCODE_A'), long_stream('ENCODE_B')
+                streams = [long_stream('ENCODE_' + str(lane)) for lane in range(a.parallel)]
                 try:
-                    check('two lanes decoding before media preparation', all(s['is_processing'] for s in get('/slots')))
+                    check('all lanes decoding before media preparation', all(s['is_processing'] for s in get('/slots')))
                     yellow = [{'role': 'user', 'content': [
                         {'type': 'image_url', 'image_url': {'url': image_url((255, 255, 0))}},
                         {'type': 'text', 'text': 'What is the dominant color? One word only.'}]}]
                     with ThreadPoolExecutor(max_workers=1) as pool:
                         mark = (a.output / 'server.log').read_bytes().count(b'KVMEM_VISION_PREPARED')
                         future = pool.submit(ask, 'YELLOW', yellow)
-                        # Wait for a cold encode in the log while neither lane
+                        # Wait for a cold encode in the log while no lane
                         # can yet admit this image request.
                         encoded_while_busy = False
                         deadline = time.monotonic() + 20
@@ -224,14 +229,14 @@ def main():
                                 encoded_while_busy = all(s['is_processing'] for s in get('/slots'))
                                 break
                             time.sleep(.05)
-                        check('projector encoded while both lanes busy', encoded_while_busy and not future.done())
-                        first.close()
+                        check('projector encoded while all lanes busy', encoded_while_busy and not future.done())
+                        streams[0].close()
                         result = future.result(timeout=120)
                         check('cold projector work during decode preserves image', 'YELLOW' in text(result).upper())
                 finally:
-                    first.close()
-                    second.close()
-            check('fresh admission at capacity', stats()['count'] <= max(2, a.conversations))
+                    for stream in streams:
+                        stream.close()
+            check('fresh admission at capacity', stats()['count'] <= max(a.parallel, a.conversations))
             if a.soft_gb:
                 check('soft budget reclaims parked stores', stats()['evictions'] > 0)
             evidence['slots'] = get('/slots')

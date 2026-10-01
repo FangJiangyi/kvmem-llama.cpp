@@ -44,7 +44,7 @@ server-side byte snapshot restored per request.
 
 ### Multiple lanes and conversations
 
-`--kvmem --parallel 2 --kvmem-conversations N` creates two independent target
+`--kvmem --parallel P --kvmem-conversations N`, with P=2..4, creates P independent target
 contexts sharing immutable model weights, with one global host conversation
 pool. Effective N is at least P. Each lane owns its GPU window, recurrent state,
 MTP follower (when enabled), capture state and transfer scratch. GPU context,
@@ -61,8 +61,8 @@ One shared projector can run on CPU or another device, including the lane GPU.
 Stateful tokenization/encoding is serialized before lane admission; immutable
 prepared embeddings are decoded independently. The embedding cache and in-flight
 references share a 128 MiB bound. Text and image requests support optional MTP on
-one CUDA target GPU with at least four HTTP workers. Video/audio, multiple target
-GPUs and NVMe/session disk are outside two-lane support. Throughput depends on the
+one CUDA target GPU with at least `2 * P` HTTP workers. Video/audio, multiple target
+GPUs and NVMe/session disk are outside multi-lane support. Throughput depends on the
 workload and device. See [the complete design](multi-lane-conversations.md).
 
 Hardware split on this machine: RTX 5050 (GPU 0) for models < 27B;

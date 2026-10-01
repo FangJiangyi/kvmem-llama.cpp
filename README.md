@@ -154,9 +154,9 @@ yet accept every `llama-server` option.
 | `-a`, `--alias` | Model name returned by `/v1/models`, `/props` and chat responses. |
 | `--api-key`, `--api-key-file` | API authentication; details below. |
 | `-lm`, `--load-mode` | `auto`, `none`, `mmap`, `mlock`, `mmap+mlock`, `dio`; legacy `--mmap`, `--no-mmap`, `--mlock` map to the corresponding mode. Last loading-mode flag wins. |
-| `-np`, `--parallel` | `1` (default), or `2` independent inference lanes sharing model weights and a global conversation pool. Supports text/images and optional MTP on one CUDA device, with a shared CPU/GPU projector. NVMe/session disk remains single-lane. KV budgets apply per lane; host RAM budgets apply per conversation. See [design](docs/multi-lane-conversations.md). |
+| `-np`, `--parallel` | `1` (default) through `4` independent inference lanes sharing model weights and a global conversation pool. Supports text/images and optional MTP on one CUDA device, with a shared CPU/GPU projector. NVMe/session disk remains single-lane. KV budgets apply per lane; host RAM budgets apply per conversation. See [design](docs/multi-lane-conversations.md). |
 | `-to`, `--timeout` | HTTP read/write timeout in seconds; KVMem retains its 1800-second default. |
-| `--threads-http` | HTTP worker count; <= 0 selects automatically. Use `--parallel` to enable two inference lanes; two lanes require at least four HTTP workers. |
+| `--threads-http` | HTTP worker count; <= 0 selects automatically. Multiple inference lanes require at least `2 * parallel` HTTP workers; automatic selection enforces this floor. |
 | `-dev`, `--device`; `--list-devices` | Select one device or an explicit CUDA list such as `CUDA0,CUDA1`; `none` selects CPU. List devices without loading a model. |
 | `-mg`, `--main-gpu`; `-sm`, `--split-mode` | Experimental CUDA multi-GPU supports `layer` or `tensor` with `--gpu-layers all`. `none` remains available for one GPU. |
 | `-ts`, `--tensor-split` | Split proportions, with one value for each explicitly selected GPU. |
