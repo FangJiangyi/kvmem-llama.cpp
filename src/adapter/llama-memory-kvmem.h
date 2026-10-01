@@ -192,10 +192,11 @@ public:
     // attention V is not mirrored to host, and raw-K NVMe sizes and names one
     // arena per process.
     bool conv_swap_supported(std::string & reason) const;
+    bool conv_compatible(const llama_memory_kvmem & other) const;
     std::unique_ptr<ConvStore> make_conv();
     // Exchange the per-conversation host state. Call only between requests,
     // under the server's request lock. `conv` must come from make_conv() or an
-    // earlier swap_conv() on this object; on return it holds the outgoing
+    // earlier swap_conv() on a compatible memory object; on return it holds the outgoing
     // conversation, drained to host. False means the incoming store holds no
     // rows live on the GPU: it was empty, or its working set could not be
     // rebuilt from host RAM and it was reset to empty. Either way the server

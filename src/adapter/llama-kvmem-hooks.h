@@ -43,6 +43,17 @@ struct llama_kvmem_params {
 LLAMA_API void llama_kvmem_set_params(const struct llama_kvmem_params * params);
 LLAMA_API const struct llama_kvmem_params * llama_kvmem_get_params(void);
 
+// Isolated hook, retrieval, conversation and transfer state for one target
+// context plus its MTP follower. Activate before creating/using/freeing those
+// contexts, on every calling thread. A state must never be active concurrently
+// on two threads. Free the contexts before freeing their execution state.
+// Exchanging nullptr restores the legacy, single-domain behavior.
+struct llama_kvmem_execution_state;
+LLAMA_API struct llama_kvmem_execution_state * llama_kvmem_execution_create(void);
+LLAMA_API void llama_kvmem_execution_free(struct llama_kvmem_execution_state * state);
+LLAMA_API struct llama_kvmem_execution_state * llama_kvmem_execution_exchange(
+        struct llama_kvmem_execution_state * state);
+
 // Legacy eval-callback entry. Always returns false so ggml does not split the
 // graph. Capture harvest runs after the full ubatch compute instead.
 LLAMA_API bool llama_kvmem_eval_callback(struct ggml_tensor * t, bool ask, void * user_data);
@@ -170,6 +181,18 @@ LLAMA_API void llama_kvmem_dump_kv_writeback(struct llama_context * ctx, int32_t
 #include <string>
 
 namespace kvmem { class SnapshotWriter; class SnapshotReader; struct SnapshotBuffer; }
+// Portable host bundle. The active bundle is borrowed by a lane; swapping
+// exchanges it with a parked bundle from an identically configured context.
+// Startup-only: both execution domains must be quiescent.
+LLAMA_API bool llama_kvmem_store_compatible_with_execution(const llama_kvmem_execution_state * other);
+struct llama_kvmem_store_bundle;
+LLAMA_API llama_kvmem_store_bundle * llama_kvmem_store_bundle_create();
+LLAMA_API void llama_kvmem_store_bundle_free(llama_kvmem_store_bundle * bundle);
+LLAMA_API bool llama_kvmem_store_bundle_swap(llama_kvmem_store_bundle * bundle);
+LLAMA_API void llama_kvmem_store_bundle_reset(llama_kvmem_store_bundle * bundle);
+LLAMA_API uint64_t llama_kvmem_store_active_bytes();
+LLAMA_API uint32_t llama_kvmem_store_bundle_rows(const llama_kvmem_store_bundle * bundle);
+LLAMA_API uint64_t llama_kvmem_store_bundle_bytes(const llama_kvmem_store_bundle * bundle);
 // Process-local disk-cache hooks. Park leaves an empty, valid execution store
 // attached so the outgoing RAM can be released before a cold store is read.
 LLAMA_API bool llama_kvmem_store_park();

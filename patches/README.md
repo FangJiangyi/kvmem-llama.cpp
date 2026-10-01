@@ -14,6 +14,13 @@ next split, and returns from empty `GET_ROWS`. Set
 `KVMEM_DECODE_GRAPH_SLOTS=0` to use the previous two-slot path. A tree with
 this patch applied no longer reverses `llama-kvmem-current.patch` alone.
 
+`cuda-graph-reactivation.patch` applies after the graph and GDN output patches.
+Decode widths share one scheduler arena, so an inactive graph's old tensor
+bindings may have been overwritten by another graph. Reactivation rebuilds the
+graph and its KVMem capture list; consecutive uses of the active graph retain
+reuse. This fixes invalid KV row indices observed under mixed short/long
+concurrent requests. Both build entry points replay this fix idempotently.
+
 `0005-hip-rdna2-quantized-kv-fa-vec.patch` is @zintown's PR #58 RDNA2
 quantized-KV Flash Attention dispatch fix. It selects the existing VEC kernel
 for supported dimensions, avoiding the larger tile kernel's zero-occupancy

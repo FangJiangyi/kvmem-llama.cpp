@@ -32,6 +32,12 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 enable_testing()
 add_subdirectory(kvmem)
 
+find_package(Threads REQUIRED)
+add_executable(kvmem-lane-pool-test tests/lane-pool-test.cpp)
+target_include_directories(kvmem-lane-pool-test PRIVATE tools)
+target_link_libraries(kvmem-lane-pool-test PRIVATE Threads::Threads)
+add_test(NAME kvmem-lane-pool-test COMMAND kvmem-lane-pool-test)
+
 # Conversation selection and eviction policy: header-only and free of llama.cpp
 # and CUDA, so it stays testable in the portable KVMEM_BUILD_LLAMA=OFF build.
 add_executable(kvmem-conversation-store-test tests/conversation-store-test.cpp)
