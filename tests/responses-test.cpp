@@ -152,101 +152,64 @@ static void test_tools_max_tokens_and_reasoning() {
     CHECK(out["tools"][0]["function"]["name"] == "f");
 }
 
-// ---------------------------------------------------------------------------
-// System/developer message placement
-//
-// The Jinja templates of the hybrid models this server targets raise
-//     'System message must be at the beginning.'
-// unless they see exactly one system message, first. Two separate things can
-// put a system message in front of the template:
-//
-//   * `instructions` is converted upstream into a leading system message;
-//   * a system/developer item inside `input` is passed through untouched.
-//
-// and upstream then rewrites `developer` to `system` unconditionally
-// (common/chat.cpp, workaround::map_developer_role_to_system). The only
-// workaround that would merge the two, system_message_not_supported, is gated
-// on the template *not* declaring support for a system role -- which is
-// exactly the case that never needs it. So both messages reach the template
-// and the render throws.
-//
-// The tests below pin the request shapes it came from. tools/kvmem-responses.cpp
-// now folds the extra system/developer turn into the leading one, so each of
-// these asserts exactly one system message, with both texts preserved, sitting
-// at messages[0]. See tests/test_responses_wire.py for the live-server half.
-// ---------------------------------------------------------------------------
-
-static size_t system_message_count(const json & out) {
-    size_t n = 0;
-    for (const auto & m : out["messages"]) {
-        if (m["role"] == "system") {
-            n++;
+static void test_system_turns_merge() {
+    for (const char * role : {"system", "developer"}) {
+        for (bool typed_content : {false, true}) {
+            for (bool instructions : {false, true}) {
+                for (bool system_first : {false, true}) {
+                    json content = "be formal";
+                    if (typed_content) {
+                        content = json::array({{{"type", "input_text"}, {"text", "be "}},
+                                               {{"type", "input_text"}, {"text", "formal"}}});
+                    }
+                    const json system = {{"role", role}, {"content", content}};
+                    const json user = {{"role", "user"}, {"content", "hi"}};
+                    json body = {{"input", system_first ? json::array({system, user}) : json::array({user, system})}};
+                    if (instructions) {
+                        body["instructions"] = "be brief";
+                    }
+                    const auto out = convert(body.dump());
+                    CHECK(out["messages"].size() == 2);
+                    CHECK(out["messages"][0]["role"] == "system");
+                    CHECK(out["messages"][0]["content"] == (instructions ? "be brief\n\nbe formal" : "be formal"));
+                    CHECK(out["messages"][1]["role"] == "user");
+                    CHECK(out["messages"][1]["content"][0]["text"] == "hi");
+                }
+            }
         }
     }
-    return n;
-}
-
-static void test_instructions_plus_input_developer_merge_into_one_system() {
-    // The shape @ai-sdk/openai replays once a developer note has been sent: the
-    // note comes back inside `input` and `instructions` is set as well. Upstream
-    // would rewrite the developer item to a second system message after this
-    // bridge, so the merge has to happen here.
-    const auto out = convert(R"({
-        "instructions": "be brief",
-        "input": [
-            {"role": "user", "content": "hi"},
-            {"role": "developer", "content": "be formal"}
-        ]
-    })");
-    CHECK(system_message_count(out) == 1);
-    CHECK(out["messages"].size() == 2);
-    CHECK(out["messages"][0]["role"] == "system");
-    CHECK(out["messages"][0]["content"] == "be brief\n\nbe formal");
-    CHECK(out["messages"][1]["role"] == "user");
-}
-
-static void test_instructions_plus_input_system_merge_into_one_system() {
-    // `instructions` plus a system item in `input`: upstream turns the first into
-    // a leading system turn and passes the second through, so the template is
-    // handed two and raises 'System message must be at the beginning.'
-    const auto out = convert(R"({
-        "instructions": "be brief",
-        "input": [
-            {"role": "user", "content": "hi"},
-            {"role": "system", "content": "be formal"}
-        ]
-    })");
-    CHECK(system_message_count(out) == 1);
-    CHECK(out["messages"].size() == 2);
-    CHECK(out["messages"][0]["role"] == "system");
-    CHECK(out["messages"][0]["content"] == "be brief\n\nbe formal");
-    CHECK(out["messages"][1]["role"] == "user");
-}
-
-static void test_input_system_without_instructions_becomes_the_system_turn() {
-    // No `instructions`: the input system item is the only one, but it still has
-    // to become the leading system turn rather than a later one.
-    const auto out = convert(R"({"input": [
-        {"role": "user", "content": "hi"},
-        {"role": "system", "content": "be formal"}
+    const auto out = convert(R"({"instructions":"S","stream":true,"input":[
+        {"role":"developer","content":"D"}, {"role":"user","content":"hi"},
+        {"role":"assistant","content":"hello"}, {"role":"system","content":"S2"},
+        {"type":"function_call","call_id":"call_1","name":"f","arguments":"{}"},
+        {"type":"function_call_output","call_id":"call_1","output":"42"}
     ]})");
-    CHECK(system_message_count(out) == 1);
-    CHECK(out["messages"].size() == 2);
-    CHECK(out["messages"][0]["role"] == "system");
-    CHECK(out["messages"][0]["content"] == "be formal");
+    CHECK(out["messages"].size() == 5);
+    CHECK(out["messages"][0]["content"] == "S\n\nD\n\nS2");
     CHECK(out["messages"][1]["role"] == "user");
+    CHECK(out["messages"][2]["content"][0]["text"] == "hello");
+    CHECK(out["messages"][3]["tool_calls"][0]["id"] == "call_1");
+    CHECK(out["messages"][4]["content"] == "42");
+    CHECK(out["stream"] == true);
+    CHECK(convert(R"({"instructions":"","input":[{"role":"system","content":""},{"role":"user","content":"hi"}]})")["messages"][0]["content"] == "");
 }
 
-static void test_input_system_first_is_left_alone() {
-    // A system item that is already the only one, first, has nothing to merge
-    // with; its text must survive.
-    const auto out = convert(R"({"input": [
-        {"role": "system", "content": "be formal"},
-        {"role": "user", "content": "hi"}
-    ]})");
-    CHECK(system_message_count(out) == 1);
-    CHECK(out["messages"][0]["role"] == "system");
-    CHECK(out["messages"][0]["content"] == "be formal");
+static void test_system_turns_reject_invalid_content() {
+    for (const char * role : {"system", "developer"}) {
+        for (const json & content : {json(7), json(nullptr), json::array({{{"type", "input_text"}}}),
+                                    json::array({{{"type", "input_text"}, {"text", 7}}}),
+                                    json::array({{{"type", "text"}, {"text", "wrong wire type"}}}),
+                                    json::array({{{"type", "input_image"}, {"image_url", "https://example.com/a.png"}}})}) {
+            for (bool instructions : {false, true}) {
+                json body = {{"input", json::array({{{"role", role}, {"content", content}}, {{"role", "user"}, {"content", "hi"}}})}};
+                if (instructions) {
+                    body["instructions"] = "S";
+                }
+                CHECK(throws(body.dump()));
+            }
+        }
+        CHECK(throws(json{{"instructions", "S"}, {"input", json::array({{{"role", role}}})}}.dump()));
+    }
 }
 
 static void test_stream_passthrough() {
@@ -628,10 +591,8 @@ int main() {
     test_reasoning_item_with_content_is_left_alone();
     test_assistant_message_without_type_is_typed();
     test_tools_max_tokens_and_reasoning();
-    test_instructions_plus_input_developer_merge_into_one_system();
-    test_instructions_plus_input_system_merge_into_one_system();
-    test_input_system_without_instructions_becomes_the_system_turn();
-    test_input_system_first_is_left_alone();
+    test_system_turns_merge();
+    test_system_turns_reject_invalid_content();
     test_stream_passthrough();
     test_rejects_bad_input();
     test_stream_created();
