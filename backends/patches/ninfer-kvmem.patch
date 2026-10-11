@@ -619,7 +619,7 @@ index 73bc3e4627601b50daa978e6c5ab645a0583a5bc..a2a01e1e0c67248b36ccca28ec113694
  
  A round in which at least one row has a copy proposal is a copy round and verifies at the ngram
 diff --git a/docs/serving.md b/docs/serving.md
-index 6207ab0ce85e3e581585b7ede25fc0a8ca04279e..5f28708256578ed01fc0c6ef601c8b727c4c38e0 100644
+index 6207ab0ce85e3e581585b7ede25fc0a8ca04279e..e37692ee7c9ca71eb9fc87520e0a06e3aefe6ec5 100644
 --- a/docs/serving.md
 +++ b/docs/serving.md
 @@ -313,14 +313,34 @@ asking for raw JSON without Markdown fences and retaining tools for information
@@ -705,7 +705,15 @@ index 6207ab0ce85e3e581585b7ede25fc0a8ca04279e..5f28708256578ed01fc0c6ef601c8b72
  Each capability rejection identifies the affected field and the guarantee NInfer cannot provide.
  The vLLM/llama.cpp constrained-decoding extensions (`grammar`, `structured_outputs`, `guided_json`,
  `guided_regex`, `guided_choice`, and `guided_grammar`) are rejected explicitly instead of being
-@@ -1256,8 +1279,8 @@ wire response contains typed `output` Items.
+@@ -1249,15 +1272,15 @@ wire response contains typed `output` Items.
+ | `metadata` | at most 16 string pairs; keys at most 64 characters and values at most 512 |
+ | `client_metadata` | Codex client extension; an object or `null`, accepted as opaque tracing metadata with no generation effect |
+ | `reasoning.effort` | `none` requests disabled thinking; other standard effort values pass to the selected template |
+-| `reasoning.summary`, `reasoning.generate_summary` | `auto`, `concise` or `detailed` (other values are rejected, and the two must agree when both are sent); a value requests the same fixed protocol placeholder summary without changing model execution, and is echoed in the response. `reasoning.context` and `reasoning.mode` are rejected with `reasoning_option_not_supported` |
++| `reasoning.summary`, `reasoning.generate_summary` | `auto`, `concise` or `detailed` (other values are rejected, and the two must agree when both are sent); accepted and echoed without changing model execution. Summaries are not generated: reasoning Items retain `summary: []` and complete raw `reasoning_text`. `reasoning.context` and `reasoning.mode` are rejected with `reasoning_option_not_supported` |
+ | `chat_template_kwargs` | template parameters as a JSON object; standard options merge with typed fields |
+ | `preserve_thinking` | alias for `chat_template_kwargs.preserve_thinking`; conflicting values are rejected |
+ | `graft` | NInfer extension: name of a [prompt graft](#prompt-grafts), or `null`; also accepted by input token count |
  | `thinking_budget` | NInfer extension: positive per-request [thinking cap](#openai-chat-completions), or `null`; rejected by input token count, which does not generate |
  | `text.format` | `text`, `json_object`, or flat `json_schema`; see [structured output](#structured-output) |
  | `tools` | direct function definitions or namespace groups containing function definitions; see below |
@@ -739,7 +747,7 @@ index 6207ab0ce85e3e581585b7ede25fc0a8ca04279e..5f28708256578ed01fc0c6ef601c8b72
  reasoning text, partial tool Items, and other Item/content types are not supported. HTTP media URLs
  stored in a response chain are fetched again when that chain is continued; use data URIs when the
  historical media bytes must be immutable.
-@@ -1352,28 +1380,14 @@ NInfer renders these definitions in the Qwen prompt and parses model output into
+@@ -1352,36 +1380,22 @@ NInfer renders these definitions in the Qwen prompt and parses model output into
  `function_call` output Items. Each output has a protocol Item `id` (`fc_...`) and a distinct
  `call_id` (`call_...`). The client executes the function and sends a `function_call_output` Item in
  a later request. Only functions in the current effective tool set can become structured calls;
@@ -773,7 +781,47 @@ index 6207ab0ce85e3e581585b7ede25fc0a8ca04279e..5f28708256578ed01fc0c6ef601c8b72
  
  ### Response object and usage
  
-@@ -1576,16 +1590,11 @@ protocol-validated value to the selected template, substituting the nearest valu
+ A terminal wire response has `object: "response"`, one of `completed`, `incomplete`, or
+ `cancelled` in `status`, and a typed `output` array. NInfer may emit:
+ 
+-- a `reasoning` item containing raw `reasoning_text`; it returns a placeholder summary if
+-  `reasoning.summary` is requested;
++- a `reasoning` item containing complete raw `reasoning_text` and an empty `summary` array,
++  including when `reasoning.summary` is requested;
+ - an assistant `message` containing an `output_text` part;
+ - one or more `function_call` Items.
+ 
+@@ -1432,13 +1446,11 @@ The normal lifecycle is:
+ 4. matching `*.done`, `response.content_part.done`, and `response.output_item.done` events;
+ 5. exactly one `response.completed`, `response.incomplete`, or `response.failed` terminal event.
+ 
+-For a reasoning Item requested with any string-valued `reasoning.summary`, its
+-`response.output_item.added` and `.done` payloads carry the same placeholder summary. Immediately
+-after the Item is added, the stream emits `response.reasoning_summary_part.added`,
+-`response.reasoning_summary_text.delta`, `response.reasoning_summary_text.done`, and
+-`response.reasoning_summary_part.done` with `summary_index:0`, then continues with the raw
+-`reasoning_text` content lifecycle. Omitted or `null` summary requests emit none of these summary
+-events and retain an empty Item `summary` array.
++Reasoning Items carry `summary: []` in `response.output_item.added`, `.done`, and the terminal
++Response, regardless of the requested summary style. The stream emits the raw `reasoning_text`
++content lifecycle and no `response.reasoning_summary_*` events. Unsupported summaries must not
++be replaced with explanatory placeholder text: clients that prefer a non-empty summary over raw
++content would otherwise lose the full reasoning body used for display and context accounting.
+ 
+ For `include:["reasoning.encrypted_content"]`, the in-progress
+ `response.output_item.added` Item omits `encrypted_content` because the complete reasoning text is
+@@ -1511,8 +1523,8 @@ curl http://127.0.0.1:8080/v1/responses/input_tokens \
+ Unsupported Create fields include Conversations, prompt templates, context management, hosted
+ moderation, `include` values other than
+ `reasoning.encrypted_content`, background execution, compaction, files/audio, and
+-OpenAI-hosted/MCP/custom tools. Except for the two explicitly documented placeholders,
+-these are compatibility boundaries rather than silently accepted approximations.
++OpenAI-hosted/MCP/custom tools. Documented accepted hints and the local raw-reasoning mirror
++are exceptions; other unsupported capabilities remain explicit compatibility boundaries.
+ 
+ 
+ ## Anthropic Messages
+@@ -1576,16 +1588,11 @@ protocol-validated value to the selected template, substituting the nearest valu
  accepts as described above. `output_config.format` accepts `{"type":"json_schema","schema":{...}}`,
  enforced strictly (see [Structured output](#structured-output)); Count Tokens ignores it.
  
@@ -795,7 +843,7 @@ index 6207ab0ce85e3e581585b7ede25fc0a8ca04279e..5f28708256578ed01fc0c6ef601c8b72
  `is_error:true` explicitly in the model prompt. For a visible Assistant tool-use turn, the next
  User turn must provide exactly one leading result for every declared ID; valid results are matched
  by ID and normalized to call order. A history that begins with results remains valid as a truncated
-@@ -1733,7 +1742,7 @@ The table lists executable defaults. The startup example selects a long-context
+@@ -1733,7 +1740,7 @@ The table lists executable defaults. The startup example selects a long-context
  | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `600000` |
  | `--recover-invariant-failures` | a broken internal invariant in the Engine worker fails the active and materializing requests and leaves the waiting ones queued, as recovery from out of memory does, instead of failing the Engine; eight consecutive recoveries without a completed unit still fail it | off |
  | `--prefill-chunk N` | text-prefill chunk | `1024` |
@@ -804,7 +852,7 @@ index 6207ab0ce85e3e581585b7ede25fc0a8ca04279e..5f28708256578ed01fc0c6ef601c8b72
  | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
  | `--log-colours on\|off` | `on` colours the console log's levels and gives every statistic of the operational lines a stable colour; `off` keeps the log plain; a redirected stderr is always plain | levels coloured on a console |
  | `--log-stats-panel on\|off` | pin the session statistics panel beneath the console log on an interactive terminal | off |
-@@ -1764,8 +1773,8 @@ The table lists executable defaults. The startup example selects a long-context
+@@ -1764,8 +1771,8 @@ The table lists executable defaults. The startup example selects a long-context
  | `--lm-head-draft` | optimized proposal head | off |
  | `--adaptive-mtp` | MTP only: each round verifies 3..`--draft-tokens` drafts, the width favored by the drafts' measured survival and the measured round cost; see [Adaptive MTP](#adaptive-mtp) | off |
  | `--mtp-attention-window N` | MTP only: the draft head attends to the first 64 keys and the newest `N` before its query; verification keeps full attention; see [MTP attention window](#mtp-attention-window) | `0` (whole history) |
@@ -9167,7 +9215,7 @@ index ab01274c8a1f315ae3e86d0d48250cd990d3b114..d7927525b9b07fb98c2b665f8743ede5
  // execution, hosted file search and the like. NInfer has no executor for any of them, and a client
  // never waits on one itself, so declaring one is silently dropped rather than failing the request:
 diff --git a/src/serve/openai_responses_request.cpp b/src/serve/openai_responses_request.cpp
-index 3ba42f01dc15452752c2cef8953e64d9874e5e7a..444aec61475734a925a00a2f653d3bb8b9d4a981 100644
+index 3ba42f01dc15452752c2cef8953e64d9874e5e7a..13767f40cfbc3c3ef11f590e9db2a5bcd159fc38 100644
 --- a/src/serve/openai_responses_request.cpp
 +++ b/src/serve/openai_responses_request.cpp
 @@ -134,15 +134,7 @@ ninfer::product::media_acquire::Source parse_image_source(const Json& part) {
@@ -9209,11 +9257,16 @@ index 3ba42f01dc15452752c2cef8953e64d9874e5e7a..444aec61475734a925a00a2f653d3bb8
      if (!function_description.empty()) {
          parsed.canonical["description"] = std::move(function_description);
      }
-@@ -884,15 +872,10 @@ void parse_tools(const Json& body, ParsedPromptFields& out) {
- // A forced choice is executed by writing the call opener into the generation prompt, and that
- // opener carries the function name. One callable tool determines the name; several leave it to the
- // model, which is the part NInfer cannot constrain.
+@@ -881,18 +869,12 @@ void parse_tools(const Json& body, ParsedPromptFields& out) {
+     }
+ }
+ 
+-// A forced choice is executed by writing the call opener into the generation prompt, and that
+-// opener carries the function name. One callable tool determines the name; several leave it to the
+-// model, which is the part NInfer cannot constrain.
 -void force_single_callable_tool(ParsedPromptFields& out, const std::string& request) {
++// Required selection is enforced by the generation tool contract. Keep declarations in the
++// reusable prompt; an optional allowed_names subset limits which tools may be called.
 +void require_callable_tools(ParsedPromptFields& out, const std::string& request) {
      std::vector<ToolDefinition>& tools = out.prompt.generation.tools;
      if (tools.empty()) { bad_request(request + " requires at least one tool", "tool_choice"); }
@@ -9227,7 +9280,7 @@ index 3ba42f01dc15452752c2cef8953e64d9874e5e7a..444aec61475734a925a00a2f653d3bb8
  }
  
  void filter_allowed_tools(const Json& choice, ParsedPromptFields& out) {
-@@ -933,14 +916,9 @@ void filter_allowed_tools(const Json& choice, ParsedPromptFields& out) {
+@@ -933,14 +915,9 @@ void filter_allowed_tools(const Json& choice, ParsedPromptFields& out) {
          selected.insert(name);
      }
  
@@ -9244,7 +9297,7 @@ index 3ba42f01dc15452752c2cef8953e64d9874e5e7a..444aec61475734a925a00a2f653d3bb8
      }
  }
  
-@@ -958,7 +936,7 @@ void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
+@@ -958,7 +935,7 @@ void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
              out.prompt.generation.tool_choice.mode = ToolChoiceMode::None;
          } else if (value == "required") {
              out.prompt.generation.tool_choice.mode = ToolChoiceMode::Auto;
@@ -9253,7 +9306,7 @@ index 3ba42f01dc15452752c2cef8953e64d9874e5e7a..444aec61475734a925a00a2f653d3bb8
          } else {
              bad_request("tool_choice must be 'auto', 'none', or a supported object", "tool_choice");
          }
-@@ -987,6 +965,7 @@ void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
+@@ -987,6 +964,7 @@ void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
          }
          out.prompt.generation.tool_choice.mode        = ToolChoiceMode::Auto;
          out.prompt.generation.tool_choice.forced_name = name;
@@ -9261,7 +9314,18 @@ index 3ba42f01dc15452752c2cef8953e64d9874e5e7a..444aec61475734a925a00a2f653d3bb8
          out.wire_tool_choice                          = choice;
          return;
      }
-@@ -1137,6 +1116,7 @@ ParsedPromptFields parse_prompt_fields(const Json& body, const RequestLimits& li
+@@ -1013,8 +991,8 @@ void parse_reasoning(const Json& body, OpenAIResponsesPromptRequest& out) {
+         }
+     }
+     // summary and its deprecated alias generate_summary ask for a summary of the reasoning. NInfer
+-    // has no summarizer: a valid value requests the fixed protocol placeholder summary, without
+-    // changing model execution, and is echoed in the response.
++    // has no summarizer: a valid value is echoed without changing model execution; reasoning
++    // Items keep an empty summary and complete raw content.
+     std::optional<std::string> summary_style;
+     for (const char* key : {"summary", "generate_summary"}) {
+         if (!reasoning.contains(key) || reasoning.at(key).is_null()) { continue; }
+@@ -1137,6 +1115,7 @@ ParsedPromptFields parse_prompt_fields(const Json& body, const RequestLimits& li
  
      parse_tools(body, out);
      parse_tool_choice(body, out);
@@ -9269,7 +9333,7 @@ index 3ba42f01dc15452752c2cef8953e64d9874e5e7a..444aec61475734a925a00a2f653d3bb8
      out.parallel_tool_calls = optional_bool(body, "parallel_tool_calls", true);
      // Honoured by trimming the response to one tool call rather than refused; see the chat parser.
      out.prompt.generation.parallel_tool_calls = out.parallel_tool_calls;
-@@ -1257,6 +1237,7 @@ void validate_common_top_level(const Json& body, bool create) {
+@@ -1257,6 +1236,7 @@ void validate_common_top_level(const Json& body, bool create) {
                                                                    "text",
                                                                    "thinking_budget",
                                                                    "tool_choice",
@@ -9277,7 +9341,7 @@ index 3ba42f01dc15452752c2cef8953e64d9874e5e7a..444aec61475734a925a00a2f653d3bb8
                                                                    "tools",
                                                                    "top_logprobs",
                                                                    "top_p",
-@@ -1275,6 +1256,7 @@ void validate_common_top_level(const Json& body, bool create) {
+@@ -1275,6 +1255,7 @@ void validate_common_top_level(const Json& body, bool create) {
                                                                    "reasoning",
                                                                    "text",
                                                                    "tool_choice",
@@ -9285,6 +9349,93 @@ index 3ba42f01dc15452752c2cef8953e64d9874e5e7a..444aec61475734a925a00a2f653d3bb8
                                                                    "tools",
                                                                    "truncation"};
      const auto& allowed = create ? create_fields : count_fields;
+diff --git a/src/serve/openai_responses_response.cpp b/src/serve/openai_responses_response.cpp
+index cd6841604ee694527c5663540a5e9ce20e0117a3..7f3bb437d7b0c5d191618c73fde75a81cb6c2a5d 100644
+--- a/src/serve/openai_responses_response.cpp
++++ b/src/serve/openai_responses_response.cpp
+@@ -16,8 +16,6 @@ namespace {
+ 
+ using Json = nlohmann::json;
+ 
+-constexpr char kReasoningSummaryPlaceholder[] = "Reasoning summary is not supported. (Ninfer: OpenAI Responses API)";
+-
+ std::string response_status(ninfer::FinishReason reason) {
+     switch (reason) {
+     case ninfer::FinishReason::OutputLimit:
+@@ -51,12 +49,6 @@ void add_wire_function_identity(Json& object, const OpenAIResponsesCreateRequest
+     if (position->second.wire_namespace) { object["namespace"] = *position->second.wire_namespace; }
+ }
+ 
+-// Build the display-only reasoning summary requested by the client.
+-Json reasoning_summary(const OpenAIResponsesCreateRequest& request) {
+-    if (!request.prompt.reasoning_summary) { return Json::array(); }
+-    return Json::array({Json{{"type", "summary_text"}, {"text", kReasoningSummaryPlaceholder}}});
+-}
+-
+ // Mirror raw reasoning into the opaque field requested by Harness. This is deliberately not
+ // encryption; replayed prompt and cache semantics continue to come only from reasoning_text.
+ void add_reasoning_encrypted_content(Json& item, const OpenAIResponsesCreateRequest& request,
+@@ -128,7 +120,8 @@ BuiltOpenAIResponse build_response(const std::string& id, std::int64_t created_a
+             {"id", ids.reasoning},
+             {"type", "reasoning"},
+             {"status", reasoning_status},
+-            {"summary", reasoning_summary(request)},
++            // Clients may prefer summary over content; never mask raw reasoning with a placeholder.
++            {"summary", Json::array()},
+             {"content",
+              Json::array({Json{{"type", "reasoning_text"}, {"text", outcome.reasoning}}})}};
+         add_reasoning_encrypted_content(reasoning_item, request, outcome.reasoning);
+@@ -261,40 +254,15 @@ public:
+         reasoning_started               = true;
+         ids.reasoning                   = new_openai_response_item_id("rs");
+         reasoning_index                 = next_output_index++;
+-        const Json summary              = reasoning_summary(request);
+         const Json item                 = {{"id", ids.reasoning},
+                                            {"type", "reasoning"},
+                                            {"status", "in_progress"},
+-                                           {"summary", summary},
++                                           {"summary", Json::array()},
+                                            {"content", Json::array()}};
+         const Json part                 = {{"type", "reasoning_text"}, {"text", ""}};
+         std::vector<std::string> events = {
+             sse(event("response.output_item.added",
+                       Json{{"output_index", reasoning_index}, {"item", item}}))};
+-        if (!summary.empty()) {
+-            const Json added_summary_part = {{"type", "summary_text"}, {"text", ""}};
+-            const Json& done_summary_part = summary.at(0);
+-            events.push_back(sse(event("response.reasoning_summary_part.added",
+-                                       Json{{"item_id", ids.reasoning},
+-                                            {"output_index", reasoning_index},
+-                                            {"summary_index", 0},
+-                                            {"part", added_summary_part}})));
+-            events.push_back(sse(event("response.reasoning_summary_text.delta",
+-                                       Json{{"item_id", ids.reasoning},
+-                                            {"output_index", reasoning_index},
+-                                            {"summary_index", 0},
+-                                            {"delta", kReasoningSummaryPlaceholder}})));
+-            events.push_back(sse(event("response.reasoning_summary_text.done",
+-                                       Json{{"item_id", ids.reasoning},
+-                                            {"output_index", reasoning_index},
+-                                            {"summary_index", 0},
+-                                            {"text", kReasoningSummaryPlaceholder}})));
+-            events.push_back(sse(event("response.reasoning_summary_part.done",
+-                                       Json{{"item_id", ids.reasoning},
+-                                            {"output_index", reasoning_index},
+-                                            {"summary_index", 0},
+-                                            {"part", done_summary_part}})));
+-        }
+         events.push_back(
+             sse(event("response.content_part.added", Json{{"item_id", ids.reasoning},
+                                                           {"output_index", reasoning_index},
+@@ -312,7 +280,7 @@ public:
+         Json item = {{"id", ids.reasoning},
+                      {"type", "reasoning"},
+                      {"status", item_status},
+-                     {"summary", reasoning_summary(request)},
++                     {"summary", Json::array()},
+                      {"content", Json::array({part})}};
+         add_reasoning_encrypted_content(item, request, reasoning_text);
+         return {sse(event("response.reasoning_text.done", Json{{"item_id", ids.reasoning},
 diff --git a/src/serve/request.h b/src/serve/request.h
 index 89246fedeb2c88e954a0c94baddb4d2eae9f8611..76e77b7d7d0c5db7cdf2414cdbb34c3aa9fc6116 100644
 --- a/src/serve/request.h
@@ -14422,10 +14573,10 @@ index 5210c7c6a53926cd360203f67fed844577f4670f..94a61a649b1211d00ecee30b27af2734
          std::cout << "model config, binding, resources and Use checks passed\n";
 diff --git a/tests/models/qwen3_5/test_tool_constraints.cpp b/tests/models/qwen3_5/test_tool_constraints.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3e7fc9e5e59b135d5639c5e0933d50f03f94cf03
+index 0000000000000000000000000000000000000000..31780ec6b3a3ded4fda3a0198c12134c1b0fde27
 --- /dev/null
 +++ b/tests/models/qwen3_5/test_tool_constraints.cpp
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,165 @@
 +#include "models/qwen3_5/frontend/tool_call_parser.h"
 +#include "models/qwen3_5/frontend/tool_grammar.h"
 +#include "text/structured_output.h"
@@ -14473,12 +14624,19 @@ index 0000000000000000000000000000000000000000..3e7fc9e5e59b135d5639c5e0933d50f0
 +    };
 +    ToolChoice required; required.mode = ToolChoiceMode::Required;
 +    require(accepts(required, call), "required multi-tool choice");
++    require(!accepts(required, ""), "required blocks EOS before a tool call");
 +    require(!accepts(required, "text"), "required must block text and early EOS");
 +    require(!accepts(required, "<tool_call>\n<function=unknown>"), "declared names only");
 +    require(accepts({}, "prefix " + call), "auto permits text before first call");
 +    require(!accepts({}, call + "garbage"), "terminal call sequence forbids trailing text");
 +    required.allowed_names = std::vector<std::string>{"alpha"};
 +    require(!accepts(required, call), "allowed subset enforced");
++    required.allowed_names = std::vector<std::string>{"beta"};
++    require(accepts(required, call), "required permits the single allowed tool");
++    require(!accepts(required, ""), "single allowed tool is still required");
++    ToolChoice allowed_auto; allowed_auto.allowed_names = std::vector<std::string>{"alpha"};
++    require(accepts(allowed_auto, "normal answer"), "auto allowed subset permits a text answer");
++    require(!accepts(allowed_auto, call), "auto also blocks tools outside allowed subset");
 +    required.allowed_names.reset(); required.parallel = false;
 +    require(!accepts(required, call + "\n" + call), "parallel=false enforced in generation");
 +    ToolChoice none; none.mode = ToolChoiceMode::None;
@@ -14520,6 +14678,19 @@ index 0000000000000000000000000000000000000000..3e7fc9e5e59b135d5639c5e0933d50f0
 +    require(!strict_accepts(bad), "strict bound violation blocked");
 +    bad = strict_call; bad.replace(bad.find("abc"),3,"ABC");
 +    require(!strict_accepts(bad), "raw string pattern blocked");
++    auto unsupported = Json::parse(strict_def[0]);
++    unsupported["function"]["parameters"]["properties"]["values"] =
++        {{"type", "array"}, {"items", {{"type", "string"}}}, {"uniqueItems", true}};
++    bool rejected_unsupported = false;
++    const std::vector<std::string> unsupported_def = {unsupported.dump()};
++    try {
++        (void)fi::select_tool_call_contract(
++            fi::build_tool_call_output_contract(unsupported_def, true), required);
++    } catch (const RequestError& error) {
++        rejected_unsupported = error.kind() == RequestErrorKind::InvalidToolConstraint &&
++            std::string(error.what()).find("uniqueItems") != std::string::npos;
++    }
++    require(rejected_unsupported, "unsupported strict tool schema fails explicitly");
 +    fi::ToolCallOutputDecoder decoder(typed,128);
 +    require(decoder.feed(strict_call).empty(), "tool markup withheld from content");
 +    auto parsed = decoder.finish();
@@ -15194,10 +15365,20 @@ index 7284d51c7766745daa1a0d116d0b18be16a2c6e8..695db764d87c78f9409ff8cb78ffbdb1
      return failures == 0 ? 0 : 1;
  }
 diff --git a/tests/test_openai_responses.cpp b/tests/test_openai_responses.cpp
-index 970f13e2c6a581e0e923dff0f4b4b4ed2cc4ebca..5675f599bb0bdc1d09dfa9780c51f41ef1abff19 100644
+index 970f13e2c6a581e0e923dff0f4b4b4ed2cc4ebca..0c807f956dee3896961f35be9f53a7ddd48e0b7e 100644
 --- a/tests/test_openai_responses.cpp
 +++ b/tests/test_openai_responses.cpp
-@@ -288,6 +288,43 @@ int test_reasoning_encrypted_content_request() {
+@@ -20,9 +20,6 @@ namespace {
+ using Json = ninfer::serve::RequestJson;
+ using namespace ninfer::serve;
+ 
+-constexpr char kReasoningSummaryPlaceholder[] =
+-    "Reasoning summary is not supported. (Ninfer: OpenAI Responses API)";
+-
+ int check(bool condition, const std::string& message) {
+     if (condition) { return 0; }
+     std::cerr << "FAIL: " << message << '\n';
+@@ -288,6 +285,43 @@ int test_reasoning_encrypted_content_request() {
      return failures;
  }
  
@@ -15241,7 +15422,7 @@ index 970f13e2c6a581e0e923dff0f4b4b4ed2cc4ebca..5675f599bb0bdc1d09dfa9780c51f41e
  int test_typed_items_and_cache_markers() {
      const Json body = {
          {"model", "m"},
-@@ -312,7 +349,7 @@ int test_typed_items_and_cache_markers() {
+@@ -312,7 +346,7 @@ int test_typed_items_and_cache_markers() {
                                        {"prompt_cache_breakpoint", Json{{"mode", "explicit"}}}},
                                   Json{{"type", "input_image"},
                                        {"image_url", "data:image/png;base64,AA=="},
@@ -15250,12 +15431,240 @@ index 970f13e2c6a581e0e923dff0f4b4b4ed2cc4ebca..5675f599bb0bdc1d09dfa9780c51f41e
                Json{{"id", "msg_refusal"},
                     {"type", "message"},
                     {"role", "assistant"},
-@@ -1532,13 +1569,20 @@ int test_graft_extension() {
+@@ -638,9 +672,13 @@ int test_tools_and_effective_subset() {
+     const OpenAIResponsesCreateRequest request =
+         parse_openai_responses_create_request(body, limits());
+     int failures = 0;
+-    failures += check(request.tools.size() == 2 && request.prompt.generation.tools.size() == 1 &&
+-                          request.prompt.generation.tools[0].name == "clock",
+-                      "wire tool list and effective callable subset remain distinct");
++    failures += check(request.tools.size() == 2 && request.prompt.generation.tools.size() == 2 &&
++                          request.prompt.generation.tools[0].name == "weather" &&
++                          request.prompt.generation.tools[1].name == "clock" &&
++                          request.prompt.generation.tool_choice.mode == ToolChoiceMode::Auto &&
++                          request.prompt.generation.tool_choice.allowed_names ==
++                              std::vector<std::string>{"clock"},
++                      "allowed tools retain prompt declarations and carry a separate callable subset");
+ 
+     Json none           = body;
+     none["tool_choice"] = "none";
+@@ -666,22 +704,28 @@ int test_tools_and_effective_subset() {
+ 
+     Json required           = body;
+     required["tool_choice"] = "required";
+-    failures += check(api_error([&] {
+-                          (void)parse_openai_responses_create_request(required, limits());
+-                      }).code == "tool_choice_not_supported",
+-                      "required over several tools stays rejected");
++    const auto required_multiple = parse_openai_responses_create_request(required, limits());
++    failures += check(required_multiple.prompt.generation.tools.size() == 2 &&
++                          required_multiple.prompt.generation.tool_choice.mode == ToolChoiceMode::Required &&
++                          !required_multiple.prompt.generation.tool_choice.allowed_names,
++                      "required permits selection among all declared tools");
+     required["tools"] = Json::array({clock});
+     const OpenAIResponsesCreateRequest required_single =
+         parse_openai_responses_create_request(required, limits());
+-    failures += check(required_single.prompt.generation.tool_choice.forced_name == "clock",
+-                      "required over a single callable tool did not force it");
++    failures += check(required_single.prompt.generation.tools.size() == 1 &&
++                          required_single.prompt.generation.tools[0].name == "clock" &&
++                          required_single.prompt.generation.tool_choice.mode == ToolChoiceMode::Required,
++                      "required with one declaration requires that tool");
+ 
+     Json allowed_required                   = body;
+     allowed_required["tool_choice"]["mode"] = "required";
+     const OpenAIResponsesCreateRequest one_allowed =
+         parse_openai_responses_create_request(allowed_required, limits());
+-    failures += check(one_allowed.prompt.generation.tool_choice.forced_name == "clock",
+-                      "allowed_tools narrowed to one function did not force it");
++    failures += check(one_allowed.prompt.generation.tools.size() == 2 &&
++                          one_allowed.prompt.generation.tool_choice.mode == ToolChoiceMode::Required &&
++                          one_allowed.prompt.generation.tool_choice.allowed_names ==
++                              std::vector<std::string>{"clock"},
++                      "required allowed tools retain declarations and require the selected subset");
+ 
+     const Json ordered = Json::parse(
+         R"({"model":"m","input":"probe","tools":[{"type":"function","name":"probe","parameters":{"type":"object","properties":{"zeta":{"type":"string"},"alpha":{"type":"integer"}}}}]})");
+@@ -729,11 +773,13 @@ int test_namespace_tools() {
+     failures += check(request.tools.size() == 2 && request.tools[0].at("type") == "namespace" &&
+                           request.tools[0].at("tools")[0].at("name") == "now",
+                       "wire namespace grouping is retained in the response echo");
+-    failures += check(request.prompt.generation.tools.size() == 1 &&
++    failures += check(request.prompt.generation.tools.size() == 2 &&
+                           request.prompt.generation.tools[0].name == "mcp__clock__now" &&
+                           request.prompt.generation.tools[0].description ==
+-                              "Clock service\n\nRead the current time",
+-                      "allowed namespace function lowers to one Engine tool with shared context");
++                              "Clock service\n\nRead the current time" &&
++                          request.prompt.generation.tool_choice.allowed_names ==
++                              std::vector<std::string>{"mcp__clock__now"},
++                      "allowed namespace selection uses lowered identity and retains declaration context");
+     failures +=
+         check(request.tool_identities.at("mcp__clock__now").name == "now" &&
+                   request.tool_identities.at("mcp__clock__now").wire_namespace == "mcp__clock",
+@@ -882,11 +928,21 @@ int test_explicit_rejections() {
+     int failures    = 0;
+ 
+     Json value     = base;
+-    value["tools"] = Json::array({Json{{"type", "function"}, {"name", "f"}, {"strict", true}}});
+-    failures += check(api_code([&] {
+-                          (void)parse_openai_responses_create_request(value, limits());
+-                      }) == "strict_tools_not_supported",
+-                      "strict function schema is rejected explicitly");
++    const Json parameters = {{"type", "object"}, {"properties", Json::object()},
++                             {"additionalProperties", false}};
++    value["tools"] = Json::array({Json{{"type", "function"}, {"name", "f"}, {"strict", true},
++                                     {"parameters", parameters}}});
++    const auto strict_tool = parse_openai_responses_create_request(value, limits());
++    failures += check(strict_tool.prompt.generation.tools.size() == 1 &&
++                          strict_tool.prompt.generation.tools[0].strict &&
++                          Json::parse(strict_tool.prompt.generation.tools[0].input_schema_json) == parameters,
++                      "strict tool flag and parameter schema reach generation unchanged");
++    value["tools"][0]["strict"] = "true";
++    const auto invalid_strict = api_error([&] {
++        (void)parse_openai_responses_create_request(value, limits());
++    });
++    failures += check(invalid_strict.status == 400 && invalid_strict.param == "tools",
++                      "strict tool flag rejects non-boolean values");
+ 
+     value         = base;
+     value["text"]         = Json{{"format", Json{{"type", "json_schema"},
+@@ -1123,11 +1179,10 @@ int test_reasoning_summary_options() {
+     OpenAIResponsesRuntimeValues runtime;
+     const BuiltOpenAIResponse built =
+         make_openai_response_object("resp_test", 1, request, runtime, sample_outcome());
+-    // This line answers a requested summary with its placeholder item and echoes the style
+-    // (test_response_object holds the item's content); the base reported none.
+     failures += check(built.body.at("reasoning").at("summary") == "auto" &&
+-                          built.body.at("output")[0].at("summary").size() == 1,
+-                      "a requested summary is echoed and answered with the placeholder");
++                          built.body.at("output")[0].at("summary") == Json::array() &&
++                          built.body.at("output")[0].at("content")[0].at("text") == "thought",
++                      "a summary hint is echoed without masking the complete reasoning text");
+     return failures;
+ }
+ 
+@@ -1146,10 +1201,7 @@ int test_response_object() {
+         make_openai_response_object("resp_test", 123, request, runtime, sample_outcome());
+     const Json& response = built.body;
+     int failures         = 0;
+-    // RequestJson keeps insertion order and compares objects in it; the response is built with
+-    // sorted keys, so the expected parts are written in that order.
+-    const Json summary =
+-        Json::array({Json{{"text", kReasoningSummaryPlaceholder}, {"type", "summary_text"}}});
++    const Json summary = Json::array();
+     failures += check(response.at("object") == "response" && response.at("status") == "completed" &&
+                           response.at("completed_at").is_number_integer(),
+                       "completed response has a completion timestamp");
+@@ -1158,7 +1210,7 @@ int test_response_object() {
+                   response.at("output")[0].at("summary") == summary &&
+                   response.at("output")[0].at("content")[0].at("text") == "thought" &&
+                   response.at("output")[0].at("encrypted_content") == "thought",
+-              "reasoning placeholders preserve raw reasoning in both replays");
++              "empty summaries preserve complete reasoning in both replay fields");
+     failures += check(response.at("max_output_tokens").is_null(),
+                       "omitted output budget remains null in the response");
+     failures += check(response.at("output").size() == 2 &&
+@@ -1171,7 +1223,7 @@ int test_response_object() {
+             response.at("usage").at("output_tokens_details").at("reasoning_tokens") == 3 &&
+             response.at("usage").at("total_tokens") == 18 && built.output_history.size() == 1 &&
+             built.output_history[0].reasoning_content == "thought",
+-        "summary placeholder does not enter usage or persisted reasoning history");
++        "summary hints do not change usage or persisted reasoning history");
+ 
+     const OpenAIResponsesCreateRequest omitted_request = parse_openai_responses_create_request(
+         Json{{"model", "m"}, {"input", "hello"}, {"store", false}}, limits());
+@@ -1314,11 +1366,10 @@ int test_sse_sequence_and_failures() {
+     int failures                    = 0;
+     std::uint64_t expected_sequence = 0;
+     std::string text_deltas;
+-    std::string summary_deltas;
++    std::string reasoning_deltas;
+     std::string reasoning_id;
+     std::vector<std::string> event_types;
+-    const Json summary =
+-        Json::array({Json{{"text", kReasoningSummaryPlaceholder}, {"type", "summary_text"}}});
++    const Json summary = Json::array();
+     for (const std::string& event : wire) {
+         failures += check(event.find("[DONE]") == std::string::npos,
+                           "Responses stream does not use Chat [DONE]");
+@@ -1338,26 +1389,16 @@ int test_sse_sequence_and_failures() {
+             failures += check(payload.at("output_index") == 0 &&
+                                   payload.at("item").at("id") == reasoning_id &&
+                                   payload.at("item").at("summary") == summary &&
++                                  payload.at("item").at("content")[0].at("text") == "thought" &&
+                                   payload.at("item").at("encrypted_content") == "thought",
+-                              "reasoning output_item.done carries the complete raw mirror");
++                              "reasoning output_item.done preserves raw text with an empty summary");
+         } else if (type.starts_with("response.reasoning_summary_")) {
+-            failures +=
+-                check(payload.at("item_id") == reasoning_id && payload.at("output_index") == 0 &&
+-                          payload.at("summary_index") == 0,
+-                      "reasoning summary events retain stable Item indices");
+-            if (type == "response.reasoning_summary_part.added") {
+-                failures +=
+-                    check(payload.at("part") == Json{{"text", ""}, {"type", "summary_text"}},
+-                          "reasoning summary part starts empty");
+-            } else if (type == "response.reasoning_summary_text.delta") {
+-                summary_deltas += payload.at("delta").get<std::string>();
+-            } else if (type == "response.reasoning_summary_text.done") {
+-                failures += check(payload.at("text") == kReasoningSummaryPlaceholder,
+-                                  "reasoning summary text done carries the placeholder");
+-            } else if (type == "response.reasoning_summary_part.done") {
+-                failures += check(payload.at("part") == summary.at(0),
+-                                  "reasoning summary part done carries the placeholder");
+-            }
++            failures += check(false, "unsupported summaries must not emit summary events");
++        } else if (type == "response.reasoning_text.delta") {
++            reasoning_deltas += payload.at("delta").get<std::string>();
++        } else if (type == "response.reasoning_text.done") {
++            failures += check(payload.at("text") == "thought",
++                              "completed reasoning text matches the streamed raw content");
+         }
+         if (type == "response.output_text.delta") {
+             text_deltas += payload.at("delta").get<std::string>();
+@@ -1366,10 +1407,6 @@ int test_sse_sequence_and_failures() {
+     const std::vector<std::string> expected_types = {"response.created",
+                                                      "response.in_progress",
+                                                      "response.output_item.added",
+-                                                     "response.reasoning_summary_part.added",
+-                                                     "response.reasoning_summary_text.delta",
+-                                                     "response.reasoning_summary_text.done",
+-                                                     "response.reasoning_summary_part.done",
+                                                      "response.content_part.added",
+                                                      "response.reasoning_text.delta",
+                                                      "response.reasoning_text.done",
+@@ -1384,13 +1421,14 @@ int test_sse_sequence_and_failures() {
+                                                      "response.output_item.done",
+                                                      "response.completed"};
+     failures +=
+-        check(event_types == expected_types && summary_deltas == kReasoningSummaryPlaceholder,
+-              "SSE emits the complete reasoning summary lifecycle in order");
++        check(event_types == expected_types && reasoning_deltas == "thought",
++              "SSE emits complete raw reasoning without placeholder summary events");
+     failures += check(
+         parse_event(wire.front()).at("type") == "response.created" &&
+             parse_event(wire.back()).at("type") == "response.completed" &&
+             parse_event(wire.back()).at("response").at("reasoning").at("summary") == "detailed" &&
+             parse_event(wire.back()).at("response").at("output")[0].at("summary") == summary &&
++            parse_event(wire.back()).at("response").at("output")[0].at("content")[0].at("text") == "thought" &&
+             parse_event(wire.back())
+                     .at("response")
+                     .at("output")[0]
+@@ -1532,13 +1570,28 @@ int test_graft_extension() {
  
  } // namespace
  
 -int main() {
 +int main(int argc, char** argv) {
++    if (argc == 2 && std::string_view(argv[1]) == "--reasoning-only") {
++        const int failures = test_reasoning_encrypted_content_request() +
++                             test_reasoning_summary_options() + test_response_object() +
++                             test_sse_sequence_and_failures() +
++                             test_response_output_history_round_trip();
++        if (failures == 0) { std::cout << "OpenAI Responses reasoning tests passed\n"; }
++        return failures == 0 ? 0 : 1;
++    }
 +    if (argc == 2 && std::string_view(argv[1]) == "--image-detail-only") {
 +        const int failures = test_image_detail_fallback() + test_typed_items_and_cache_markers() +
 +                             test_response_output_history_round_trip();
