@@ -9,7 +9,7 @@ param(
     [ValidateRange(1, 65535)][int]$Port = 18200,
     [string]$ListenHost = '127.0.0.1',
     [ValidateRange(256, 2147483647)][int]$Context = 262144,
-    [ValidateRange(128, 2147483647)][int]$Budget = 4096,
+    [ValidateRange(128, 2147483647)][int]$Budget = 32768,
     [ValidateRange(64, 2147483647)][int]$Reserve = 1024,
     [ValidateRange(1, 1048576)][int]$HostMiB = 16384,
     [ValidateRange(128, 2147483647)][int]$Prefill = 128,
@@ -27,8 +27,12 @@ param(
     [ValidateRange(1, 16384)][int]$VisionTokens = 1024,
     [ValidateSet('off', 'auto')][string]$DeviceProfile = 'off',
     [ValidateRange(0, 2147483647)][int]$ThinkingBudget = 0,
-    [ValidateRange(0, 2147483647)][int]$SinkTokens = 0,
-    [ValidateRange(64, 2147483647)][int]$RecentTokens = 64,
+    [ValidateRange(0, 2147483647)][int]$SinkTokens = 5120,
+    [ValidateRange(0, 2147483647)][int]$RecentTokens = 5120,
+    [switch]$NoLrfu,
+    [ValidateRange(0.0, 1.0)][double]$LrfuLambda = 0.5,
+    [ValidateScript({ $_ -gt 0 -and $_ -le 1 })][double]$LrfuTopFraction = 0.9,
+    [ValidateSet('mean', 'max')][string]$ScoreAggregation = 'max',
     [string]$DiskPath,
     [ValidateRange(1, 1048576)][int]$DiskMiB = 4096,
     [string[]]$WorkerArgs = @(),
@@ -125,6 +129,7 @@ if ($Backend -eq 'ninfer') {
         throw 'Fast prefill requires INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8'
     }
     if ($VisionResidency -ne 'resident' -and !$Vision) { throw 'CPU Vision requires -Vision' }
+    if ($RecentTokens -lt 64) { throw 'ninfer -RecentTokens must be at least 64 to keep the newest append page' }
     $sinkBlocks = if ($SinkTokens -lt 64) { 1 } else { [int][Math]::Floor($SinkTokens / 64) }
     $recentBlocks = [int][Math]::Floor($RecentTokens / 64)
     if (($sinkBlocks + $recentBlocks) * 64 -gt $Budget) {
@@ -152,15 +157,23 @@ if ($Backend -eq 'ninfer') {
     if ($Vision) { $nativeArgs += @('--vision', '--vision-residency', $VisionResidency, '--vision-max-merged', "$VisionTokens") }
     if ($ThinkingBudget -gt 0) { $nativeArgs += @('--default-thinking-budget', "$ThinkingBudget") }
 } else {
-    foreach ($name in @('StageLayers', 'MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'ThinkingBudget', 'SinkTokens', 'RecentTokens')) {
+    foreach ($name in @('StageLayers', 'MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'ThinkingBudget')) {
         if ($PSBoundParameters.ContainsKey($name)) { throw "-$name configures ninfer; use llama native options in -WorkerArgs" }
     }
     $nativeArgs = @('-m', $Model, '--host', $ListenHost, '--port', "$Port", '-c', "$Context",
         '-n', "$MaxTokens", '--kvmem-budget', "$Budget", '--kvmem-gen-reserve', "$Reserve",
-        '--kv-dtype', $KvType, '-b', "$Prefill", '-ub', "$Prefill")
+        '--kv-dtype', $KvType, '-b', "$Prefill", '-ub', "$Prefill",
+        '--kvmem-sink-tokens', "$SinkTokens", '--kvmem-recent-tokens', "$RecentTokens")
     if ($PSBoundParameters.ContainsKey('HostMiB') -or $DiskPath) { $nativeArgs += @('--kvmem-host-mib', "$HostMiB") }
 }
 if ($DiskPath) { $nativeArgs += @('--kvmem-disk-path', $DiskPath, '--kvmem-disk-mib', "$DiskMiB") }
+# Use invariant decimals because both native parsers expect a dot.
+if (!$NoLrfu) {
+    $nativeArgs += @('--kvmem-lrfu',
+        '--kvmem-lrfu-lambda', $LrfuLambda.ToString('R', [Globalization.CultureInfo]::InvariantCulture),
+        '--kvmem-lrfu-top-frac', $LrfuTopFraction.ToString('R', [Globalization.CultureInfo]::InvariantCulture))
+}
+$nativeArgs += @('--kvmem-score-agg', $ScoreAggregation)
 $nativeArgs += $WorkerArgs
 if ($DryRun) {
     @{ backend = $Backend; argv = @($Worker) + $nativeArgs; capabilities = $capabilities

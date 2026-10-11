@@ -162,9 +162,9 @@ try {
         $budgetRejected = $_.Exception.Message -match 'Use -ThinkingBudget'
     }
     if (!$budgetRejected) { throw 'native thinking-budget argument was accepted' }
-    if ($copy.argv[[array]::IndexOf($copy.argv, '--kvmem-sink-tokens') + 1] -ne '0' -or
-        $copy.argv[[array]::IndexOf($copy.argv, '--kvmem-recent-tokens') + 1] -ne '64') {
-        throw 'default sink/recent windows were not one 64-token page'
+    if ($copy.argv[[array]::IndexOf($copy.argv, '--kvmem-sink-tokens') + 1] -ne '5120' -or
+        $copy.argv[[array]::IndexOf($copy.argv, '--kvmem-recent-tokens') + 1] -ne '5120') {
+        throw 'default sink/recent windows were not 5120 tokens each'
     }
     $windows = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
         -SinkTokens 128 -RecentTokens 127 | ConvertFrom-Json

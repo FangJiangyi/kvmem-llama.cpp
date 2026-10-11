@@ -23,10 +23,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\start-ninf
 ```powershell
 ./scripts/windows/start-backend.ps1 -Backend ninfer `
   -Model 'D:/models/model.ninfer' -Gpu 'GPU-your-device-uuid' `
-  -Context 262144 -Budget 2048 -Reserve 512 -Prefill 512 -HostMiB 12288
+  -Context 262144 -Budget 2048 -Reserve 512 -Prefill 512 -HostMiB 12288 -SinkTokens 64 -RecentTokens 64
 ```
 
 `-Worker` 可指定本地构建的 `ninfer-serve.exe` 或 `llama-kvmem-server.exe`；省略时使用包内 `workers/<backend>/` 的程序。`-DryRun` 输出启动参数，`-Describe` 查询静态能力。默认监听 `127.0.0.1:18200`，前台运行，Ctrl+C 结束本次启动的 worker。安装 NVIDIA 驱动及 Microsoft Visual C++ 2015–2022 x64 Runtime；包内保留各引擎的 DLL，模型另行提供。
+
+当前源码的 Windows 统一入口、`start-ninfer.ps1` 及 llama.cpp 的 IQ3/IQ4 入口默认开启 LRFU，`lambda=0.5`、`top-frac=0.9`，GQA 聚合使用 `max`。sink 和 recent 各默认 5120 tokens，两项计入 B；统一入口默认 B=32768，ninfer/IQ3/IQ4 快捷配方的 B/R 保持原值。可用 `-SinkTokens`、`-RecentTokens` 覆盖；自定义小预算时也要相应缩小这两个保留窗口。`top-frac` 控制本轮得分可累加到历史的命中范围，不是 KV 预算比例；同分块也可命中。可用 `-LrfuLambda`、`-LrfuTopFraction` 和 `-ScoreAggregation mean|max` 覆盖；`-NoLrfu -ScoreAggregation mean` 恢复无历史加权的 mean 检索。`start-ninfer.ps1 -DryRun` 可查看完整参数。直接运行 worker 时仍默认关闭 LRFU、使用 mean，sink/recent 也沿用 worker 原有默认值；需要包含 LRFU 实现的新 worker，已发布的旧 ZIP 不适用这些参数。
 
 ninfer 源码的多卡采用上游 layer pipeline。`-Gpu 'GPU-a,GPU-b'` 保留 UUID 顺序，第一张卡承担 embedding、head、MTP 和 resident Vision；CPU Vision 保留原生 Host 编码路径。可加 `-StageLayers 40,24` 指定连续层数，省略时按各卡空闲内存规划；层数总和由模型装载器验证。统一启动器禁止重复或空设备、超过八卡，以及经 `WorkerArgs` 重复传入设备参数。物理卡必须具有相同 compute capability，显存容量可不同。B/R 仍是每请求的完整逻辑窗口，H 是共享预算；各卡只持有自己的层，不按卡数拆分 B/R 或重复建立 Host 历史。
 
@@ -34,7 +36,7 @@ ninfer 源码的多卡采用上游 layer pipeline。`-Gpu 'GPU-a,GPU-b'` 保留 
 ./scripts/windows/start-backend.ps1 -Backend ninfer `
   -Worker 'D:/build/apps/ninfer-serve.exe' -Model 'D:/models/model-vision-mtp.ninfer' `
   -Gpu 'GPU-first-uuid,GPU-second-uuid' -Vision -VisionResidency cpu `
-  -MtpDrafts 3 -Budget 2048 -Reserve 512 -Prefill 512
+  -MtpDrafts 3 -Budget 2048 -Reserve 512 -Prefill 512 -SinkTokens 64 -RecentTokens 64
 ```
 
 多卡范围与证据见 [多卡验收](ninfer-multigpu-validation-20261006.md)。这是源码能力，RC1 ZIP 不因此更新。多卡用于扩展容量，尚无本轮吞吐提升结论；`--cuda-memory-policy mixed/strict` 继续要求单卡，KVMem overlay Vision、DFlash、并行 prefill 和磁盘冷快照继续沿用当前限制。
@@ -44,7 +46,7 @@ llama.cpp 示例：
 ```powershell
 ./scripts/windows/start-backend.ps1 -Backend llamacpp `
   -Model 'D:/models/model.gguf' -Gpu 'GPU-your-device-uuid' `
-  -Budget 4096 -Reserve 1024 -KvType q8_0
+  -Budget 4096 -Reserve 1024 -KvType q8_0 -SinkTokens 128 -RecentTokens 0
 ```
 
 已有的 llama.cpp 可执行文件、`start-server.ps1`、IQ3/IQ4 启动脚本仍可使用。原生参数通过 `-WorkerArgs @('--flag', 'value')` 传入，例如 llama 的 MTP、mmproj 和会话配置。后端参数保留各自含义；`.gguf` 与 `.ninfer` 不互换，也不迁移跨引擎 KV。当前源码的 `-HostMiB` 对应两个后端共用的原生 KV payload RAM 预算；llama 仅在显式指定或启用 SSD 时传入，保持未配置时的行为。
@@ -69,18 +71,18 @@ ngram 默认关闭。
 # 固定 MTP3，两个活动文本请求；B/R 是每请求预算，H 是全局预算。
 ./scripts/windows/start-backend.ps1 -Backend ninfer `
   -Model 'D:/models/model-mtp.ninfer' -Gpu 'GPU-your-device-uuid' `
-  -MtpDrafts 3 -Concurrency 2 -Budget 2048 -Reserve 512 -Prefill 512
+  -MtpDrafts 3 -Concurrency 2 -Budget 2048 -Reserve 512 -Prefill 512 -SinkTokens 64 -RecentTokens 64
 
 # 图像需要包含视觉权重与预处理资源的制品；默认最多 1024 个视觉 tokens/图。
 ./scripts/windows/start-backend.ps1 -Backend ninfer `
   -Model 'D:/models/model-vision-mtp.ninfer' -Gpu 'GPU-your-device-uuid' `
-  -Vision -VisionTokens 1024 -MtpDrafts 3 -Budget 2048 -Reserve 512 -Prefill 512
+  -Vision -VisionTokens 1024 -MtpDrafts 3 -Budget 2048 -Reserve 512 -Prefill 512 -SinkTokens 64 -RecentTokens 64
 
 # 八条活动图文请求；B/R 是每路预算，ngram 显式关闭。
 ./scripts/windows/start-backend.ps1 -Backend ninfer `
   -Model 'D:/models/model-vision-mtp.ninfer' -Gpu 'GPU-your-device-uuid' `
   -Vision -VisionResidency cpu -Concurrency 8 -VisionTokens 1024 `
-  -MtpDrafts 3 -NgramDrafts 0 -Budget 2048 -Reserve 512 -Prefill 512
+  -MtpDrafts 3 -NgramDrafts 0 -Budget 2048 -Reserve 512 -Prefill 512 -SinkTokens 64 -RecentTokens 64
 
 # NVFP4 本地源码验收配置示例，使用新编译的 worker；ngram 关闭。
 ./scripts/windows/start-backend.ps1 -Backend ninfer `
