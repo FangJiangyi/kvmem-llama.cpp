@@ -290,7 +290,7 @@ if (KVMEM_BUILD_LLAMA)
         src/adapter
         backends/llamacpp/include
         backends/llamacpp/common)
-    target_link_libraries(llama-kvmem-cli PRIVATE llama llama-common)
+    target_link_libraries(llama-kvmem-cli PRIVATE llama llama-common kvmem)
     target_compile_features(llama-kvmem-cli PRIVATE cxx_std_17)
 
     add_executable(llama-kvmem-server tools/llama-kvmem-server.cpp tools/llama-kvmem-driver.cpp tools/kvmem-spec.cpp

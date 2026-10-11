@@ -887,7 +887,7 @@ index 0000000000000000000000000000000000000000..c958ba04a4438eb0b1e0f3b0bfec0ab4
 +                std::uint32_t block_tokens, Tensor& output, cudaStream_t stream);
 +} // namespace ninfer::ops
 diff --git a/include/ninfer/types.h b/include/ninfer/types.h
-index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..39588a747dc4194d92105fe7a9a7c6ee7614919c 100644
+index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..9818e2101ec045898342d794f30e0c582760efdf 100644
 --- a/include/ninfer/types.h
 +++ b/include/ninfer/types.h
 @@ -133,8 +133,9 @@ struct SpeculativeOptions {
@@ -901,7 +901,7 @@ index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..39588a747dc4194d92105fe7a9a7c6ee
      std::uint32_t ngram_draft_tokens = 0;
      std::uint32_t ngram_min_match    = 12;
      // CPU-only retention, separate from KV. Zero keeps request-local drafting.
-@@ -486,6 +487,39 @@ struct NgramTableOptions {
+@@ -486,6 +487,43 @@ struct NgramTableOptions {
      bool disabled = false;
  };
  
@@ -914,6 +914,10 @@ index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..39588a747dc4194d92105fe7a9a7c6ee
 +// Optional sparse KV working set. B and R are independent whole-page budgets;
 +// Host retains native page records, including quantization scale planes.
 +struct KvmemOptions {
++    bool lrfu = false;
++    double lrfu_lambda = 0.5;
++    double lrfu_top_fraction = 0.9;
++    bool score_agg_max = false;
 +    std::uint32_t selected_tokens = 0; // B; zero disables KVMem
 +    std::uint32_t reserve_tokens = 0;  // R; also covers each prefill chunk
 +    // Whole-page rounding uses this backend's fixed 64-token page.
@@ -941,7 +945,7 @@ index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..39588a747dc4194d92105fe7a9a7c6ee
  struct EngineOptions {
      std::filesystem::path artifact_path;
      std::filesystem::path chat_template_path;
-@@ -516,6 +550,8 @@ struct EngineOptions {
+@@ -516,6 +554,8 @@ struct EngineOptions {
      // Past the model's native window (max_position_embeddings), up to four times it: positions run
      // unscaled RoPE, or with rope_yarn the whole window takes Qwen's YaRN at factor
      // max_context / native (ops::RopeYarn).
@@ -950,7 +954,7 @@ index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..39588a747dc4194d92105fe7a9a7c6ee
      bool rope_yarn = false;
      // A fixed YaRN factor in (1,4] for every position of the text and MTP layers, whatever
      // max_context is: Qwen documents one factor per deployment rather than one per window. 1 leaves
-@@ -528,8 +564,8 @@ struct EngineOptions {
+@@ -528,8 +568,8 @@ struct EngineOptions {
      float rope_scaling_factor = 1.0F;
      // The interpolation threshold; 0 is the model's native window.
      std::uint32_t rope_scaling_original_context = 0;
@@ -961,7 +965,7 @@ index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..39588a747dc4194d92105fe7a9a7c6ee
      bool structured_output = false;
      // Admit waiting requests to free lanes while other requests prefill, instead of holding
      // admission until the staged prefill finishes.
-@@ -544,6 +580,17 @@ struct EngineOptions {
+@@ -544,6 +584,17 @@ struct EngineOptions {
      // on the grounds that WDDM will evict other allocations. Not for a GPU that drives the
      // desktop, whose allocations are often not evictable.
      bool wddm_evictable_budget         = false;
@@ -979,7 +983,7 @@ index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..39588a747dc4194d92105fe7a9a7c6ee
      ModelSuspendOptions suspend;
      KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(2048);
      std::uint32_t max_concurrency      = 1;
-@@ -751,7 +798,17 @@ struct NgramSessionHints {
+@@ -751,7 +802,17 @@ struct NgramSessionHints {
      // prior generated proposals must not reuse the random draws that produced them.
  };
  
@@ -997,7 +1001,7 @@ index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..39588a747dc4194d92105fe7a9a7c6ee
      ExecutionOptions execution;
      StopPolicy stop;
      OutputOptions output;
-@@ -1030,6 +1087,7 @@ enum class RequestErrorKind : std::uint8_t {
+@@ -1030,6 +1091,7 @@ enum class RequestErrorKind : std::uint8_t {
      ContextLengthExceeded,
      MediaBudgetExceeded,
      InvalidMedia,
@@ -1005,7 +1009,7 @@ index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..39588a747dc4194d92105fe7a9a7c6ee
      Overloaded,
      QueueTimeout,
      Cancelled,
-@@ -1491,7 +1549,47 @@ struct DeviceMemorySummary {
+@@ -1491,7 +1553,47 @@ struct DeviceMemorySummary {
      std::size_t expert_cache_bytes = 0;
  };
  
@@ -1053,7 +1057,7 @@ index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..39588a747dc4194d92105fe7a9a7c6ee
      int device                                = 0;
      std::uint32_t max_context                 = 0;
      KvCapacityMode kv_capacity_mode           = KvCapacityMode::Explicit;
-@@ -1527,6 +1625,7 @@ struct MemorySummary {
+@@ -1527,6 +1629,7 @@ struct MemorySummary {
      std::size_t host_kv_page_group_bytes = 0;
      // Engaged only when the single host RAM budget mode is active.
      std::size_t host_cache_budget_bytes = 0;
@@ -1061,7 +1065,7 @@ index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..39588a747dc4194d92105fe7a9a7c6ee
      // Qwen3.8-Flash-Next host or disk experts: device memory lent to the expert cache, over every
      // device.
      std::size_t expert_cache_bytes = 0;
-@@ -1566,7 +1665,10 @@ struct RuntimeHostWorkStats {
+@@ -1566,7 +1669,10 @@ struct RuntimeHostWorkStats {
  // Monotonic execution counters, boundary-consistent current gauges, and explicitly named last
  // decision observations. Consumers derive interval counters by subtracting two snapshots.
  struct RuntimeStats {
@@ -2725,7 +2729,7 @@ index b9e8ffc18db940b5506d9ea85f82ca7e2a06595e..cca92cb3108f2590615d4f391370ab14
      std::vector<MediaPlaceholderByteSpec> media_placeholders;
      std::vector<MediaTokenRunByteSpec> media_token_runs;
 diff --git a/src/models/qwen3_5/frontend/frontend.cpp b/src/models/qwen3_5/frontend/frontend.cpp
-index 71bd1b049e0fc28e2eb9f692ab5051933ebe4dce..387a3544204673cee1199661027be6e164401675 100644
+index 71bd1b049e0fc28e2eb9f692ab5051933ebe4dce..9043d5296106664ca261ef509a3eff965db45d8c 100644
 --- a/src/models/qwen3_5/frontend/frontend.cpp
 +++ b/src/models/qwen3_5/frontend/frontend.cpp
 @@ -13,6 +13,7 @@
@@ -2769,7 +2773,16 @@ index 71bd1b049e0fc28e2eb9f692ab5051933ebe4dce..387a3544204673cee1199661027be6e1
          result.identity.rewrite_checkpoint = encoded.rewrite_checkpoint;
          result.identity.rewrite_execution_frontiers =
              std::move(encoded.rewrite_execution_frontiers);
-@@ -1328,6 +1341,7 @@ PreparedPrompt Frontend::prepare_tokens(std::vector<TokenId> token_ids, bool all
+@@ -1188,6 +1201,8 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
+     // request builds on, so it publishes no prefix of its own; a prefill graft is replayed, and its
+     // end is published as a shared prefix.
+     const bool is_direct_graft = graft && graft->kind != GraftKind::PrefillKV;
++    if (options.continuation == PromptContinuationMode::NewAssistantTurn && !message_boundaries.empty())
++        result.memory_input_end = message_boundaries.back().value_or(0);
+     if (impl_->ngram_archive_enabled) {
+         const std::span<const TokenId> tokens(result.token_ids);
+         auto add = [&](std::span<const TokenId> span, NgramSourceKind kind, int priority) {
+@@ -1328,6 +1343,7 @@ PreparedPrompt Frontend::prepare_tokens(std::vector<TokenId> token_ids, bool all
      auto prepared              = std::make_unique<PreparedPromptData>();
      PreparedPromptData& result = *prepared;
      result.token_ids           = std::move(token_ids);
@@ -2777,7 +2790,7 @@ index 71bd1b049e0fc28e2eb9f692ab5051933ebe4dce..387a3544204673cee1199661027be6e1
      if (impl_->ngram_sources_enabled) {
          result.ngram_boundaries = impl_->ngram_boundaries;
          build_ngram_index(result);
-@@ -1373,21 +1387,31 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
+@@ -1373,21 +1389,31 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
                                              const StopPolicy& caller_stop,
                                              const OutputOptions& output,
                                              const ThinkingControlOptions& thinking,
@@ -2814,7 +2827,7 @@ index 71bd1b049e0fc28e2eb9f692ab5051933ebe4dce..387a3544204673cee1199661027be6e1
              envelope.alternative_format =
                  fi::structured_tool_call_format(*prompt.data_->tool_call_output);
          }
-@@ -1397,19 +1421,25 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
+@@ -1397,19 +1423,25 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
              for (std::size_t id = 0; id < vocab.size(); ++id) {
                  if (impl_->tokenizer->is_valid_token(id) &&
                      (!impl_->tokenizer->is_special_token(id) ||
@@ -2947,21 +2960,23 @@ index 86572b54f4382d158f5e31ba0c7341e8de779de5..e0b567c38cba751f691b832e62f1b955
                                                            std::uint32_t total_budget_remaining);
      [[nodiscard]] runtime::OutputDecision preview_terminal(FinishReason reason);
 diff --git a/src/models/qwen3_5/frontend/prepared_prompt.h b/src/models/qwen3_5/frontend/prepared_prompt.h
-index 4eae32ca426a6405d9549733a53010a0e83880a6..b09e7702ad07568f3b976c58e2f375197e9f204f 100644
+index 4eae32ca426a6405d9549733a53010a0e83880a6..d8f214b48d9be3c24645d1833eced5d2b02ca42a 100644
 --- a/src/models/qwen3_5/frontend/prepared_prompt.h
 +++ b/src/models/qwen3_5/frontend/prepared_prompt.h
-@@ -162,6 +162,10 @@ struct PreparedPromptData {
+@@ -162,6 +162,12 @@ struct PreparedPromptData {
      std::vector<std::uint64_t> block_hashes;
      std::vector<std::uint64_t> block_extras;
      std::vector<TokenId> token_ids;
 +    // Exact token range from frontend provenance. Absent means no trusted query;
 +    // retrieval keeps its recency fallback. Raw token input explicitly uses all rows.
 +    std::optional<TokenSpan> memory_query;
++    // Proven message boundary before a transient generation header; zero uses all input.
++    std::uint32_t memory_input_end = 0;
 +
      std::vector<std::uint8_t> token_types;
      std::vector<std::int32_t> positions;
      std::int32_t rope_delta = 0;
-@@ -172,6 +176,7 @@ struct PreparedPromptData {
+@@ -172,6 +178,7 @@ struct PreparedPromptData {
      PreparedContextCache context_cache;
      PreparedTapHints tap_hints;
      std::shared_ptr<const frontend::ToolCallOutputContract> tool_call_output;
@@ -4419,10 +4434,17 @@ index f825e588837f425592be6c3a56e1ceaf0b901c2f..042cadeb2677248ed70c59a002807832
      std::uint32_t main_page_groups          = 0;
      std::uint32_t max_concurrency           = 1;
 diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
-index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5e38e1d40 100644
+index 059f132fe09e7b9128a98f65fa481b8edc3aef72..f2e66e48b40fb18495ec75cb963045eef4cbde51 100644
 --- a/src/models/qwen3_5/program/prefill.cpp
 +++ b/src/models/qwen3_5/program/prefill.cpp
-@@ -52,6 +52,7 @@ DFlashFeatureSink make_dflash_prefill_sink(PrefillContext& state) {
+@@ -1,5 +1,6 @@
+ #include "models/qwen3_5/program/speculative/lookup_draft.h"
+ #include "models/qwen3_5/program/program_impl.h"
++#include "kvmem/mean_key_retrieval.hpp"
+ #include "models/qwen3_5/program/context_work.h"
+ #include "models/qwen3_5/program/context.h"
+ #include "models/qwen3_5/execution/linear.h"
+@@ -52,6 +53,7 @@ DFlashFeatureSink make_dflash_prefill_sink(PrefillContext& state) {
  void configure_text_card(TextContext& card, const ExecutionCore& execution,
                           const ops::SamplingConfig* sampling, std::int32_t state_source_slot,
                           std::int32_t state_destination_slot, std::uint32_t mtp_proposal_extent) {
@@ -4430,7 +4452,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
      card.set_sampling(sampling);
      card.set_linear_state_slots(state_source_slot, state_destination_slot);
      card.set_gdn_state_action(GdnStateAction::UpdateInPlace, nullptr);
-@@ -99,6 +100,7 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
+@@ -99,6 +101,7 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
      card.set_mtp_attention_window(state.execution.mtp_attention_window);
      configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                          state.state_destination_slot, state.mtp_proposal_extent);
@@ -4438,7 +4460,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
      card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
      card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                     : -1);
-@@ -126,6 +128,7 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
+@@ -126,6 +129,7 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
      card.set_mtp_attention_window(state.execution.mtp_attention_window);
      configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                          state.state_destination_slot, state.mtp_proposal_extent);
@@ -4446,7 +4468,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
      card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
      card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                     : -1);
-@@ -713,7 +716,9 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
+@@ -713,7 +717,9 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                             prompt_tokens + (initial_mtp_extent == 0 ? 0U : initial_mtp_extent - 1U))
              : speculative_backend == SpeculativeBackend::DFlash ? prompt_tokens
                                                                  : 0U;
@@ -4457,7 +4479,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
          request.grammar  = request_plan.grammar;
          request.logprobs = request_plan.logprobs;
          install_sampling(sequence, request, request_plan.sampling);
-@@ -723,6 +728,9 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
+@@ -723,6 +729,9 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
          request.timings              = {};
          request.pending              = {};
          request.publish_continuation = request_plan.summary.publish_continuation;
@@ -4467,7 +4489,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
          sequence.mtp_draft_count     = 0;
          sequence.tail_hidden_valid   = base == prompt_tokens && sequence.tail_hidden_valid;
          sequence.ledger.swap(materialization_ledger_);
-@@ -731,6 +739,20 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
+@@ -731,6 +740,20 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
          sequence.rebuild_work       = request_plan.root_rebuild_work;
          sequence.rebuild_tail_begin = request_plan.root_rebuild_tail_begin;
  
@@ -4488,7 +4510,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
          if (staged.disk_restore_frontier != 0) {
              bool restored = false;
              try {
-@@ -888,6 +910,93 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
+@@ -888,6 +911,93 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
      const auto tail_started           = Clock::now();
      try {
          timing.resume_submit();
@@ -4582,7 +4604,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
          const std::span<const ops::GdnReplayFoldRow> fold_span(fold_rows.data(), lanes.size());
          {
              // Each state shard folds its own layers on its own device's stream.
-@@ -1000,10 +1109,12 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
+@@ -1000,10 +1110,12 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
      const double tail_seconds = std::chrono::duration<double>(Clock::now() - tail_started).count();
      const std::uint32_t width = verify_drafts + 1U;
      try {
@@ -4595,7 +4617,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
                  if (!clear_lane_strict(sequence, request)) {
                      throw std::logic_error("cancelled speculative lane is not strictly releasable");
                  }
-@@ -1012,6 +1123,8 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
+@@ -1012,6 +1124,8 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
  
              const PendingCandidate pending = request.pending;
              const std::uint32_t committed  = accepted_tokens[row];
@@ -4604,7 +4626,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
              settle_state_fork(sequence);
              const TokenId* token_base =
                  speculative_backend == SpeculativeBackend::Mtp
-@@ -1057,6 +1170,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
+@@ -1057,6 +1171,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
  
              commit_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
              trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
@@ -4612,7 +4634,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
              if (terminal[row]) {
                  request.lifecycle = Lifecycle::Finishable;
              } else {
-@@ -1081,14 +1195,16 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1081,14 +1196,16 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
      }
  
      RequestControl::Prefill& staged = *request.prefill;
@@ -4631,7 +4653,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
      std::uint32_t processed_prompt_tokens = 0;
      // After a failed disk restore the admitted prefix is recomputed without being reported.
      const auto reported_tokens = [&staged, &processed_prompt_tokens] {
-@@ -1121,6 +1237,26 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1121,6 +1238,26 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
          // Prefill attention addresses its KV through the shared step table-row scalars. Another
          // lane's staging or capture can rebind them between this lane's steps, so every step
          // binds its own rows before any Prefill or MTP-bridge work.
@@ -4658,7 +4680,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
          bind_sequence_kv(sequence);
          StateImageSelectors selectors = state_selectors(sequence);
          // Hybrid prefix cache taps (docs/maintainer/hybrid-prefix-cache-spec.md §7.1): an exact tap
-@@ -1167,6 +1303,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1167,6 +1304,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
              selectors.destination,
              staged.initial_mtp_extent,
              0};
@@ -4669,7 +4691,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
          // The first pass after a Host restore waits for each layer's copies (hybrid spec §6.5).
          // The chunk function takes the events itself: they are a view into the landing batch, and
          // the KV commits between chunks (the MTP bridge's among them) poll the cache, which frees
-@@ -1206,7 +1346,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1206,7 +1347,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
  
          if (staged.cursor < staged.prompt_tokens) {
              const std::uint32_t nominal =
@@ -4678,7 +4700,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
              mark_workspace_usage(staged.prepare_mtp ? workspace_plan.mtp_prefill
                                                      : workspace_plan.text_prefill);
              if (is_masked_draft_backend(speculative_backend)) {
-@@ -1232,7 +1372,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1232,7 +1373,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                      schedule_state.rewrite_checkpoint_hidden = nullptr;
                  }
  
@@ -4688,7 +4710,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
                  const std::optional<std::uint32_t> capture_frontier =
                      staged.next_capture < staged.capture_groups.size()
                          ? std::optional<std::uint32_t>(
-@@ -1256,6 +1397,22 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1256,6 +1398,22 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                  if (hybrid_split && (!split_frontier || *hybrid_split < *split_frontier)) {
                      split_frontier = *hybrid_split;
                  }
@@ -4711,7 +4733,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
                  execution::PrefillChunkResult result;
                  timing.pause();
                  if (staged.vision) {
-@@ -1279,7 +1436,11 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1279,7 +1437,11 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                  if (result.processed_tokens == 0 || result.processed_tokens > remaining) {
                      throw std::logic_error("ordinary prefill chunk made invalid progress");
                  }
@@ -4724,7 +4746,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
                  staged.cursor += result.processed_tokens;
                  processed_prompt_tokens += result.processed_tokens;
                  remaining -= result.processed_tokens;
-@@ -1294,6 +1455,20 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1294,6 +1456,20 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                  // Prompt transitions are canonical immediately. If this was the first write after
                  // an immutable source, close the Fork before potentially freezing a new rewrite.
                  settle_state_fork(sequence);
@@ -4745,7 +4767,7 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
                  if (hybrid_lane != nullptr && !result.finalized) {
                      hybrid_after_prefill_chunk(sequence, staged.cursor, staged.prompt_tokens);
                  }
-@@ -1320,6 +1495,17 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1320,6 +1496,17 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
              }
  
              if (!finalized) {
@@ -4763,7 +4785,38 @@ index 059f132fe09e7b9128a98f65fa481b8edc3aef72..efc76697eac29668f398efdcda8ee3d5
                  if (staged.cursor == staged.prompt_tokens) {
                      throw std::logic_error("staged prefill reached the prompt without sampling");
                  }
-@@ -1438,6 +1624,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1364,6 +1551,30 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+             }
+         }
+ 
++        if (kvmem_options.lrfu && sequence.window.query_tokens &&
++            sequence.window.query_tokens == sequence.window.query_end - sequence.window.query_begin) {
++            // Accept the final input view once; pressure reselections reuse its history.
++            auto& window = sequence.window;
++            const auto& config = parameters.model.config().text;
++            std::vector<std::uint32_t> counts(config.full_attention_layers, window.query_tokens);
++            window.selector->set_retrieval_scores(kvmem::mean_key_retrieval_scores(
++                *window.statistics, window.selector->block_count(), {window.query_sum.data(), counts.data(),
++                    config.full_attention_layers, config.attention->head_dim,
++                    config.attention->num_attention_heads, config.attention->num_key_value_heads,
++                    kvmem_options.score_agg_max ? kvmem::GqaScoreAggregation::Max : kvmem::GqaScoreAggregation::Mean}));
++            if (sequence.window.selector->commit_retrieval_round()) {
++                const auto end = staged.prompt.memory_input_end ? staged.prompt.memory_input_end : staged.prompt_tokens;
++                window.history_input.assign(staged.prompt.token_ids.begin(), staged.prompt.token_ids.begin() + end);
++                window.history_input_identity.assign(staged.prompt);
++                window.history_input_identity.truncate(end);
++                window.history_points.push_back(kvmem::lrfu_input_point(end, 64, window.selector->retrieval_checkpoint()));
++            }
++            if (kvmem_options.verify_transfers) {
++                const auto history = sequence.window.selector->retrieval_checkpoint();
++                std::fprintf(stderr, "KVMEM_LRFU round=%llu committed=%d blocks=%zu\n",
++                    static_cast<unsigned long long>(history.round), int(history.committed), history.scores->size());
++            }
++        }
+         copy_round_token();
+         if (request.logprobs) { fetch_logprobs(1); }
+         std::array<TokenId, qwen3_5::kMtpDecodeMaximumDrafts> initial_drafts{};
+@@ -1438,6 +1649,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
              .complete                = true,
              .timing                  = timing.finish(),
          };
@@ -5068,7 +5121,7 @@ index ddd6cb476416bd85a565fe462c2aec62e845a2bb..9ce5eec77269840e832be0ee050e1588
      out.max_context     = capacity;
      out.kv_capacity     = kv_capacity;
 diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
-index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317d6c6a99a 100644
+index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..5887033c39e70d66b7b768c8a4b28d3282c9bb3f 100644
 --- a/src/models/qwen3_5/program/program_impl.h
 +++ b/src/models/qwen3_5/program/program_impl.h
 @@ -5,6 +5,11 @@
@@ -5117,11 +5170,12 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
      bool text_retained_tail_release       = false;
      bool backend_retained_tail_release    = false;
      std::optional<std::uint32_t> graft_shared_slot_index;
-@@ -456,6 +467,123 @@ struct DecodeGraphFamily {
+@@ -456,6 +467,127 @@ struct DecodeGraphFamily {
  // Target model continuation for one logical sequence. This state remains meaningful after the
  // request which produced it has finished, so it is deliberately separate from request lifecycle,
  // output, sampling, and round-control state.
 +struct KvmemPrefixCheckpoint {
++    kvmem::LrfuState history;
 +    kvmem::CheckpointIdentity identity;
 +    std::vector<TokenId> prefix;
 +    ResidentPrefixIdentity prefix_identity;
@@ -5135,7 +5189,7 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
 +};
 +
 +enum class KvmemCheckpointKind : std::uint8_t { Base, Endpoint, InputFallback, Reconstruction };
-+// Lookup priority for equal frontiers; also the fixed v5 snapshot slot order.
++// Lookup priority for equal frontiers.
 +inline constexpr std::array kKvmemCheckpointKinds{
 +    KvmemCheckpointKind::Endpoint, KvmemCheckpointKind::Reconstruction,
 +    KvmemCheckpointKind::InputFallback, KvmemCheckpointKind::Base};
@@ -5200,6 +5254,9 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
 +};
 +
 +struct KvmemWindowState {
++    std::vector<TokenId> history_input;
++    ResidentPrefixIdentity history_input_identity;
++    std::vector<kvmem::LrfuPoint> history_points;
 +    std::optional<PreparedSessionKey> session_key;
 +    std::uint64_t publication_order = 0;
 +    bool update_session_index = true;
@@ -5241,7 +5298,7 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
  struct SequenceState {
      std::optional<SequenceKVBundle> kv;
      ActiveStateBinding state;
-@@ -471,6 +599,7 @@ struct SequenceState {
+@@ -471,6 +603,7 @@ struct SequenceState {
      qwen3_5::detail::ResidentPrefixIdentity prefix_identity;
      qwen3_5::detail::PrefixShortlistDigests prefix_digests;
      std::int32_t rope_delta               = 0;
@@ -5249,7 +5306,7 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
      std::uint32_t text_kv_valid           = 0;
      std::uint32_t mtp_kv_valid            = 0;
      std::uint32_t dflash_context_frontier = 0;
-@@ -535,6 +664,9 @@ struct RequestControl {
+@@ -535,6 +668,9 @@ struct RequestControl {
      detail::PhysicalResources active_resources;
      detail::PhysicalResources optional_resources;
      bool publish_continuation = true;
@@ -5259,7 +5316,7 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
      // The sequence's own output ceiling: the largest frontier its lease may ever cover, so
      // on-demand growth never leases pages the request cannot reach.
      std::uint32_t lease_ceiling = 0;
-@@ -560,12 +692,16 @@ struct RequestControl {
+@@ -560,12 +696,16 @@ struct RequestControl {
          // not the restore succeeds; after a failed restore the prefill recomputes [0, frontier)
          // and keeps those tokens out of its reports, so the admitted suffix stays exact.
          std::uint32_t disk_restore_frontier = 0;
@@ -5276,7 +5333,7 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
          MtpBridgeMode mtp_bridge            = MtpBridgeMode::None;
      };
  
-@@ -579,6 +715,9 @@ struct RequestControl {
+@@ -579,6 +719,9 @@ struct RequestControl {
          active_resources     = {};
          optional_resources   = {};
          publish_continuation = true;
@@ -5286,7 +5343,7 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
          lease_settled        = false;
          lease_space_limited  = false;
          lease_minimum_target = {};
-@@ -680,6 +819,11 @@ public:
+@@ -680,6 +823,11 @@ public:
      // True while this sequence waits for a media item submitted to a concurrent overlay window:
      // the lane must not be given a prefill unit, and every other lane keeps running.
      [[nodiscard]] bool vision_pending(SequenceHandle sequence) const noexcept;
@@ -5298,7 +5355,7 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
      void update_sampling(SequenceHandle sequence, const ResolvedSamplingParameters& sampling);
      [[nodiscard]] bool wait_context_transfer() noexcept;
      [[nodiscard]] bool try_claim_seal_window() noexcept;
-@@ -748,6 +892,7 @@ public:
+@@ -748,6 +896,7 @@ public:
      [[nodiscard]] KVEntitlementShape kv_entitlement_shape() const noexcept;
      [[nodiscard]] std::uint32_t concurrent_output_budget(std::uint32_t prompt_tokens) const noexcept;
      [[nodiscard]] bool isolated_request_feasible(const RequestBasePlan& base) const noexcept;
@@ -5306,7 +5363,7 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
  
      [[nodiscard]] bool hybrid_prefix_cache() const noexcept { return hybrid_ != nullptr; }
  
-@@ -806,11 +951,24 @@ public:
+@@ -806,11 +955,24 @@ public:
      void reset_memory_peaks() noexcept;
  
      friend struct qwen3_5::detail::PressurePlanningSessionImpl;
@@ -5331,7 +5388,7 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
      const std::uint32_t max_concurrency;
      // Frozen context-cache shape: an engaged host budget has already resolved host_state_slots,
      // host_kv_capacity_bytes and the long-anchor count on the plan this Program was built from.
-@@ -914,6 +1072,26 @@ public:
+@@ -914,6 +1076,26 @@ public:
      std::optional<DFlashPersistentState> dflash;
      qwen3_5::RoundState io;
      Tensor prefill_hidden;
@@ -5358,7 +5415,7 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
      std::optional<Tensor> score_hidden;
      Tensor sampling_config;
      Tensor token_counts;
-@@ -1200,6 +1378,7 @@ private:
+@@ -1200,6 +1382,7 @@ private:
          bool cancel_pending                 = false;
          bool prepared                       = false;
          bool terminal                       = false;
@@ -5366,7 +5423,7 @@ index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..4908f496f3f96161c7964b020f95c317
      };
  
      std::uint64_t next_materialization_id_ = 1;
-@@ -1698,6 +1877,53 @@ private:
+@@ -1698,6 +1881,53 @@ private:
                                          std::uint32_t backend_pages);
      void bind_sequence_kv(SequenceState& sequence);
      void unbind_sequence_kv(SequenceState& sequence) noexcept;
@@ -5597,10 +5654,10 @@ index 9085edcc7beaa3649711d7695784d2494dea7755..3bb9c685bd99416a7d9ba5539fc8229a
      sequence.dflash_context_frontier = 0;
 diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c24d8c8384295fbffd819e000250c63e95928ff9
+index 0000000000000000000000000000000000000000..b0ff6ce1eed79d8ad6b81d0d25fd31a92d67266b
 --- /dev/null
 +++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
-@@ -0,0 +1,1389 @@
+@@ -0,0 +1,1407 @@
 +#include "models/qwen3_5/program/program_impl.h"
 +#include "models/qwen3_5/program/context.h"
 +#include "models/qwen3_5/program/context_work.h"
@@ -6203,7 +6260,8 @@ index 0000000000000000000000000000000000000000..c24d8c8384295fbffd819e000250c63e
 +            state.selector->set_retrieval_scores(kvmem::mean_key_retrieval_scores(
 +                *state.statistics, count, {state.query_sum.data(), counts.data(),
 +                    config.full_attention_layers, config.attention->head_dim,
-+                    config.attention->num_attention_heads, config.attention->num_key_value_heads}));
++                    config.attention->num_attention_heads, config.attention->num_key_value_heads,
++                    kvmem_options.score_agg_max ? kvmem::GqaScoreAggregation::Max : kvmem::GqaScoreAggregation::Mean}));
 +            const std::vector<std::uint32_t> required(mandatory.begin(), mandatory.end());
 +            const auto ids = state.selector->pick_topk_blocks(required);
 +            selected.assign(ids.begin(), ids.end());
@@ -6353,6 +6411,7 @@ index 0000000000000000000000000000000000000000..c24d8c8384295fbffd819e000250c63e
 +    checkpoint->prefix_identity = sequence.prefix_identity;
 +    checkpoint->prefix_identity.truncate(frontier);
 +    checkpoint->mean_tail = window.statistics->mean_checkpoint(frontier);
++    checkpoint->history = window.selector->retrieval_checkpoint();
 +    const auto bytes = state_images->host_layout().image_bytes;
 +    checkpoint->state = std::make_unique<PinnedHostBuffer>(bytes);
 +    std::memset(checkpoint->state->data(), 0, bytes);
@@ -6496,6 +6555,7 @@ index 0000000000000000000000000000000000000000..c24d8c8384295fbffd819e000250c63e
 +    window.statistics->truncate_to(frontier);
 +    window.statistics->restore_mean_checkpoint(frontier, checkpoint.mean_tail);
 +    window.selector->truncate_to(frontier);
++    if (preserve_view) window.selector->restore_retrieval(checkpoint.history);
 +    window.statistics_frontier = frontier;
 +    window.archive.resize(pages);
 +    window.host_versions.resize(pages);
@@ -6735,6 +6795,21 @@ index 0000000000000000000000000000000000000000..c24d8c8384295fbffd819e000250c63e
 +        materialization->memory_history->native_ready;
 +    restore_memory_prefix(sequence, *checkpoint, true, false, resident_native);
 +    if (resident_native) materialization->memory_history.reset();
++    if (kvmem_options.lrfu) {
++        const auto limit = std::min(window.history_input.size(), staged.prompt.token_ids.size());
++        std::size_t prefix = 0;
++        while (prefix < limit && window.history_input[prefix] == staged.prompt.token_ids[prefix]) ++prefix;
++        const auto input_end = staged.prompt.memory_input_end ? staged.prompt.memory_input_end : staged.prompt.token_ids.size();
++        auto count = kvmem::lrfu_prefix_points(window.history_points, prefix, input_end);
++        while (count && !window.history_input_identity.matches(staged.prompt, window.history_points[count - 1].input_end))
++            --count;
++        window.history_points.resize(count);
++        window.selector->restore_retrieval(count ? window.history_points.back().state : kvmem::LrfuState{});
++        if (kvmem_options.verify_transfers) std::fprintf(stderr,
++            "KVMEM_LRFU_BEGIN parent=%llu inherited_inputs=%zu\n",
++            static_cast<unsigned long long>(window.selector->retrieval_checkpoint().round), count);
++    }
++    window.selector->begin_retrieval_round();
 +    if (backend_kv_pages) {
 +        // An MTP row combines target hidden at i with the embedding of token i+1.
 +        // Prefix identity proves only [0,frontier), so its last MTP row must be
@@ -6992,10 +7067,10 @@ index 0000000000000000000000000000000000000000..c24d8c8384295fbffd819e000250c63e
 +} // namespace ninfer::models::qwen3_5::detail
 diff --git a/src/models/qwen3_5/program/storage/memory_statistics.cpp b/src/models/qwen3_5/program/storage/memory_statistics.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1d8e5fbbee4b40db0d1ae6f7e293eafc0a7e4d79
+index 0000000000000000000000000000000000000000..536f88af08c85e74a7b7fd501572970f18ccdb6e
 --- /dev/null
 +++ b/src/models/qwen3_5/program/storage/memory_statistics.cpp
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,149 @@
 +#include "models/qwen3_5/program/program_impl.h"
 +#include <cmath>
 +#include <cstdio>
@@ -7034,11 +7109,15 @@ index 0000000000000000000000000000000000000000..1d8e5fbbee4b40db0d1ae6f7e293eafc
 +            .n_embd_k = memory_statistics->key_width,
 +            .block_tokens = 64});
 +        kvmem::KvMemStoreConfig selection;
++        selection.lrfu = kvmem_options.lrfu;
++        selection.lrfu_lambda = kvmem_options.lrfu_lambda;
++        selection.lrfu_top_fraction = kvmem_options.lrfu_top_fraction;
 +        selection.block_tokens = 64;
 +        selection.select_budget = kvmem_options.selected_tokens;
 +        selection.sink_blocks = kvmem_options.sink_blocks();
 +        selection.recent_blocks = kvmem_options.recent_blocks();
 +        state.selector = std::make_unique<kvmem::KvMemStore>(selection);
++        state.selector->begin_retrieval_round();
 +        state.query_sum.assign(memory_statistics->query_elements(), 0.0F);
 +        state.query_begin = query_begin;
 +        state.query_end = query_end;
@@ -8077,10 +8156,16 @@ index c056b1f50025966fc6f804d680d2977ff73ae57a..5332603b7fa60096b0081b9fdebc008a
 +
  } // namespace ninfer::runtime
 diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
-index b4bb6440f6a7ea17f23a07ee0e1107198b528f1a..36f24c297dacde5564f561ef4606902bc1457c49 100644
+index b4bb6440f6a7ea17f23a07ee0e1107198b528f1a..91c94186140b1f3037cac4f80850f74c8a82b2ed 100644
 --- a/src/runtime/engine/model_instance.cpp
 +++ b/src/runtime/engine/model_instance.cpp
-@@ -8,6 +8,7 @@
+@@ -1,4 +1,5 @@
+ #include "runtime/engine/model_instance.h"
++#include "kvmem/lrfu.hpp"
+ 
+ #include "core/vmm.h"
+ #include "calibration/device_calibration.h"
+@@ -8,6 +9,7 @@
  #include "runtime/engine/context_cache/context_cost.h"
  #include "runtime/engine/device_profile.h"
  #include "runtime/engine/diagnostics.h"
@@ -8088,7 +8173,7 @@ index b4bb6440f6a7ea17f23a07ee0e1107198b528f1a..36f24c297dacde5564f561ef4606902b
  #include "artifact/reader.h"
  #include "artifact/formats.h"
  #include "core/paged_kv_cache.h"
-@@ -20,6 +21,7 @@
+@@ -20,6 +22,7 @@
  #include <cmath>
  #include <filesystem>
  #include <memory>
@@ -8096,7 +8181,7 @@ index b4bb6440f6a7ea17f23a07ee0e1107198b528f1a..36f24c297dacde5564f561ef4606902b
  #include <optional>
  #include <string>
  #include <system_error>
-@@ -34,7 +36,52 @@ namespace ninfer::runtime {
+@@ -34,7 +37,52 @@ namespace ninfer::runtime {
  namespace {
  using Clock = std::chrono::steady_clock;
  
@@ -8149,7 +8234,7 @@ index b4bb6440f6a7ea17f23a07ee0e1107198b528f1a..36f24c297dacde5564f561ef4606902b
      if (options.artifact_path.empty()) {
          throw std::invalid_argument("Engine artifact_path must not be empty");
      }
-@@ -218,6 +265,93 @@ EngineOptions artifact_scoped_disk_tier(const EngineOptions& options,
+@@ -218,6 +266,96 @@ EngineOptions artifact_scoped_disk_tier(const EngineOptions& options,
  } // namespace
  
  EngineOptions normalize_engine_options(EngineOptions options) {
@@ -8169,6 +8254,9 @@ index b4bb6440f6a7ea17f23a07ee0e1107198b528f1a..36f24c297dacde5564f561ef4606902b
 +        options.kvmem.host_bytes > UINT64_MAX - options.kvmem.disk_bytes) {
 +        throw std::invalid_argument("KVMem SSD requires a directory and a valid nonzero disk quota");
 +    }
++    const kvmem::LrfuHistory validate_lrfu(options.kvmem.lrfu_lambda, options.kvmem.lrfu_top_fraction);
++    if ((options.kvmem.lrfu || options.kvmem.score_agg_max) && !options.kvmem.selected_tokens)
++        throw std::invalid_argument("KVMem retrieval options require selected_tokens");
 +    if (!options.kvmem.selected_tokens &&
 +        (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers ||
 +         !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes)) {
@@ -8243,7 +8331,7 @@ index b4bb6440f6a7ea17f23a07ee0e1107198b528f1a..36f24c297dacde5564f561ef4606902b
      switch (options.purpose) {
      case EnginePurpose::Generation:
          break;
-@@ -242,6 +376,22 @@ EngineOptions normalize_engine_options(EngineOptions options) {
+@@ -242,6 +380,22 @@ EngineOptions normalize_engine_options(EngineOptions options) {
      }
  
      ContextCacheOptions& cache = options.context_cache;
@@ -8266,7 +8354,7 @@ index b4bb6440f6a7ea17f23a07ee0e1107198b528f1a..36f24c297dacde5564f561ef4606902b
      if (options.speculative.ngram_archive_bytes != 0 &&
          options.speculative.ngram_draft_tokens == 0) {
          throw std::invalid_argument(
-@@ -253,10 +403,9 @@ EngineOptions normalize_engine_options(EngineOptions options) {
+@@ -253,10 +407,9 @@ EngineOptions normalize_engine_options(EngineOptions options) {
          throw std::invalid_argument("ngram session capacity must be between 1 MiB and the total "
                                      "archive capacity");
      }
@@ -8280,7 +8368,7 @@ index b4bb6440f6a7ea17f23a07ee0e1107198b528f1a..36f24c297dacde5564f561ef4606902b
      }
      const std::uint32_t concurrency = options.max_concurrency;
      // Injected grafts stay resident for the life of the Engine, each in a StateImage and a
-@@ -603,6 +752,30 @@ ResidencyTransition ModelInstance::resume(DeviceContext& device, DeviceSnapshot&
+@@ -603,6 +756,30 @@ ResidencyTransition ModelInstance::resume(DeviceContext& device, DeviceSnapshot&
  ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& device) {
      validate_options(requested);
      install_device_route_profile_for(requested, device);
@@ -8311,7 +8399,7 @@ index b4bb6440f6a7ea17f23a07ee0e1107198b528f1a..36f24c297dacde5564f561ef4606902b
      const auto start = Clock::now();
      // Every later stage of startup checks its options against the ones the model was loaded with, so
      // the stage split is decided once, here, and carried in the options from then on.
-@@ -632,8 +805,15 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
+@@ -632,8 +809,15 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
              .suspendable     = options.suspend.enabled,
              .retained_reader = options.suspend.enabled ? retained_reader : nullptr});
      device.synchronize();
@@ -8327,7 +8415,7 @@ index b4bb6440f6a7ea17f23a07ee0e1107198b528f1a..36f24c297dacde5564f561ef4606902b
      frontend.complete();
      StartupPhaseScope planning(options.startup_observer, StartupPhase::TargetFinalize);
      const std::size_t overlay_window_bytes =
-@@ -653,66 +833,155 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
+@@ -653,66 +837,155 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
              graft_main_pages += (graft.n_slots + page_tokens - 1U) / page_tokens;
          }
      }
@@ -8668,6 +8756,18 @@ index 0000000000000000000000000000000000000000..c21dbb500aff087e7372f9a43e4ed85f
 +}
 +
 +} // namespace ninfer::runtime
+diff --git a/src/serve/CMakeLists.txt b/src/serve/CMakeLists.txt
+index 609c2aac1ed78eefa7d10e6289443da798aed551..a193dd0d57c9c921ff17a83f18b0d91ef9c51cb0 100644
+--- a/src/serve/CMakeLists.txt
++++ b/src/serve/CMakeLists.txt
+@@ -34,6 +34,7 @@ add_library(ninfer_serve STATIC
+   model_registry.cpp
+ )
+ ninfer_internal_includes(ninfer_serve)
++target_link_libraries(ninfer_serve PRIVATE kvmem)
+ target_link_libraries(ninfer_serve
+   PUBLIC ninfer_engine Threads::Threads ninfer::json ninfer::httplib
+   PRIVATE ninfer_media_acquire ninfer_product_logging ninfer_product_prompt_input
 diff --git a/src/serve/anthropic_messages_request.cpp b/src/serve/anthropic_messages_request.cpp
 index 20ef6e25974c1b5a2060aa8057c7d92e060c7ce2..d6bea8d3d1b31774f904773dea8b6fdb2237face 100644
 --- a/src/serve/anthropic_messages_request.cpp
@@ -9288,21 +9388,26 @@ index 44457ed0408b4bf33d81a75656b50d832e8bfe8b..a7aac55d77cbfad1d7d2184e37bfc941
  
  // An optional `post_thinking` object: temperature (up to `max_temperature`), top_p, top_k, min_p,
 diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
-index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf129d2e4aed 100644
+index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54fc56486ec 100644
 --- a/src/serve/serve_options.cpp
 +++ b/src/serve/serve_options.cpp
-@@ -1,4 +1,6 @@
+@@ -1,4 +1,7 @@
  #include "serve/serve_options.h"
++#include "kvmem/retrieval_options.hpp"
 +#include "runtime/speculative_limits.h"
 +#include "product/cuda_memory_options.h"
  #include "product/post_thinking_options.h"
  #include "product/rope_yarn_options.h"
  #include "product/speculative_options.h"
-@@ -85,6 +87,26 @@ std::string serve_usage_text(const char* argv0) {
+@@ -85,6 +88,30 @@ std::string serve_usage_text(const char* argv0) {
             "  --help, -h                    show this help and exit\n"
             "\n"
             "MODEL & CONTEXT\n"
 +           "  --kvmem-budget N              selected history B, tokens aligned to 64\n"
++            "  --kvmem-lrfu               rank by decayed retrieval history\n"
++            "  --kvmem-lrfu-lambda X      history decay [0,1] (default 0.5)\n"
++            "  --kvmem-lrfu-top-frac X    hit fraction (0,1] (default 0.9)\n"
++            "  --kvmem-score-agg MODE     mean | max across GQA heads (default mean)\n"
 +           "  --kvmem-gen-reserve N         append workspace R, tokens aligned to 64\n"
 +           "  --kvmem-host-mib N            Host native KV payload budget H, MiB\n"
 +           "  --kvmem-sink-tokens N         always-kept prefix; default 0 = one 64-token\n"
@@ -9325,7 +9430,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
             "  --max-context N               logical context ceiling of each request (default\n"
             "                                8192)\n"
             "  --max-concurrency N           requests decoded together, 1..8 (default 1)\n"
-@@ -99,7 +121,7 @@ std::string serve_usage_text(const char* argv0) {
+@@ -99,7 +126,7 @@ std::string serve_usage_text(const char* argv0) {
             "  --chat-template FILE          replace the artifact's chat template at startup\n"
             "  --device N                    CUDA device index (default 0)\n"
             "  --devices A,B,...             one pipeline stage per listed device, 2..8\n"
@@ -9334,7 +9439,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
             "  --stage-layers A,B,...        layers per stage in --devices order (default:\n"
             "                                split by free memory)\n"
             "  --expert-residency device|host|disk  Qwen3.8-Flash-Next: expert banks in GPU\n"
-@@ -167,6 +189,26 @@ std::string serve_usage_text(const char* argv0) {
+@@ -167,6 +194,26 @@ std::string serve_usage_text(const char* argv0) {
             "  --rope-scaling-original-context N\n"
             "                                the interpolation threshold (default: the\n"
             "                                model's native window)\n"
@@ -9361,7 +9466,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
             "  --wddm-evictable-budget       Windows D3D12 builds: budget against dedicated\n"
             "                                memory, holding arenas resident\n"
             "\n"
-@@ -201,9 +243,8 @@ std::string serve_usage_text(const char* argv0) {
+@@ -201,9 +248,8 @@ std::string serve_usage_text(const char* argv0) {
             "KV CACHE\n"
             "  --kv-capacity N|auto          shared KV capacity in tokens (default\n"
             "                                --max-context, or auto with\n"
@@ -9373,7 +9478,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
             "                                " +
             std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
             "); alias --vram-headroom-mib\n"
-@@ -329,8 +370,8 @@ std::string serve_usage_text(const char* argv0) {
+@@ -329,8 +375,8 @@ std::string serve_usage_text(const char* argv0) {
             "  --ngram-draft-tokens N        copy up to N tokens (1..63) per round from\n"
             "                                earlier prompt, tool-result or output text,\n"
             "                                verified alongside --spec; on with 15 whenever\n"
@@ -9384,7 +9489,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
             "  --ngram-min-match N           shortest match a copy is drawn from, 4..64\n"
             "                                (default 12)\n"
             "  --ngram-archive-mib N         keep finished requests' copy sources in RAM for\n"
-@@ -342,7 +383,7 @@ std::string serve_usage_text(const char* argv0) {
+@@ -342,7 +388,7 @@ std::string serve_usage_text(const char* argv0) {
             "  --lookup-ngram N              context-lookup drafting alongside --spec: the\n"
             "                                last N tokens are matched against the sequence\n"
             "                                so far and what followed is proposed (default 0:\n"
@@ -9393,7 +9498,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
             "\n"
             "VISION (off by default)\n"
             "  --vision                      accept images and video and load the Vision GPU\n"
-@@ -405,8 +446,7 @@ std::string serve_usage_text(const char* argv0) {
+@@ -405,8 +451,7 @@ std::string serve_usage_text(const char* argv0) {
             "\n"
             "API BEHAVIOR\n"
             "  --structured-output           accept JSON and JSON Schema response formats;\n"
@@ -9403,7 +9508,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
             "  --unconstrained-response-format\n"
             "                                without --structured-output, generate such a\n"
             "                                request unconstrained instead of refusing it\n"
-@@ -536,6 +576,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -536,6 +581,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
      bool long_anchor_spacing_explicit = false;
      bool ngram_width_explicit         = false;
      bool vision_max_merged_explicit   = false;
@@ -9412,7 +9517,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
      std::optional<std::size_t> kv_headroom_mib;
      // Last flag seen that belongs to only one prefix-cache mode, for the cross-mode error.
      const char* legacy_cache_flag  = nullptr;
-@@ -603,6 +645,59 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -603,6 +650,72 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              options.kv_capacity  = parse_kv_capacity(require_value("--kv-capacity"));
              kv_capacity_explicit = true;
              continue;
@@ -9421,6 +9526,19 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
 +        if (arg == "--kvmem-budget") {
 +            options.kvmem.selected_tokens = static_cast<std::uint32_t>(
 +                parse_nonnegative_int(require_value("--kvmem-budget"), "kvmem-budget"));
++            continue;
++        }
++        if (arg == "--kvmem-lrfu") { options.kvmem.lrfu = true; continue; }
++        if (arg == "--kvmem-lrfu-lambda") {
++            options.kvmem.lrfu_lambda = kvmem::parse_lrfu_real(require_value("--kvmem-lrfu-lambda"), true);
++            continue;
++        }
++        if (arg == "--kvmem-lrfu-top-frac") {
++            options.kvmem.lrfu_top_fraction = kvmem::parse_lrfu_real(require_value("--kvmem-lrfu-top-frac"), false);
++            continue;
++        }
++        if (arg == "--kvmem-score-agg") {
++            options.kvmem.score_agg_max = kvmem::parse_score_aggregation(require_value("--kvmem-score-agg")) == 1;
 +            continue;
 +        }
 +        if (arg == "--kvmem-gen-reserve") {
@@ -9472,7 +9590,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
          }
          if (arg == "--kv-headroom-mib" || arg == "--vram-headroom-mib") {
              // --vram-headroom-mib is the Wallawalla47 fork's name for the same headroom.
-@@ -1147,7 +1242,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1147,7 +1260,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              continue;
          }
          if (arg == "--derive-session-keys") {
@@ -9481,7 +9599,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
              options.derive_session_keys = true;
              continue;
          }
-@@ -1227,6 +1322,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1227,6 +1340,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                  require_value("--rope-scaling-original-context"));
              continue;
          }
@@ -9495,7 +9613,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
          if (arg == "--wddm-evictable-budget") {
              options.wddm_evictable_budget = true;
              continue;
-@@ -1445,6 +1547,32 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1445,6 +1565,32 @@ ServeOptions parse_serve_options(int argc, char** argv) {
          throw std::invalid_argument("--default-graft '" + options.default_graft +
                                      "' does not name a --graft");
      }
@@ -9528,7 +9646,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
      if (!kv_capacity_explicit) {
          // The hybrid cache turns every Device page no active request holds into block cache, so
          // it sizes the KV pool to free VRAM unless a capacity is given.
-@@ -1458,8 +1586,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1458,8 +1604,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              "caching systems");
      }
      if (options.context_cache.mode == ContextCacheMode::Hybrid) {
@@ -9539,7 +9657,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
                                          " configures the default prefix cache and cannot be "
                                          "combined with --use-alt-prefix-caching");
          }
-@@ -1497,10 +1625,16 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1497,10 +1643,16 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                                      " requires --use-alt-prefix-caching");
      }
      if (kv_headroom_mib.has_value()) {
@@ -9556,7 +9674,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
      }
      if (long_anchor_spacing_explicit && !options.context_cache.automatic_long_anchors) {
          throw std::invalid_argument("--long-anchor-spacing requires --auto-long-anchors");
-@@ -1565,7 +1699,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1565,7 +1717,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
          throw std::invalid_argument("--stats-port must be in [1,65535] and differ from --port");
      }
      if (options.max_context == 0) { throw std::invalid_argument("--max-context must be positive"); }
@@ -9565,7 +9683,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
          options.kv_capacity.explicit_tokens < options.max_context) {
          throw std::invalid_argument("--kv-capacity must be at least --max-context");
      }
-@@ -1606,10 +1740,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1606,10 +1758,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
          throw std::invalid_argument(
              "--cuda-graph-allowance-mib requires CUDA graphs (omit --no-cuda-graph)");
      }
@@ -9581,7 +9699,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..d7c4b6cfe893f3a5e8170547a8c7bf12
      }
      if (options.ngram_native_sessions && options.speculative.ngram_archive_bytes == 0) {
          throw std::invalid_argument("--ngram-native-sessions requires --ngram-archive-mib");
-@@ -1629,6 +1764,85 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1629,6 +1782,85 @@ ServeOptions parse_serve_options(int argc, char** argv) {
      if (options.sleep_idle_seconds != 0 && !options.suspend.enabled && !options.router()) {
          throw std::invalid_argument("--sleep-idle-seconds requires --model-suspend");
      }
@@ -12959,12 +13077,13 @@ index 0000000000000000000000000000000000000000..8e2a3a700e0460438963bacb199ee74e
 +}
 diff --git a/tests/experimental/p4_history.cpp b/tests/experimental/p4_history.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3839c807c59bc594e667decb350322a0f13c12c1
+index 0000000000000000000000000000000000000000..8d7d87a1e8a128b0f8d8538b5d5c2e5daf8beff9
 --- /dev/null
 +++ b/tests/experimental/p4_history.cpp
-@@ -0,0 +1,444 @@
+@@ -0,0 +1,464 @@
 +#include "ninfer/engine.h"
 +#include "kvmem_test_options.h"
++#include <algorithm>
 +#include <atomic>
 +#include <fstream>
 +#include <iostream>
@@ -13039,6 +13158,7 @@ index 0000000000000000000000000000000000000000..3839c807c59bc594e667decb350322a0
 +            o.speculative.draft_tokens = static_cast<std::uint32_t>(std::stoul(argv[5]));
 +        }
 +        const std::string mode = argc >= 7 ? argv[6] : "";
++        if (mode == "lrfu") { o.kvmem.lrfu = true; o.kvmem.score_agg_max = true; }
 +        const bool input_fallback = mode == "input-fallback" ||
 +            mode == "input-fallback-disk-write" || mode == "input-fallback-disk-read" ||
 +            mode == "input-fallback-disk-corrupt";
@@ -13119,6 +13239,24 @@ index 0000000000000000000000000000000000000000..3839c807c59bc594e667decb350322a0
 +            }
 +            return result;
 +        };
++        if (mode == "lrfu") {
++            auto chat = archive();
++            chat.options.enable_thinking = false;
++            chat.context_cache.session_key = "lrfu-core";
++            const auto original = chat;
++            const auto cold = run("lrfu-cold-pressure", chat, true, false, 0, 0, 160);
++            add(chat, ninfer::ChatRole::Assistant, "The tool record is saved.");
++            add(chat, ninfer::ChatRole::Tool, "Additional archive fragment: violet stars and pulsars.");
++            const auto continued = run("lrfu-continue", chat, true, true, 0, 0, 8);
++            const auto repeated = run("lrfu-repeat", chat, true, true, 0, 0, 8);
++            require(continued.generated_token_ids == repeated.generated_token_ids,
++                    "LRFU regeneration did not restore its parent round");
++            const auto rolled = run("lrfu-rollback", original, true, true, 0, 0, 8);
++            require(std::equal(rolled.generated_token_ids.begin(), rolled.generated_token_ids.end(),
++                               cold.generated_token_ids.begin()), "LRFU rollback changed the original round");
++            std::cout << "LRFU_HISTORY PASS" << std::endl;
++            return 0;
++        }
 +        if (input_fallback) {
 +            ninfer::PromptInput chat;
 +            chat.options.enable_thinking = true;

@@ -23,6 +23,7 @@
 // same selected block IDs); the per-layer dimension is reserved for later.
 
 #include <cstdint>
+#include "lrfu.hpp"
 #include <string>
 #include <vector>
 
@@ -234,6 +235,9 @@ enum class KvMemAdaptiveScoreMode : uint8_t {
 };
 
 struct KvMemStoreConfig {
+    bool lrfu = false;
+    double lrfu_lambda = 0.5;
+    double lrfu_top_fraction = 0.9;
     uint32_t block_tokens = 128;     // --kvmem-block-tokens
     uint32_t select_budget = 131072; // --kvmem-budget (semantic window tokens)
     // Pressure-only prefill window. configure_kvmem normalizes zero to
@@ -329,7 +333,10 @@ struct KvMemStoreConfig {
 
 class KvMemStore {
 public:
-    explicit KvMemStore(KvMemStoreConfig cfg) : cfg_(cfg) {}
+    explicit KvMemStore(KvMemStoreConfig cfg) : cfg_(cfg), history_(cfg.lrfu_lambda, cfg.lrfu_top_fraction) {
+        if (cfg.lrfu && (cfg.select_policy != KvMemSelectPolicy::TopK || cfg.select_method != KvMemMethod::Retrieval))
+            throw std::invalid_argument("LRFU requires retrieval TopK selection");
+    }
 
     const KvMemStoreConfig &config() const { return cfg_; }
     uint32_t block_count() const { return static_cast<uint32_t>(blocks_.size()); }
@@ -440,6 +447,17 @@ public:
     // set_attn_scores for backwards compatibility, but also preserves the
     // retrieval/profile split used by the quota selector.
     void set_retrieval_scores(const std::vector<double> &scores);
+    void begin_retrieval_round() { if (cfg_.lrfu) history_.begin_round(); }
+    bool commit_retrieval_round() noexcept { return cfg_.lrfu && history_.commit(); }
+    LrfuState retrieval_checkpoint() const { return history_.checkpoint(); }
+    void restore_retrieval(const LrfuState& state) {
+        // A verified continuation may rebuild from an earlier physical checkpoint.
+        // Its logical history can cover blocks which replay has not restored yet.
+        history_.restore(state);
+    }
+    double selection_score(uint32_t id) const {
+        return cfg_.lrfu ? history_.score(id) : blocks_[id].attn_score;
+    }
 
     void set_block_tier(uint32_t block_id, KvTier tier,
                         int32_t cpu_slot = -1,
@@ -484,10 +502,12 @@ public:
     void set_media_ranges(std::vector<std::pair<uint32_t, uint32_t>> ranges) { media_ranges_ = std::move(ranges); }
     size_t allocated_bytes() const {
         return sizeof(*this) + blocks_.capacity()*sizeof(KvMemBlock) +
+            history_.allocated_bytes() +
             media_ranges_.capacity()*sizeof(std::pair<uint32_t,uint32_t>);
     }
 private:
     KvMemStoreConfig cfg_;
+    LrfuHistory history_;
     uint32_t runtime_select_budget_ = 0;
     std::vector<KvMemBlock> blocks_;
     uint32_t total_tokens_ = 0;  // total appended context length

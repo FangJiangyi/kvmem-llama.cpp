@@ -2,6 +2,7 @@
 #include "llama.h"
 #include "llama-kvmem-hooks.h"
 #include "llama-kvmem-execution.h"
+#include "kvmem/retrieval_options.hpp"
 #include "kvmem-spec.h"
 #include "kvmem-chat-sampling.h"
 #include "kvmem-chat-template.h"
@@ -128,6 +129,10 @@ static void print_usage(const char * argv0) {
             "  --kvmem-gen-reserve N      decode slack (default 256)\n"
             "  --kvmem-recent-tokens N    always-kept newest suffix in select budget (default 0)\n"
             "  --kvmem-method NAME        recency | retrieval (default retrieval)\n"
+            "  --kvmem-lrfu               rank by decayed retrieval history\n"
+            "  --kvmem-lrfu-lambda X      history decay [0,1] (default 0.5)\n"
+            "  --kvmem-lrfu-top-frac X    hit fraction (0,1] (default 0.9)\n"
+            "  --kvmem-score-agg MODE     mean | max across GQA heads (default mean)\n"
             "  --kvmem-query-last N       fallback query-last if last-user span missing (default 64)\n"
             "  --kvmem-query-max-tokens N cap last-user retrieval query to this many tokens\n"
             "                            from the end of the span (default 512; qw3-style)\n"
@@ -971,6 +976,14 @@ int main(int argc, char ** argv) {
         } else if (eq(arg, "--kvmem-method")) {
             const char * m = need(arg);
             st.kparams.method = (eq(m, "retrieval") || eq(m, "retrieve")) ? 1 : 0;
+        } else if (eq(arg, "--kvmem-lrfu")) {
+            st.kparams.lrfu = true;
+        } else if (eq(arg, "--kvmem-lrfu-lambda")) {
+            st.kparams.lrfu_lambda = kvmem::parse_lrfu_real(need(arg), true);
+        } else if (eq(arg, "--kvmem-lrfu-top-frac")) {
+            st.kparams.lrfu_top_fraction = kvmem::parse_lrfu_real(need(arg), false);
+        } else if (eq(arg, "--kvmem-score-agg")) {
+            st.kparams.score_agg = kvmem::parse_score_aggregation(need(arg));
         } else if (eq(arg, "--kvmem-query-last")) {
             st.query_last_fallback = kvmem_cli_int(arg, need(arg));
         } else if (eq(arg, "--kvmem-query-replay")) {
@@ -1928,6 +1941,16 @@ int main(int argc, char ** argv) {
             res.set_content(json{{"error", e.what()}}.dump(), "application/json"); return;
         }
         st.active_prompt = parsed_prompt;
+        st.history_input_end = uint32_t(toks.size());
+        if (st.kparams.lrfu && !formatted.generation_prompt.empty() &&
+            prompt.size() >= formatted.generation_prompt.size() &&
+            prompt.compare(prompt.size() - formatted.generation_prompt.size(),
+                formatted.generation_prompt.size(), formatted.generation_prompt) == 0) {
+            const auto header = llama_driver_tokenize(st.vocab, formatted.generation_prompt, false);
+            if (!header.empty() && header.size() < toks.size() &&
+                std::equal(header.rbegin(), header.rend(), toks.rbegin()))
+                st.history_input_end -= uint32_t(header.size());
+        }
         st.turn_generation_rows = (uint32_t) std::min<uint64_t>(UINT32_MAX,
                 (uint64_t) std::max(0, cr.max_tokens) + (st.spec.ok ? std::max(0, st.spec_n_max) + 1u : 0u));
         int qbegin = cr.query_begin;

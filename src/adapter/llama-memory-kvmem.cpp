@@ -3,6 +3,7 @@
 #include "llama-memory-kvmem-hybrid.h"
 #include "llama-memory-kvmem-mtp.h"
 
+#include "kvmem/mean_key_retrieval.hpp"
 #include "llama-kvmem-batch.h"
 #include "llama-kvmem-capture.h"
 #include "llama-kvmem-execution.h"
@@ -506,6 +507,9 @@ static kvmem::KvMemRuntimeConfig make_runtime_cfg(
         uint32_t recent_tokens,
         uint64_t block_bytes) {
     kvmem::KvMemRuntimeConfig cfg;
+    cfg.store.lrfu = kvmem_current_execution().params.lrfu;
+    cfg.store.lrfu_lambda = kvmem_current_execution().params.lrfu_lambda;
+    cfg.store.lrfu_top_fraction = kvmem_current_execution().params.lrfu_top_fraction;
     cfg.store.block_tokens = block_tokens;
     cfg.store.select_budget = budget;
     cfg.store.prefill_budget = budget;
@@ -887,6 +891,7 @@ llama_memory_kvmem::llama_memory_kvmem(
             block_tokens_, pool.budget, kvmem_current_execution().params.sink_tokens, kvmem_current_execution().params.recent_tokens,
             pool.block_bytes);
     rt_cfg_.store.estimated_gpu_block_capacity = pool.cap_blocks;
+    score_agg_ = kvmem_current_execution().params.score_agg;
     runtime_ = std::make_unique<kvmem::KvMemRuntime>(rt_cfg_, &backend_);
 
     if (ext_kv) {
@@ -1086,6 +1091,7 @@ void llama_memory_kvmem::reset_policy() {
     }
     if (runtime_) {
         runtime_->truncate_to(0);
+        runtime_->store().restore_retrieval({});
     }
     host_mirror_stale_ = false;
     reset_slots();
@@ -1190,6 +1196,10 @@ bool llama_memory_kvmem::conv_compatible(const llama_memory_kvmem & other) const
         kv_->type_v() == other.kv_->type_v() && n_slots_ == other.n_slots_ &&
         (mtp_ != nullptr) == (other.mtp_ != nullptr) &&
         rt_cfg_.store.block_tokens == other.rt_cfg_.store.block_tokens &&
+        rt_cfg_.store.lrfu == other.rt_cfg_.store.lrfu &&
+        rt_cfg_.store.lrfu_lambda == other.rt_cfg_.store.lrfu_lambda &&
+        rt_cfg_.store.lrfu_top_fraction == other.rt_cfg_.store.lrfu_top_fraction &&
+        score_agg_ == other.score_agg_ &&
         rt_cfg_.store.select_budget == other.rt_cfg_.store.select_budget &&
         rt_cfg_.cpu_bytes == other.rt_cfg_.cpu_bytes;
 }
@@ -4279,52 +4289,39 @@ void llama_memory_kvmem::copy_gpu_block_from_host(uint32_t block_id, int32_t gpu
 }
 
 void llama_memory_kvmem::score_retrieval() {
-    auto & store = runtime_->store();
-    const uint32_t nblk = store.block_count();
-    std::vector<double> scores(nblk, 0.0);
-    std::vector<float> mk(n_embd_k_, 0.0f);
-    const uint32_t g = n_head_kv_ == 0 ? 1 : n_head_ / n_head_kv_;
-    for (uint32_t b = 0; b < nblk; ++b) {
-        if (!raw_->has_block(b)) {
-            continue;
-        }
-        double acc = 0;
-        uint32_t nlay = 0;
-        for (uint32_t il = 0; il < n_layer_; ++il) {
-            if (q_count_[il] == 0) {
-                continue;
-            }
-            raw_->mean_k(b, il, mk.data());
-            double layer = 0;
-            const float invq = 1.0f / static_cast<float>(q_count_[il] * std::max(1u, g));
-            for (uint32_t h = 0; h < n_head_kv_; ++h) {
-                std::vector<float> qh(n_embd_head_, 0.0f);
-                for (uint32_t gi = 0; gi < g; ++gi) {
-                    const uint32_t qh_i = h * g + gi;
-                    if (qh_i >= n_head_) {
-                        break;
-                    }
-                    const float * q = q_sum_[il].data() + qh_i * n_embd_head_;
-                    for (uint32_t d = 0; d < n_embd_head_; ++d) {
-                        qh[d] += q[d];
-                    }
-                }
-                const float * kh = mk.data() + h * n_embd_head_;
-                float dot = 0, nq = 0, nk = 0;
-                for (uint32_t d = 0; d < n_embd_head_; ++d) {
-                    const float qv = qh[d] * invq;
-                    dot += qv * kh[d];
-                    nq += qv * qv;
-                    nk += kh[d] * kh[d];
-                }
-                layer += dot / (std::sqrt(nq) * std::sqrt(nk) + 1e-6f);
-            }
-            acc += layer / static_cast<double>(std::max(1u, n_head_kv_));
-            nlay++;
-        }
-        scores[b] = nlay ? acc / nlay : 0;
+    std::vector<float> query;
+    query.reserve(size_t(n_layer_) * n_head_ * n_embd_head_);
+    for (const auto & layer : q_sum_) query.insert(query.end(), layer.begin(), layer.end());
+    runtime_->store().set_retrieval_scores(kvmem::mean_key_retrieval_scores(*raw_,
+        runtime_->store().block_count(), {query.data(), q_count_.data(), n_layer_,
+            n_embd_head_, n_head_, n_head_kv_, kvmem_current_execution().params.score_agg == 1
+                ? kvmem::GqaScoreAggregation::Max : kvmem::GqaScoreAggregation::Mean}));
+}
+
+void llama_memory_kvmem::accept_retrieval_round() {
+    if (!runtime_->store().config().lrfu || runtime_->store().retrieval_checkpoint().committed) return;
+    harvest_flush();
+    uint64_t expected = 0;
+    if (explicit_spans_) {
+        for (const auto& range : turn_spans_.query) expected += range.end - range.begin;
+    } else if (query_begin_ >= 0 && query_end_ > query_begin_) {
+        expected = query_end_ - query_begin_;
     }
-    store.set_retrieval_scores(scores);
+    if (!expected) return;
+    bool query_ready = false;
+    for (uint32_t il = 0; il < n_layer_; ++il) {
+        if (kvmem_cache_has_layer(kv_, il)) {
+            if (q_count_[il] != expected) return;
+            query_ready = true;
+        }
+    }
+    if (!query_ready) return;
+    // Recompute after the final replay. Every probe uses the same prior history.
+    score_retrieval();
+    runtime_->store().commit_retrieval_round();
+    const auto history = runtime_->store().retrieval_checkpoint();
+    kvmem_diag("KVMEM_LRFU round=%llu committed=%d blocks=%zu\n",
+        (unsigned long long) history.round, int(history.committed), history.scores->size());
 }
 
 void llama_memory_kvmem::retr_perf_print() {
@@ -4575,6 +4572,7 @@ bool llama_memory_kvmem::get_tail_mean(uint32_t row, llama_kvmem_tail_mean_state
     state.row = row;
     state.prefix = content_->prefix(row);
     state.values = raw_->mean_checkpoint(row);
+    state.history = runtime_->store().retrieval_checkpoint();
     return tail_mean_valid(row, state);
 }
 
@@ -5100,6 +5098,20 @@ void llama_kvmem_end_prefill_capture(void) {
     }
 }
 
+void llama_kvmem_begin_retrieval_round(void) {
+    if (auto * mem = kvmem_capture_active()) mem->begin_retrieval_round();
+}
+void llama_kvmem_accept_retrieval_round(void) {
+    if (auto * mem = kvmem_capture_active()) mem->accept_retrieval_round();
+}
+void llama_kvmem_restore_history(const kvmem::LrfuState & state) {
+    if (auto * mem = kvmem_capture_active()) mem->restore_history(state);
+}
+kvmem::LrfuState llama_kvmem_get_history() {
+    if (auto * mem = kvmem_capture_active()) return mem->history();
+    return {};
+}
+
 void llama_kvmem_begin_cached_turn(void) {
     if (llama_memory_kvmem * mem = kvmem_capture_active()) {
         mem->begin_cached_turn(true);
@@ -5569,6 +5581,7 @@ void llama_kvmem_store_snapshot_write(int32_t id, kvmem::SnapshotWriter & out) {
     if (s.cold) throw std::runtime_error("session is already on disk");
     out.scalar(id);
     out.scalar(s.runtime->store().total_tokens());
+    kvmem::write_lrfu(out, s.runtime->store().retrieval_checkpoint());
     s.raw->snapshot_write(out);
     out.scalar(uint8_t(s.mtp_raw != nullptr));
     if (s.mtp_raw) s.mtp_raw->snapshot_write(out);
@@ -5585,11 +5598,13 @@ void llama_kvmem_store_snapshot_read(int32_t id, kvmem::SnapshotReader & in) {
     auto & s = kvmem_detached(id);
     if (!s.cold) throw std::runtime_error("session restore requires an empty host payload");
     in.expect(id); in.expect(s.runtime->store().total_tokens());
+    const auto history = kvmem::read_lrfu(in, s.runtime->store().block_count());
     auto raw = std::make_unique<kvmem::RawKvStore>(s.raw->config());
     raw->snapshot_read(in, s.runtime->store().block_count());
     in.expect(uint8_t(s.mtp_raw != nullptr));
     auto mtp = s.mtp_raw ? std::make_unique<kvmem::RawKvStore>(s.mtp_raw->config()) : nullptr;
     if (mtp) mtp->snapshot_read(in, s.runtime->store().block_count());
+    s.runtime->store().restore_retrieval(history);
     s.raw = std::move(raw); s.mtp_raw = std::move(mtp); s.cold = false;
 }
 

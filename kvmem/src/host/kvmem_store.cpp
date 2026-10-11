@@ -241,6 +241,7 @@ void KvMemStore::set_attn_scores(const std::vector<double> &scores) {
 }
 
 void KvMemStore::set_retrieval_scores(const std::vector<double> &scores) {
+    if (cfg_.lrfu) history_.preview(scores);
     const uint32_t n = block_count();
     for (uint32_t i = 0; i < n; ++i) {
         blocks_[i].retrieval_score = (i < scores.size()) ? scores[i] : 0.0;
@@ -400,7 +401,7 @@ std::vector<uint32_t> KvMemStore::constrain_media(std::vector<uint32_t> selected
     std::sort(newest.begin(), newest.end(), std::greater<uint32_t>());
     for (auto id : newest) keep(id, recency);
     auto better = [&](uint32_t a, uint32_t b) {
-        if (!recency && blocks_[a].attn_score != blocks_[b].attn_score) return blocks_[a].attn_score > blocks_[b].attn_score;
+        if (!recency && selection_score(a) != selection_score(b)) return selection_score(a) > selection_score(b);
         return a > b;
     };
     std::sort(selected.begin(), selected.end(), better);
@@ -589,8 +590,8 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         // Fill any leftover quota with the configured method's combined score
         // so rounding, overlap, or zero explicit quotas still use the budget.
         if (kept_count < budget) {
-            take_top(budget - kept_count, [](const KvMemBlock &b) {
-                return b.attn_score;
+            take_top(budget - kept_count, [&](const KvMemBlock &b) {
+                return selection_score(b.block_id);
             });
         }
         selected.reserve(kept_count);
@@ -611,8 +612,8 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         // Partial sort by attn_score desc; tie-break by recency (higher id) so
         // selection is deterministic.
         auto better = [&](uint32_t a, uint32_t b) {
-            if (blocks_[a].attn_score != blocks_[b].attn_score) {
-                return blocks_[a].attn_score > blocks_[b].attn_score;
+            if (selection_score(a) != selection_score(b)) {
+                return selection_score(a) > selection_score(b);
             }
             return a > b;
         };

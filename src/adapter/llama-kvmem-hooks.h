@@ -24,6 +24,10 @@ struct llama_kvmem_params {
     uint32_t sink_tokens;   // 0 → one block
     uint32_t recent_tokens; // 0 → pressure uses newest tail only
     int32_t  method;        // 0 recency, 1 retrieval (CLI default 1)
+    bool     lrfu = false;
+    double   lrfu_lambda = 0.5;
+    double   lrfu_top_fraction = 0.9;
+    int32_t  score_agg = 0; // 0 folded mean, 1 max within a GQA group
     int32_t  query_begin;   // original token pos, -1 = unset
     int32_t  query_end;     // exclusive, -1 = end of prompt
     int32_t  force_pos;     // include block containing this orig pos; -1 = none
@@ -172,6 +176,8 @@ LLAMA_API void llama_kvmem_decode_mean_flush(void);
 
 // Score + reselect + stage-in raw-K/V for retrieval. No-op if method is recency.
 LLAMA_API void llama_kvmem_apply_retrieval(struct llama_context * ctx);
+LLAMA_API void llama_kvmem_begin_retrieval_round(void);
+LLAMA_API void llama_kvmem_accept_retrieval_round(void);
 // True when sink + [query_begin, prompt_end) fits the GPU selection budget
 // (qw3 kvmem_replay_capacity). False → skip query seq_rm/replay.
 LLAMA_API bool llama_kvmem_query_replay_fits(uint32_t query_begin, uint32_t prompt_end);
@@ -194,6 +200,7 @@ LLAMA_API void llama_kvmem_dump_kv_writeback(struct llama_context * ctx, int32_t
 #include <vector>
 #include <string>
 #include <memory>
+#include "kvmem/lrfu.hpp"
 namespace kvmem { class ContentPrefix; }
 
 namespace kvmem { class SnapshotWriter; class SnapshotReader; struct SnapshotBuffer; }
@@ -248,6 +255,7 @@ struct llama_kvmem_query_state {
     std::vector<llama_kvmem_row_range> ranges;
 };
 struct llama_kvmem_tail_mean_state {
+    kvmem::LrfuState history;
     std::shared_ptr<const kvmem::ContentPrefix> prefix;
     std::vector<float> values;
     uint32_t row = 0;
@@ -279,4 +287,6 @@ LLAMA_API bool llama_kvmem_get_tail_mean(uint32_t row, llama_kvmem_tail_mean_sta
 // and checkpoint selection remain the driver's responsibility.
 LLAMA_API bool llama_kvmem_tail_mean_valid(uint32_t row, const llama_kvmem_tail_mean_state & state);
 LLAMA_API bool llama_kvmem_set_tail_mean(uint32_t row, const llama_kvmem_tail_mean_state & state);
+LLAMA_API void llama_kvmem_restore_history(const kvmem::LrfuState & state);
+LLAMA_API kvmem::LrfuState llama_kvmem_get_history();
 #endif

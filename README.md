@@ -60,6 +60,10 @@ Core flags (what the 16 GiB recipes still pass):
 |---|---|
 | `-c` | Logical workspace, including history stored off GPU. 256K is the tested default; larger is experimental. |
 | `--kvmem-budget` | How many historical tokens retrieval may keep on GPU. |
+| `--kvmem-lrfu` | Enable history ranking for retrieval TopK (default off). Sink, recent and media pins still apply. |
+| `--kvmem-lrfu-lambda X` | History decay in `[0,1]`, default `0.5`. |
+| `--kvmem-lrfu-top-frac X` | Fraction of current retrieval scores eligible for a history hit, `(0,1]`, default `0.9`; threshold ties also qualify. |
+| `--kvmem-score-agg mean\|max` | GQA query-head aggregation, default `mean`. `max` is independent of LRFU and takes the largest cosine within each GQA group. |
 | `--kvmem-sink-tokens N` | Server and CLI: always keep the prefix in the GPU working set. Default `0` keeps one block (not disabled). Positive values round down to whole blocks, with a minimum of one block. For example, with block size 128, `1024` keeps 1024 tokens and `129` keeps 128. These blocks count toward `--kvmem-budget`. |
 | `--kvmem-gen-reserve` | GPU slots reserved for new tokens so retrieval cannot fill the pool. **One generation cannot exceed this length** (including thinking). |
 | `--kvmem-conversations N` | How many conversations retain their KV in host RAM or the optional session disk cache. Default `1` reproduces earlier behavior, where a different conversation discards the previous one. Higher values let the server switch between conversations without reprocessing them. With `--parallel P`, the effective count is `max(N, P)` and up to P requests run together. Needs flash attention. |
@@ -73,6 +77,8 @@ Core flags (what the 16 GiB recipes still pass):
 | `--video-fps F` | Video sampling rate, default `2.0` FPS. A finite value `<=0` uses the video's native frame rate. See [Video input](#video-input). |
 
 KVMem retrieval is on by default, with 128-token blocks, query replay `auto`, query policy `user`, MTP draft length 3, F16 draft KV, and ReplaySSM. You do not need to pass those unless you are overriding them. GPU KV size is `budget + gen_reserve`. When history exceeds `--kvmem-budget`, retrieval picks blocks for the current last-user query. Clients should send the full `messages` history each turn.
+
+The optional LRFU and GQA max switches are shared by the llama.cpp CLI/server and ninfer server. To enable both, add `--kvmem-lrfu --kvmem-score-agg max`. LRFU updates once after the accepted input's query statistics and retrieval replay are complete; decode pressure reselections reuse that committed history. Full prefix identity decides whether a new request inherits a prior round. Regeneration and edits restore the matching parent round. This uses query-to-mean-K retrieval scores, without collecting action-token attention or changing the retrieval budget. LRFU currently supports retrieval TopK; quota mixing is not implemented.
 
 With `--kvmem-conversations` above 1, that history is also the conversation's identity: no client API change and no conversation id are required. A request that continues a stored conversation extends it, while a request that only shares a system prompt or chat template starts a separate one instead of truncating the stored tail. A match is usable only when a recurrent checkpoint exists at or before it; otherwise the request is an ordinary cache miss. Details and limits are in [Multi-conversation KV cache](docs/multi-conversation-kv-cache.md). Combine `--parallel 2 --kvmem-conversations 3` for two GPU working sets and three host caches with dynamic lane assignment; see [Multi-lane conversations](docs/multi-lane-conversations.md).
 

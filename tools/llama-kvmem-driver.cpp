@@ -29,8 +29,22 @@ static int decode_span_maybe_spec(LlamaEngineState & st, const llama_token * tok
                                   const char * what, kvmem::RequestControl * io = nullptr);
 static void multimodal_commit(LlamaEngineState & st, const std::vector<llama_token> & gen);
 
+static void begin_history_round(LlamaEngineState & st) {
+    if (st.kparams.lrfu) {
+        const auto prefix = st.history_input_prompt && st.active_prompt
+            ? st.active_prompt->common_prefix(*st.history_input_prompt) : 0;
+        const auto count = kvmem::lrfu_prefix_points(st.history_points, prefix,
+            st.history_input_end ? st.history_input_end : (st.active_prompt ? st.active_prompt->tokens.size() : 0));
+        st.rollback_history = count ? st.history_points[count - 1].state : kvmem::LrfuState{};
+        llama_kvmem_restore_history(st.rollback_history);
+        kvmem_diag("KVMEM_LRFU_BEGIN parent=%llu inherited_inputs=%zu\n",
+            (unsigned long long) st.rollback_history.round, count);
+    }
+    llama_kvmem_begin_retrieval_round();
+}
+
 static bool gdn_sync_to(LlamaEngineState & st, const std::vector<llama_token> & prompt, int n_past,
-                        kvmem::RequestControl * io = nullptr) {
+                        kvmem::RequestControl * io = nullptr, bool restore_history = false) {
     if (!llama_kvmem_has_recurrent()) {
         return true;
     }
@@ -71,6 +85,8 @@ static bool gdn_sync_to(LlamaEngineState & st, const std::vector<llama_token> & 
         return false;
     }
     const int from = ckpt_pos + 1;
+    if (restore_history) llama_kvmem_restore_history(
+        ckpt_pos == st.gdn_ckpt_pos ? st.gdn_history : st.gdn_query_history);
     if (st.spec.ok) {
         if (!saved_carry || saved_carry->empty()) return false;
         common_speculative_set_state(st.spec.spec, 0, *saved_carry);
@@ -114,10 +130,14 @@ static int common_token_prefix(const std::vector<llama_token> & a,
 void llama_driver_swap_conversation(LlamaEngineState & st, kvmem_conversation & conv) {
     st.cached_tokens.swap(conv.cached_tokens);
     st.cached_prompt.swap(conv.cached_prompt);
+    st.history_input_prompt.swap(conv.history_input_prompt);
+    st.history_points.swap(conv.history_points);
     st.mm_checkpoints.swap(conv.mm_checkpoints);
     std::swap(st.mm_live_row, conv.mm_live_row);
     st.mm_live_checkpoint.swap(conv.mm_live_checkpoint);
     st.mm_query.swap(conv.mm_query);
+    std::swap(st.gdn_history, conv.gdn_history);
+    std::swap(st.gdn_query_history, conv.gdn_query_history);
     st.gdn_ckpt.swap(conv.gdn_ckpt);
     st.gdn_carry.swap(conv.gdn_carry);
     st.gdn_query_carry.swap(conv.gdn_query_carry);
@@ -169,6 +189,11 @@ static uint64_t conversation_bytes(const LlamaEngineState & st, int id) {
     bytes += checkpoints.capacity()*sizeof(MultimodalCheckpoint);
     const auto & prompt = active ? st.cached_prompt : conv.cached_prompt;
     if (prompt) bytes += prompt->index_bytes();
+    const auto & points = active ? st.history_points : conv.history_points;
+    bytes += points.capacity()*sizeof(kvmem::LrfuPoint);
+    for (const auto & point : points) bytes += point.state.scores->capacity()*sizeof(double);
+    const auto & history_input = active ? st.history_input_prompt : conv.history_input_prompt;
+    if (history_input && history_input != prompt) bytes += history_input->index_bytes();
     const auto & query = active ? st.mm_query : conv.mm_query;
     if (query) {
         bytes += sizeof(MultimodalQuery) + query->user.capacity() + query->state.count.capacity()*sizeof(uint32_t);
@@ -642,11 +667,15 @@ void llama_driver_clear(LlamaEngineState & st) {
     }
     st.cached_tokens.clear();
     st.cached_prompt.reset();
+    st.history_input_prompt.reset();
+    st.history_points.clear();
+    st.rollback_history = {};
     st.mm_checkpoints.clear();
     st.mm_live_row = 0;
     st.mm_live_checkpoint.reset();
     st.mm_query.reset();
     st.mm_pending_query.reset();
+    st.gdn_history = {}; st.gdn_query_history = {};
     st.gdn_ckpt.clear();
     st.gdn_carry.clear();
     st.gdn_query_carry.clear();
@@ -883,6 +912,7 @@ void llama_driver_begin_request(LlamaEngineState & st, const kvmem_prompt & prom
 // Persist GDN after a successful prefill (eval_end-1) for the next turn's
 // suffix rewind. Intra-turn query rewind uses a local snapshot, not this slot.
 static void persist_gdn_ckpt_gen_start(LlamaEngineState & st, int eval_end) {
+    llama_kvmem_accept_retrieval_round();
     if (!st.ctx || eval_end <= 0 || !llama_kvmem_has_recurrent()) {
         return;
     }
@@ -898,6 +928,7 @@ static void persist_gdn_ckpt_gen_start(LlamaEngineState & st, int eval_end) {
         fprintf(stderr, "KVMEM_TRACE gdn_ckpt gen_start copy failed eval_end=%d\n", eval_end);
         return;
     }
+    st.gdn_history = llama_kvmem_get_history();
     st.gdn_ckpt.swap(buf);
     if (st.spec.ok) common_speculative_get_state(st.spec.spec, 0, st.gdn_carry);
     st.gdn_ckpt_pos = eval_end - 1;
@@ -907,6 +938,15 @@ static void persist_gdn_ckpt_gen_start(LlamaEngineState & st, int eval_end) {
 
 void llama_driver_commit(LlamaEngineState & st, const std::vector<llama_token> & prompt,
                           const std::vector<llama_token> & gen) {
+    const auto history = llama_kvmem_get_history();
+    if (st.kparams.lrfu && history.committed) {
+        const auto input_end = st.history_input_end ? st.history_input_end : uint32_t(prompt.size());
+        const auto prefix = st.history_input_prompt
+            ? st.active_prompt->common_prefix(*st.history_input_prompt) : 0;
+        st.history_points.resize(kvmem::lrfu_prefix_points(st.history_points, prefix, input_end));
+        st.history_points.push_back(kvmem::lrfu_input_point(input_end, st.kparams.block_tokens, history));
+        st.history_input_prompt = st.active_prompt->prefix(input_end)->cache_index();
+    }
     st.cached_tokens = prompt;
     st.cached_tokens.insert(st.cached_tokens.end(), gen.begin(), gen.end());
     st.last_n_gen = (int) gen.size();
@@ -1042,7 +1082,8 @@ static void multimodal_remember(LlamaEngineState & st, MultimodalCheckpoint chec
     }
 }
 
-static void multimodal_restore(LlamaEngineState & st, const MultimodalCheckpoint & checkpoint, bool truncate) {
+static void multimodal_restore(LlamaEngineState & st, const MultimodalCheckpoint & checkpoint, bool truncate,
+                               bool restore_history = false) {
     kvmem_scoped_ms timer(st.mm_perf.restore_ms);
     const bool live = st.mm_live_checkpoint == checkpoint.data && st.mm_live_row == checkpoint.row;
     if (!checkpoint.data) throw std::runtime_error("missing multimodal checkpoint data");
@@ -1077,13 +1118,15 @@ static void multimodal_restore(LlamaEngineState & st, const MultimodalCheckpoint
     st.mm_live_row = checkpoint.row;
     st.mm_live_checkpoint = checkpoint.data;
     st.recurrent_cache_valid = true;
+    if (restore_history) llama_kvmem_restore_history(checkpoint.data->tail_mean.history);
 }
 
 void llama_driver_finish(LlamaEngineState & st) {
     if (st.mm_committed || !st.mm_rollback) return;
     try {
         llama_kvmem_set_replay(false);
-        multimodal_restore(st, *st.mm_rollback, true);
+        multimodal_restore(st, *st.mm_rollback, true, true);
+        if (st.kparams.lrfu) llama_kvmem_restore_history(st.rollback_history);
         llama_kvmem_begin_cached_turn();
         st.mm_query.reset();
         st.mm_pending_query.reset();
@@ -1248,7 +1291,8 @@ static bool run_prefill_multimodal(LlamaEngineState & st, kvmem::RequestControl 
         st.mm_rollback = std::make_shared<MultimodalCheckpoint>(base);
         st.mm_rollback_prompt = st.cached_prompt ? st.cached_prompt->prefix(base.row) : nullptr;
         st.mm_committed = false;
-        multimodal_restore(st, base, true);
+        multimodal_restore(st, base, true, true);
+        begin_history_round(st);
         llama_kvmem_begin_cached_turn();
         std::vector<uint32_t> starts, ends;
         const auto ranges = prompt.media_ranges();
@@ -1413,7 +1457,10 @@ static bool run_prefill_multimodal(LlamaEngineState & st, kvmem::RequestControl 
         kvmem_diag("KVMEM_PREFILL_DECISION path=%s reason=%s reuse_fallback=%s append=[%d,%d) query=[%d,%d) feature=[%d,%d) query_source=%s query_reused=%d q_rows=%u replay_rows=%u decision_ms=%.3f\n",
                 path.c_str(), reason.c_str(), reuse_fallback.c_str(), base.row, eval_end, query, eval_end,
                 spans.query.front().begin, spans.query.back().end, source, reused_query, q_rows, st.mm_replayed, st.mm_perf.decision_ms);
+        llama_kvmem_accept_retrieval_round();
         llama_kvmem_pin_working_set();
+        // History changed even when the native view did not.
+        if (st.kparams.lrfu) st.mm_live_checkpoint.reset();
         multimodal_remember(st, multimodal_checkpoint(st, eval_end));
         std::vector<uint8_t> carry;
         llama_pos synced = 0;
@@ -1523,6 +1570,7 @@ bool llama_driver_prepare(LlamaEngineState & st, const std::vector<llama_token> 
     if (q1 <= q0 || q1 > eval_end) {
         q1 = eval_end;
     }
+    if (st.kparams.lrfu) llama_kvmem_set_request_span(q0, q1, st.kparams.force_pos);
     const bool replay_fits = llama_kvmem_query_replay_fits(
             (uint32_t) std::max(q0, 0), (uint32_t) std::max(eval_end, 0));
 
@@ -1605,7 +1653,7 @@ bool llama_driver_prepare(LlamaEngineState & st, const std::vector<llama_token> 
         }
         // Continuation already has GDN at n_past. Catch-up from query would
         // llama_decode at q0 while seq_pos_max is n_past-1 (M-RoPE X < Y).
-        if (!warm_skip && !gdn_sync_to(st, prompt, n_past, io)) {
+        if (!warm_skip && !gdn_sync_to(st, prompt, n_past, io, true)) {
             if (io && io->aborted) {
                 return false;
             }
@@ -1619,6 +1667,7 @@ bool llama_driver_prepare(LlamaEngineState & st, const std::vector<llama_token> 
         warm_skip = false;
         past_query = false;
     }
+    begin_history_round(st);
     // DeepSeek usage: prefix cache hit = kept LCP (n_past). Full miss if reuse
     // was dropped (gdn_sync fail / empty cache).
     if (n_cache_hit) {
@@ -1779,6 +1828,7 @@ bool llama_driver_prepare(LlamaEngineState & st, const std::vector<llama_token> 
             fprintf(stderr, "GDN checkpoint copy failed\n");
             return false;
         }
+        st.gdn_query_history = llama_kvmem_get_history();
         st.gdn_ckpt_query = gdn_ckpt;
         if (st.spec.ok) common_speculative_get_state(st.spec.spec, 0, st.gdn_query_carry);
         st.gdn_ckpt_query_pos = q0 > 0 ? q0 - 1 : -1;

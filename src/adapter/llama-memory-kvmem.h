@@ -105,6 +105,10 @@ public:
     void harvest_perf_print_sum();
     void harvest_capture(struct ggml_tensor * t, int il, char which);
     void apply_retrieval();
+    void begin_retrieval_round() { runtime_->store().begin_retrieval_round(); }
+    void accept_retrieval_round();
+    void restore_history(const kvmem::LrfuState& state) { runtime_->store().restore_retrieval(state); }
+    kvmem::LrfuState history() const { return runtime_->store().retrieval_checkpoint(); }
     void set_turn_spans(const llama_kvmem_turn_spans & spans);
     bool query_contains(llama_pos row) const;
     bool query_overlaps(uint32_t n, const llama_pos * rows) const;
@@ -417,6 +421,7 @@ private:
     // Copies of the configs the constructor computes, so a sibling store for
     // another conversation is configured identically.
     kvmem::KvMemRuntimeConfig rt_cfg_{};
+    int score_agg_ = 0;
     kvmem::RawKvStoreConfig raw_cfg_{};
     std::unique_ptr<kvmem::KvMemRuntime> runtime_;
     std::unique_ptr<kvmem::RawKvStore> raw_;
