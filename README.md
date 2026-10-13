@@ -131,9 +131,9 @@ The recipes and conversion commands below document the historical tested setup.
 
 ## Clone, patch, build
 
-The isolated multi-backend refactor adds a C++17 [native memory contract](docs/memory-backend-contract.md),
-including transfer lifecycle and payload tests. Production adapter migration is a later step;
-the existing server entry point remains the llama.cpp adapter.
+The 0.18.0 source includes a C++17 [native memory contract](docs/memory-backend-contract.md),
+transfer lifecycle and payload tests, and separate llama.cpp and NInfer workers.
+See the [backend build guide](docs/multi-backend-repository.md) to build the selected worker.
 
 Building uses a C++17 compiler, CMake and **CUDA Toolkit 13.2 Update 2 (nvcc 13.2.86) or newer**. The Linux startup scripts use Python 3.10+ and `ss` (iproute2).
 
