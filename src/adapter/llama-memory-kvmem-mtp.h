@@ -87,7 +87,8 @@ public:
         uint32_t n_tokens = 0;
     };
     bool slot_holds(int32_t slot, uint32_t orig_pos) const;
-    bool layout_d2d(const LayoutMove * moves, size_t n_moves);
+    size_t layout_scratch_bytes(size_t n_moves) const;
+    bool layout_d2d(const LayoutMove * moves, size_t n_moves, uint8_t * prepared_scratch = nullptr);
     void occupy_block(uint32_t block_id);
     bool remove_logical(llama_pos p0, llama_pos p1) {
         if (target_) target_->note_attention_change();
@@ -126,6 +127,8 @@ public:
         return std::make_unique<kvmem::RawKvStore>(raw_cfg_);
     }
     uint64_t host_bytes() const { return raw_ ? raw_->allocated_bytes() : 0; }
+    uint64_t payload_bytes(bool disk_only = false) const { return raw_ ? raw_->payload_bytes(disk_only) : 0; }
+    uint64_t payload_capacity_bytes(uint32_t tokens) const { return raw_ ? raw_->payload_capacity_bytes(tokens) : 0; }
     uint64_t capacity_bytes(uint32_t tokens) const { return raw_ ? raw_->capacity_bytes(tokens) : 0; }
     // Empty the draft cells but keep the mirror, unlike clear(bool) which also
     // wipes raw_. Called from the target's detach after its own drain, which

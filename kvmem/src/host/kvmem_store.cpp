@@ -1,4 +1,5 @@
 #include "kvmem/kvmem_store.hpp"
+#include "kvmem/memory_contract.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -240,6 +241,7 @@ void KvMemStore::set_attn_scores(const std::vector<double> &scores) {
 }
 
 void KvMemStore::set_retrieval_scores(const std::vector<double> &scores) {
+    if (cfg_.lrfu) history_.preview(scores);
     const uint32_t n = block_count();
     for (uint32_t i = 0; i < n; ++i) {
         blocks_[i].retrieval_score = (i < scores.size()) ? scores[i] : 0.0;
@@ -399,7 +401,7 @@ std::vector<uint32_t> KvMemStore::constrain_media(std::vector<uint32_t> selected
     std::sort(newest.begin(), newest.end(), std::greater<uint32_t>());
     for (auto id : newest) keep(id, recency);
     auto better = [&](uint32_t a, uint32_t b) {
-        if (!recency && blocks_[a].attn_score != blocks_[b].attn_score) return blocks_[a].attn_score > blocks_[b].attn_score;
+        if (!recency && selection_score(a) != selection_score(b)) return selection_score(a) > selection_score(b);
         return a > b;
     };
     std::sort(selected.begin(), selected.end(), better);
@@ -454,10 +456,14 @@ std::vector<uint32_t> KvMemStore::pick_prefill_ungrouped(
         }
     }
     for (size_t i = mandatory_blocks.size(); i > 0 && kept_count < budget; --i) {
-        const uint32_t before = kept_count;
         keep(mandatory_blocks[i - 1]);
-        if (kept_count > before) {
-            ++mand_kept;
+    }
+    // Diagnostic membership includes mandatory blocks already kept as sink.
+    // Selection and its priority order above are unchanged.
+    {
+        std::vector<uint8_t> counted(n, 0);
+        for (uint32_t id : mandatory_blocks) {
+            if (id < n && kept[id] && !counted[id]) { counted[id] = 1; ++mand_kept; }
         }
     }
     if (mand_kept < mand_unique) {
@@ -518,10 +524,14 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         }
     }
     for (size_t i = mandatory_blocks.size(); i > 0 && kept_count < budget; --i) {
-        const uint32_t before = kept_count;
         keep(mandatory_blocks[i - 1]);
-        if (kept_count > before) {
-            ++mand_kept;
+    }
+    // Diagnostic membership includes mandatory blocks already kept as sink.
+    // Selection and its priority order above are unchanged.
+    {
+        std::vector<uint8_t> counted(n, 0);
+        for (uint32_t id : mandatory_blocks) {
+            if (id < n && kept[id] && !counted[id]) { counted[id] = 1; ++mand_kept; }
         }
     }
     if (mand_kept < mand_unique) {
@@ -580,8 +590,8 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         // Fill any leftover quota with the configured method's combined score
         // so rounding, overlap, or zero explicit quotas still use the budget.
         if (kept_count < budget) {
-            take_top(budget - kept_count, [](const KvMemBlock &b) {
-                return b.attn_score;
+            take_top(budget - kept_count, [&](const KvMemBlock &b) {
+                return selection_score(b.block_id);
             });
         }
         selected.reserve(kept_count);
@@ -602,8 +612,8 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         // Partial sort by attn_score desc; tie-break by recency (higher id) so
         // selection is deterministic.
         auto better = [&](uint32_t a, uint32_t b) {
-            if (blocks_[a].attn_score != blocks_[b].attn_score) {
-                return blocks_[a].attn_score > blocks_[b].attn_score;
+            if (selection_score(a) != selection_score(b)) {
+                return selection_score(a) > selection_score(b);
             }
             return a > b;
         };
@@ -665,10 +675,14 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
         }
     }
     for (size_t i = mandatory_blocks.size(); i > 0 && kept_count < budget; --i) {
-        const uint32_t before = kept_count;
         keep(mandatory_blocks[i - 1]);
-        if (kept_count > before) {
-            ++mand_kept;
+    }
+    // Diagnostic membership includes mandatory blocks already kept as sink.
+    // Selection and its priority order above are unchanged.
+    {
+        std::vector<uint8_t> counted(n, 0);
+        for (uint32_t id : mandatory_blocks) {
+            if (id < n && kept[id] && !counted[id]) { counted[id] = 1; ++mand_kept; }
         }
     }
     if (mand_kept < mand_unique) {
@@ -878,6 +892,32 @@ KvMemPlan KvMemStore::set_selection(std::vector<uint32_t> selected_ids,
         window_pos += b.n_tokens;
     }
     plan.total_window_tokens = window_pos;
+    return plan;
+}
+
+NativeResidencyPlan KvMemStore::plan_native_selection(std::vector<uint32_t> selected_ids) const {
+    std::sort(selected_ids.begin(), selected_ids.end());
+    for (auto id : selected_ids) {
+        if (id >= block_count() || !blocks_[id].n_tokens)
+            throw MemoryError(MemoryErrorCode::InvalidPlan, "unknown/empty block in native selection");
+    }
+    std::vector<uint64_t> resident;
+    for (const auto & b : blocks_) {
+        if (b.in_flight || (b.gpu_slot >= 0 && b.tier != KvTier::GPU))
+            throw MemoryError(MemoryErrorCode::Pending, "native residency is not stable");
+        if (b.gpu_slot >= 0 && b.n_tokens) resident.push_back(b.block_id);
+    }
+    const auto delta = plan_residency(resident,
+        std::vector<uint64_t>(selected_ids.begin(), selected_ids.end()), !cfg_.optimize_stage_in);
+    NativeResidencyPlan plan;
+    plan.selected = std::move(selected_ids);
+    plan.stage_out.assign(delta.evict.begin(), delta.evict.end());
+    plan.stage_in.assign(delta.restore.begin(), delta.restore.end());
+    plan.gpu_reused_blocks = static_cast<uint32_t>(delta.retain.size());
+    for (auto id : plan.selected) {
+        plan.total_window_tokens += blocks_[id].n_tokens;
+        plan.selection_overlap_blocks += blocks_[id].in_working_set;
+    }
     return plan;
 }
 

@@ -3,7 +3,7 @@ name: Server and UI compatibility
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [master, feat/multi-backend-framework]
   workflow_dispatch:
 
 permissions:
@@ -23,15 +23,16 @@ jobs:
         nvme: ['OFF', 'ON']
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: bash scripts/apply-patches.sh
       - run: python3 tests/test_launcher_key_file.py
       - run: python3 scripts/test_start_server.py
       - run: python3 scripts/test_build_rocm.py
+      - name: Prepare pinned llama.cpp integration
+        run: |
+          python3 scripts/prepare-backends.py --backend llamacpp
+          python3 scripts/prepare-backends.py --backend llamacpp --check
       - name: Configure host and model-free server tests
         env:
           NVME: ${{ matrix.nvme }}
@@ -48,13 +49,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: bash scripts/apply-patches.sh
       - run: python scripts/test_build_rocm.py
+      - name: Prepare pinned llama.cpp integration
+        run: |
+          python scripts/prepare-backends.py --backend llamacpp
+          python scripts/prepare-backends.py --backend llamacpp --check
       - name: Configure host and model-free server tests
         run: >-
           cmake -S . -B build -A x64
@@ -91,9 +93,12 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build libssl-dev python3 time ccache zstd
       - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - run: bash scripts/apply-patches.sh
+      - name: Trust the checked-out workspace in the CUDA container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Prepare pinned llama.cpp integration
+        run: |
+          python3 scripts/prepare-backends.py --backend llamacpp
+          python3 scripts/prepare-backends.py --backend llamacpp --check
       - name: Identify the compiler toolchain
         id: toolchain
         run: |
@@ -107,7 +112,7 @@ jobs:
         with:
           path: ${{ env.CCACHE_DIR }}
           # Keep one snapshot per build/kernel configuration, rather than per commit.
-          key: cuda12.8.1-120a-ccache-v1-${{ steps.toolchain.outputs.id }}-${{ hashFiles('.github/workflows/server-compat.yml', 'CMakeLists.txt', 'kvmem/CMakeLists.txt', 'patches/**', 'llama.cpp/ggml/src/ggml-cuda/**') }}
+          key: cuda12.8.1-120a-ccache-v1-${{ steps.toolchain.outputs.id }}-${{ hashFiles('.github/workflows/server-compat.yml', 'CMakeLists.txt', 'kvmem/CMakeLists.txt', 'backends/versions.json', 'backends/patches/**', 'backends/llamacpp/ggml/src/ggml-cuda/**') }}
           restore-keys: |
             cuda12.8.1-120a-ccache-v1-${{ steps.toolchain.outputs.id }}-
             cuda12.8.1-120a-ccache-v1-
@@ -138,10 +143,29 @@ jobs:
       - name: Compiler cache statistics
         if: ${{ always() }}
         run: ccache --show-stats
+  ninfer-pinned-sources:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare and verify the pinned ninfer-all integration
+        run: |
+          python scripts/prepare-backends.py --backend ninfer
+          python scripts/prepare-backends.py --backend ninfer --check
+      - name: Verify repeated preparation
+        run: |
+          python scripts/prepare-backends.py --backend ninfer
+          python scripts/prepare-backends.py --backend ninfer --check
   # Keep the existing required check name and fail if any backend check is skipped or fails.
   host-and-server-units-linux:
     if: ${{ always() }}
-    needs: [host-linux, host-windows, cuda-build-linux]
+    needs: [host-linux, host-windows, cuda-build-linux, ninfer-pinned-sources]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -150,10 +174,12 @@ jobs:
           LINUX_RESULT: ${{ needs.host-linux.result }}
           WINDOWS_RESULT: ${{ needs.host-windows.result }}
           CUDA_RESULT: ${{ needs.cuda-build-linux.result }}
+          NINFER_RESULT: ${{ needs.ninfer-pinned-sources.result }}
         run: |
           test "$LINUX_RESULT" = success
           test "$WINDOWS_RESULT" = success
           test "$CUDA_RESULT" = success
+          test "$NINFER_RESULT" = success
   ui-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -162,8 +188,6 @@ jobs:
         mode: [lightweight, full]
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
