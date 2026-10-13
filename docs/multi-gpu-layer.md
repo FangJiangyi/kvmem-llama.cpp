@@ -290,7 +290,7 @@ the tests do not prove bitwise output parity across all placements or broad
 quality parity. Keep dual MTP opt-in pending wider model, prompt and stability
 testing.
 
-## Relation to [PR #54](https://github.com/kvmem/kvmem-llama.cpp/pull/54)
+## Relation to [PR #54](https://github.com/kvmem/kvmem/pull/54)
 
 PR #54 does add two-GPU layer work, alongside a substantially larger
 TurboQuant KV codec port. It relaxes the server's device guard and adds a

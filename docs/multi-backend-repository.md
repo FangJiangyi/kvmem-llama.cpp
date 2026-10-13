@@ -29,8 +29,8 @@ deliberately, with an updated integration patch and prepared-tree hash.
 
 ```sh
 git clone --recurse-submodules \
-  https://github.com/kvmem/kvmem-llama.cpp.git
-cd kvmem-llama.cpp
+  https://github.com/kvmem/kvmem.git
+cd kvmem
 python scripts/prepare-backends.py
 python scripts/prepare-backends.py --check
 ```
