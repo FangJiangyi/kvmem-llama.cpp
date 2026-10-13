@@ -144,7 +144,7 @@ Check `nvcc --version` for the compiler selected by CMake; `release 13.2` alone 
 The [native Windows CUDA build](scripts/windows/README.md) disables the legacy raw-block NVMe tier and includes PowerShell launchers; the session snapshot cache described above is independent of that build option. The performance results below remain Linux/WSL2 measurements.
 
 ```bash
-git clone --recurse-submodules --branch feat/multi-backend-framework https://github.com/kvmem/kvmem-llama.cpp.git
+git clone --recurse-submodules https://github.com/kvmem/kvmem-llama.cpp.git
 cd kvmem-llama.cpp
 python scripts/prepare-backends.py --backend llamacpp
 scripts/build-cuda.sh
