@@ -50,13 +50,13 @@ These packages retain their own feature and parameter scope. The 0.18.0 binary r
 - **多后端源码 / Multi-backend source**：共享 KVMem 内存、检索和存储契约；llama.cpp 与 NInfer 分别保留原生推理和服务实现。上游版本、集成补丁与完整来源由 [backend manifest](backends/versions.json) 固定。 / Shared memory, retrieval and storage contracts with separate native engine workers and pinned integration patches.
 - **长历史与状态复用 / History and state reuse**：按查询选择 KV，保持逻辑位置；多轮请求、工具续接、编辑和取消按后端的精确前缀与 checkpoint 规则恢复。 / Query-based KV selection with original logical positions and backend-specific prefix/checkpoint validation.
 - **RAM/SSD 分层 / RAM/SSD tiering**：活动和闲置历史共用配额；完整原生 K/V、量化附属数据与 MTP KV 可下沉，按实际选中的内容读取。 / Active and idle histories share quotas; selected native KV is restored without requantization.
-- **LRFU 与 GQA max / LRFU and GQA max**：Windows 启动入口默认开启历史加权，`lambda=0.5`、`top-frac=0.9`、GQA `max`；sink=5120，recent=64。 / Windows launchers enable history weighting and max aggregation with these defaults.
+- **LRFU 与 GQA max / LRFU and GQA max**：Windows 启动入口默认开启历史加权，`lambda=0.5`、`top-frac=0.9`、GQA `max`；sink=12288，recent=1024。 / Windows launchers enable history weighting and max aggregation with these defaults.
 - **工具与客户端 / Tools and clients**：NInfer 默认接入工具选择与 strict schema 约束，支持 Chat Completions、Responses 和 Anthropic Messages；仅发布完整工具调用，不支持的 schema 明确报错。Responses reasoning 返回 `summary=[]` 并保留原始思考文本；图片 detail 接受 low/high/original 并映射到 auto。 / Native tool constraints compose with thinking, JSON output and speculative decoding; client compatibility includes Responses reasoning and image detail handling.
 - **NInfer 执行选项 / NInfer execution options**：九种 KV 格式、固定或自适应 MTP、ngram、文本及 CPU/resident 图片并发，以及最多八张同计算能力 GPU 的按层分配。具体组合受 [能力与验收范围](docs/multi-backend.md)约束。 / Nine KV formats, MTP, ngram, concurrent text/image requests and a layer pipeline across compatible GPUs; consult the supported combinations before changing the recipe.
 
-正式版基于 RC3 引擎，更新版本、启动默认值、说明及校验文件。recent 默认值为 **64 tokens**，这是 NInfer 支持的最小值，0–63 会被拒绝。引擎二进制与 RC3 相同；版本来源见包内 `BUILD-INFO.json`，发布源码固定在 `v0.18.0`。`master` 在此基础上保留主线 Responses 修复和构建修复，并继续接收后续更新。
+正式版基于 RC3 引擎，更新版本、启动默认值、说明及校验文件。默认 sink 为 **12288 tokens（12K）**、recent 为 **1024 tokens（1K）**；NInfer 的 recent 最小值仍为 64，0–63 会被拒绝。引擎二进制与 RC3 相同；版本来源见包内 `BUILD-INFO.json`。`v0.18.0` 保留首次发布源码快照，启动配方更新随 `master` 和运行包发布；`master` 也保留主线 Responses 修复和构建修复。
 
-The stable release retains the RC3 engine binaries and updates version metadata, launch defaults, documentation and checksums. **Recent defaults to 64 tokens**, the NInfer minimum; values 0–63 are rejected. `BUILD-INFO.json` records binary provenance, and `v0.18.0` pins the release source. `master` also retains mainline Responses and build fixes and continues to receive updates.
+The stable release retains the RC3 engine binaries and updates version metadata, launch defaults, documentation and checksums. **Sink defaults to 12288 tokens (12K), recent to 1024 tokens (1K)**. The NInfer minimum remains 64; values 0–63 are rejected. `BUILD-INFO.json` records binary provenance. `v0.18.0` preserves the initial source snapshot; launcher revisions ship through `master` and updated packages. `master` also retains mainline Responses and build fixes.
 
 <a id="quick-start"></a>
 
@@ -100,7 +100,7 @@ These are the defaults of **`start-ninfer.ps1` in the 0.18.0 package**, with 1K=
 | Thinking budget / 思考预算 | 8192 |
 | Host KV payload | 12288 MiB / 12 GiB |
 | Prefill chunk | 256 tokens |
-| Sink / recent | 5120 / **64 tokens** |
+| Sink / recent | **12288 / 1024 tokens (12K / 1K)** |
 | Retained idle sessions / concurrency | 1 / 1 |
 | LRFU / GQA | Enabled, lambda=0.5, top-frac=0.9 / max |
 | SSD / device profile | Disabled / off |
@@ -117,9 +117,9 @@ This recipe was checked for model loading and text requests on an RTX 5060 Ti 16
 | H / HostMiB | 本进程受管理原生 KV 的 RAM 配额；Main/MTP 都计入。不是进程总内存上限。 / Managed native KV RAM quota, including Main/MTP; not a process RSS limit. |
 | D / DiskMiB | 活动 KV 和闲置状态附件共用的 SSD 配额。 / Shared SSD quota for active KV and idle state attachments. |
 
-NInfer B/R 按 64-token 页对齐，prefill 为 128 的倍数且不超过 R；B+R 不超过 context。recent 至少 64，按整页向下取整。llama.cpp 默认检索 block 为 128，recent 按完整 block 计算，因此脚本传入 64 不等于保留一个 llama.cpp block。两后端参数名相同也不保证行为相同，详见 [实现差异](docs/multi-backend-differences.md)。
+NInfer B/R 按 64-token 页对齐，prefill 为 128 的倍数且不超过 R；B+R 不超过 context。recent 至少 64，按整页向下取整。llama.cpp 默认检索 block 为 128；默认 recent=1024 对应 8 个 block，在 NInfer 中对应 16 页。两后端参数名相同也不保证行为相同，详见 [实现差异](docs/multi-backend-differences.md)。
 
-For NInfer, B/R align to 64 tokens, prefill is a multiple of 128 and no larger than R, and B+R fits context. Recent is at least 64 and rounds down to whole pages. llama.cpp's default retrieval block is 128, so a launcher value of 64 does not retain one llama.cpp block. See the backend differences before transferring configurations.
+For NInfer, B/R align to 64 tokens, prefill is a multiple of 128 and no larger than R, and B+R fits context. Recent is at least 64 and rounds down to whole pages. The default recent=1024 retains eight llama.cpp blocks (128 tokens each) or sixteen NInfer pages. See the backend differences before transferring configurations.
 
 NInfer KVMem KV 格式 / formats：`bf16`、`int8`、`fp8`、`nvfp4`、`k8v4`、`rk8v4`、`rk4v4`、`rk4v4-e8`、`rk2v4-e8`；Main/MTP 使用相同格式。llama.cpp 的 KV 参数为 `f16`、`f32`、`q8_0`、`q5_0`、`q4_0`，Main/MTP 可分别设置。模型权重量化与 KV 格式是独立配置，NInfer `int8` 与 llama.cpp `q8_0` 也不能直接互换。
 
@@ -276,9 +276,9 @@ ctest --test-dir build-backends/core -C Release --output-on-failure
     -Model 'D:/models/model.gguf' -Gpu '0'
 ```
 
-统一入口默认 context=262144、B=32768、R=1024、prefill=128、输出上限1024；NInfer 默认 INT8、MTP/ngram/视觉关闭，LRFU 开启、sink=5120、recent=64。需要视觉或 MTP 时显式传 `-Vision`、`-MtpDrafts` 等。llama.cpp 对应能力使用 `-WorkerArgs` 传原生参数。
+统一入口默认 context=262144、B=32768、R=1024、prefill=128、输出上限1024；NInfer 默认 INT8、MTP/ngram/视觉关闭，LRFU 开启、sink=12288、recent=1024。需要视觉或 MTP 时显式传 `-Vision`、`-MtpDrafts` 等。llama.cpp 对应能力使用 `-WorkerArgs` 传原生参数。
 
-The unified launcher defaults to context=262144, B=32768, R=1024, prefill=128 and output limit=1024. NInfer uses INT8 with MTP/ngram/vision disabled; LRFU is enabled with sink=5120 and recent=64. Enable NInfer vision/MTP explicitly; pass llama.cpp-specific native options through `-WorkerArgs`.
+The unified launcher defaults to context=262144, B=32768, R=1024, prefill=128 and output limit=1024. NInfer uses INT8 with MTP/ngram/vision disabled; LRFU is enabled with sink=12288 and recent=1024. Enable NInfer vision/MTP explicitly; pass llama.cpp-specific native options through `-WorkerArgs`.
 
 **源码树的 `start-ninfer.ps1` 是固定配方快捷脚本，默认从仓库根目录读取 `model.ninfer`，不接受包内扩展的 `-Model`、`-NoVision` 等选项。**需要自定义模型或完整参数时使用源码 `start-backend.ps1`；前面的包内快速开始仅用于解压后的正式运行包。
 

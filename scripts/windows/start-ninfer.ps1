@@ -4,13 +4,13 @@
 # Select GPUs by UUID: -Gpu 'GPU-uuid-a,GPU-uuid-b'. The first GPU holds Vision/MTP.
 # Optional -StageLayers 30,34 sets the layer split; otherwise the engine plans it.
 # With -Concurrency 2..8, ngram widths above 15 automatically reduce to 15; raise -RetainedSessions as needed.
-# Sink defaults to 5120 tokens; recent defaults to 64 tokens (one page). -SinkTokens 0 keeps one 64-token page; -RecentTokens must be >=64.
+# Sink defaults to 12288 tokens (12K); recent defaults to 1024 tokens (1K, 16 pages). -SinkTokens 0 keeps one 64-token page; -RecentTokens must be >=64.
 # LRFU and GQA max are enabled by default. -NoLrfu -ScoreAggregation mean restores plain retrieval.
 param(
     [string]$Gpu = $(if ($env:CUDA_VISIBLE_DEVICES) { $env:CUDA_VISIBLE_DEVICES } else { '0' }),
     [uint32[]]$StageLayers = @(),
-    [ValidateRange(0, 2147483647)][int]$SinkTokens = 5120,
-    [ValidateRange(64, 2147483647)][int]$RecentTokens = 64,
+    [ValidateRange(0, 2147483647)][int]$SinkTokens = 12288,
+    [ValidateRange(64, 2147483647)][int]$RecentTokens = 1024,
     [switch]$NoLrfu,
     [ValidateRange(0.0, 1.0)][double]$LrfuLambda = 0.5,
     [ValidateScript({ $_ -gt 0 -and $_ -le 1 })][double]$LrfuTopFraction = 0.9,
