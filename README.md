@@ -13,9 +13,14 @@
 | Linux / WSL2 NVIDIA | llama.cpp | GGUF | [CUDA RC3](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) | 预发布 / Prerelease |
 | Windows / Linux / WSL2 AMD | llama.cpp | GGUF | [ROCm Beta2](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta2) | 测试版 / Beta |
 | Windows Bonsai 2 | Bonsai 专用 / Dedicated | PTQ1 GGUF | [prism.3](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3-prism.3) | 专用实验版 / Experiment |
-| 自行编译 / Build from source | llama.cpp | GGUF | [v0.17.0 source](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.17.0) | 仅源码 / Source only |
+| 自行编译 / Build from source | llama.cpp / NInfer | GGUF / `.ninfer` | [v0.18.0 source](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0) | 发布源码 / Release source |
 
-**Windows RTX 30/40/50 users can download the NInfer v0.18.0 release (recent=64 tokens). Windows RTX 30／40／50 系用户可下载 NInfer v0.18.0 正式版，recent 默认 64 tokens。** NInfer uses `.ninfer` models; llama.cpp uses GGUF. Models are downloaded separately. 两个后端的模型格式不同，模型需另行准备。
+**Windows RTX 30/40/50 users can download the NInfer v0.18.0 release. Windows RTX 30／40／50 系用户可下载 NInfer v0.18.0 正式版。** NInfer uses `.ninfer` models; llama.cpp uses GGUF. Models are downloaded separately. 两个后端的模型格式不同，模型需另行准备。
+
+> The `master` branch now contains the 0.18.0 multi-backend framework: pinned llama.cpp and NInfer submodules under `backends/`, with versioned KVMem integration patches. See [repository layout and builds](docs/multi-backend-repository.md), [backend capabilities and validation scope](docs/multi-backend.md), and [implementation differences](docs/multi-backend-differences.md).
+
+
+The 0.18.0 source includes a Windows NInfer backend with native KVMem history storage, retrieval, multi-turn checkpoints and layer splitting across GPUs for text and resident/CPU Vision. See [multi-backend startup and build instructions](docs/multi-backend.md) for source capabilities and their qualification scope. Existing llama.cpp entry points remain available. The NInfer v0.18.0 release is based on RC3 with recent reduced to 64 tokens. Its workers retain the RC3 engine binaries.
 
 **QQ community / QQ 交流群：1040777853**
 
@@ -41,7 +46,7 @@ Previous milestone: [`v0.16.0-rc3`](docs/milestones/v0.16.0-rc3.md) (pre-release
 
 **Limitation:** one generation cannot exceed `--kvmem-gen-reserve` (16384 tokens on the IQ3 recipe, 12288 on IQ4), including thinking. Retrieval pins the GPU window; new tokens only use those reserved slots. We are working on fixing this. For agent use, add a line to the system prompt such as: *Keep each turn's output, including thinking, within 16384 tokens* (use 12288 on IQ4). That makes oversized single-turn replies much less likely.
 
-Source version: **0.17.0**. See the [English / 中文 release notes](docs/releases/v0.17.0.md) for the core changes. The prebuilt downloads below are older rc3/beta 2 packages, not v0.17.0 binaries.
+Source version: **0.18.0**. See the [English / 中文 release notes](docs/releases/v0.18.0.md). The Windows NInfer packages are based on RC3 with recent=64; the separate llama.cpp/ROCm packages remain at their listed versions.
 
 ## How KVMem works
 
@@ -55,6 +60,10 @@ Core flags (what the 16 GiB recipes still pass):
 |---|---|
 | `-c` | Logical workspace, including history stored off GPU. 256K is the tested default; larger is experimental. |
 | `--kvmem-budget` | How many historical tokens retrieval may keep on GPU. |
+| `--kvmem-lrfu` | Enable history ranking for retrieval TopK (default off). Sink, recent and media pins still apply. |
+| `--kvmem-lrfu-lambda X` | History decay in `[0,1]`, default `0.5`. |
+| `--kvmem-lrfu-top-frac X` | Fraction of current retrieval scores eligible for a history hit, `(0,1]`, default `0.9`; threshold ties also qualify. |
+| `--kvmem-score-agg mean\|max` | GQA query-head aggregation, default `mean`. `max` is independent of LRFU and takes the largest cosine within each GQA group. |
 | `--kvmem-sink-tokens N` | Server and CLI: always keep the prefix in the GPU working set. Default `0` keeps one block (not disabled). Positive values round down to whole blocks, with a minimum of one block. For example, with block size 128, `1024` keeps 1024 tokens and `129` keeps 128. These blocks count toward `--kvmem-budget`. |
 | `--kvmem-gen-reserve` | GPU slots reserved for new tokens so retrieval cannot fill the pool. **One generation cannot exceed this length** (including thinking). |
 | `--kvmem-conversations N` | How many conversations retain their KV in host RAM or the optional session disk cache. Default `1` reproduces earlier behavior, where a different conversation discards the previous one. Higher values let the server switch between conversations without reprocessing them. With `--parallel P`, the effective count is `max(N, P)` and up to P requests run together. Needs flash attention. |
@@ -69,6 +78,10 @@ Core flags (what the 16 GiB recipes still pass):
 
 KVMem retrieval is on by default, with 128-token blocks, query replay `auto`, query policy `user`, MTP draft length 3, F16 draft KV, and ReplaySSM. You do not need to pass those unless you are overriding them. GPU KV size is `budget + gen_reserve`. When history exceeds `--kvmem-budget`, retrieval picks blocks for the current last-user query. Clients should send the full `messages` history each turn.
 
+The optional LRFU and GQA max switches are shared by the llama.cpp CLI/server and ninfer server. To enable both, add `--kvmem-lrfu --kvmem-score-agg max`. LRFU updates once after the accepted input's query statistics and retrieval replay are complete; decode pressure reselections reuse that committed history. Full prefix identity decides whether a new request inherits a prior round. Regeneration and edits restore the matching parent round. This uses query-to-mean-K retrieval scores, without collecting action-token attention or changing the retrieval budget. LRFU currently supports retrieval TopK; quota mixing is not implemented.
+
+The current Windows source launchers (`start-backend.ps1`, `start-ninfer.ps1` and IQ3/IQ4 via `start-server.ps1`) enable LRFU with lambda `0.5`, hit fraction `0.9` and GQA `max` by default. Sink defaults to `5120` tokens and recent to `64` tokens (one page) and count toward B. The unified launcher's default B is `32768`; the ninfer/IQ3/IQ4 recipes retain their existing B/R. Override keep windows with `-SinkTokens` and `-RecentTokens`, and ranking with `-LrfuLambda`, `-LrfuTopFraction` and `-ScoreAggregation`; use `-NoLrfu -ScoreAggregation mean` for plain mean retrieval. These flags require the updated workers; previously published ZIPs are unchanged.
+
 With `--kvmem-conversations` above 1, that history is also the conversation's identity: no client API change and no conversation id are required. A request that continues a stored conversation extends it, while a request that only shares a system prompt or chat template starts a separate one instead of truncating the stored tail. A match is usable only when a recurrent checkpoint exists at or before it; otherwise the request is an ordinary cache miss. Details and limits are in [Multi-conversation KV cache](docs/multi-conversation-kv-cache.md). Combine `--parallel 2 --kvmem-conversations 3` for two GPU working sets and three host caches with dynamic lane assignment; see [Multi-lane conversations](docs/multi-lane-conversations.md).
 
 For example, add `--kvmem-conversations 3 --kvmem-session-ram-gb 12 --kvmem-session-nvme-gb 40 --kvmem-session-cache-dir D:/KVMem/session-cache` to retain sessions across RAM and disk. The active session must fit the machine's actual RAM. A new server run reclaims marked, unlocked cache directories left by earlier runs, while preserving live servers' caches. Legacy directories without a marker and files that fail deletion need manual attention. See [Session disk cache](docs/session-disk-cache.md) for accounting and recovery, the [1:10 multi-session stability test](docs/session-exchange-stability.md) for the large exchange check, and the [three-session 5 GiB K8/V4 test](docs/three-session-5g-k8v4-stability.md) for a real-model 10 GiB NVMe and cold-prefill comparison.
@@ -77,7 +90,7 @@ For example, add `--kvmem-conversations 3 --kvmem-session-ram-gb 12 --kvmem-sess
 
 `kvmem/` holds the host store and retrieval logic; `src/adapter/` connects it through llama.cpp’s memory interface. Attention kernels and original positions stay unchanged. Reselection transfers only blocks that changed.
 
-Do **not** commit a dirty `llama.cpp` working tree. The submodule pointer is the pin; `scripts/apply-patches.sh` replays `patches/`.
+`backends/llamacpp/` and `backends/ninfer/` reference existing upstream projects at fixed commits. `backends/patches/` retains the tested KVMem integration; build wrappers initialize and prepare their selected backend automatically. For direct CMake builds, run `python scripts/prepare-backends.py` first. See the [backend workflow](docs/multi-backend-repository.md).
 
 ## Tested platform
 
@@ -118,6 +131,10 @@ The recipes and conversion commands below document the historical tested setup.
 
 ## Clone, patch, build
 
+The isolated multi-backend refactor adds a C++17 [native memory contract](docs/memory-backend-contract.md),
+including transfer lifecycle and payload tests. Production adapter migration is a later step;
+the existing server entry point remains the llama.cpp adapter.
+
 Building uses a C++17 compiler, CMake and **CUDA Toolkit 13.2 Update 2 (nvcc 13.2.86) or newer**. The Linux startup scripts use Python 3.10+ and `ss` (iproute2).
 
 **CUDA compiler version matters for correctness.** The validated baseline is nvcc **13.2.86** on Linux/WSL2 and native Windows. A Windows build made with nvcc 13.2.51 produced garbage output from Qwen3.8-27B IQ3_S even with KVMem and MTP disabled; rebuilding unchanged source with 13.2.86 restored correct output. A successful build, health check or small Q8 model test does not validate IQ3 inference. Newer toolchains still need correctness testing before release.
@@ -127,15 +144,13 @@ Check `nvcc --version` for the compiler selected by CMake; `release 13.2` alone 
 The [native Windows CUDA build](scripts/windows/README.md) disables the legacy raw-block NVMe tier and includes PowerShell launchers; the session snapshot cache described above is independent of that build option. The performance results below remain Linux/WSL2 measurements.
 
 ```bash
-git clone --recurse-submodules https://github.com/kvmem/kvmem-llama.cpp.git
+git clone --recurse-submodules --branch feat/multi-backend-framework https://github.com/kvmem/kvmem-llama.cpp.git
 cd kvmem-llama.cpp
-git checkout master
-git submodule update --init
-scripts/apply-patches.sh
+python scripts/prepare-backends.py --backend llamacpp
 scripts/build-cuda.sh
 ```
 
-The current `master` source pins ggml-org/llama.cpp at release `v0.5.0` (`7fe450e19`). `scripts/apply-patches.sh` applies `patches/llama-kvmem-current.patch` and the separate RDNA2 patch. Running it twice is safe. Do **not** apply numbered `0001`–`0004` together with the cumulative patch. The published `v0.17.0` and `v0.16.0-rc3` tags retain their original `b81c99b` pin; use `master` to build this revision. See [patches/README.md](patches/README.md).
+This branch includes the integrated backend sources. Upstream baseline revisions and licenses are recorded in [backends/versions.json](backends/versions.json). Historical release tags keep their original layouts; do not replay their patches onto this branch.
 
 `scripts/build-cuda.sh` sets `GGML_CUDA_FA_QUANTS=all` (needed for `--kv-dtype q5_0` on hybrid models). Binaries: `build/bin/llama-kvmem-server`.
 
@@ -588,10 +603,11 @@ generation space is allocated separately with `--kvmem-gen-reserve`.
 kvmem/            Host KVMem library (no llama.cpp includes)
 src/adapter/      llama_memory_i wrapper
 tools/            llama-kvmem-cli, llama-kvmem-server, vision helpers
-scripts/          apply-patches, CUDA build, GPU bind, start helpers
+scripts/          backend builds, GPU bind, start helpers
 patches/          Diffs against the llama.cpp pin
 docs/             Architecture, milestones, multimodal
-llama.cpp/        Submodule (pin only; apply patches after clone)
+backends/llamacpp/        Vendored llama.cpp with KVMem integration
+backends/ninfer/  Vendored ninfer with KVMem integration
 models/           Local GGUFs (gitignored)
 ```
 

@@ -3,6 +3,7 @@
 param(
     [string]$SourceDir,
     [string]$BuildDir,
+    [string]$Python = 'python',
     [string]$CudaPath = $env:CUDA_PATH,
     [switch]$ExperimentalCuda129,
     [switch]$Vulkan,
@@ -66,39 +67,9 @@ $escapedPrefix = $includePrefix.Replace('\', '\\').Replace('"', '\"')
 
 
 if (!$HostOnly) {
-    # Use the maintained patches, never the developer's unrecorded submodule edits.
-    $llama = Join-Path $SourceDir 'llama.cpp'
-    $patch = Join-Path $SourceDir 'patches/llama-kvmem-current.patch'
-    $graph = Join-Path $SourceDir 'patches/cuda-graph-decode.patch'
-    $gdnOutput = Join-Path $SourceDir 'patches/gdn-output-fusion.patch'
-    $graphReactivation = Join-Path $SourceDir 'patches/cuda-graph-reactivation.patch'
-    function Test-PatchApplied([string]$PatchPath) {
-        $savedPreference = $ErrorActionPreference
-        try {
-            $ErrorActionPreference = 'Continue'
-            & git -C $llama apply --ignore-space-change --reverse --check $PatchPath 2>$null
-            return $LASTEXITCODE -eq 0
-        } finally { $ErrorActionPreference = $savedPreference }
-    }
-    # The graph patch sits on the cumulative patch, so a tree with both applied
-    # no longer reverses the cumulative patch alone.
-    if (!(Test-PatchApplied $gdnOutput) -and !(Test-PatchApplied $graph)) {
-        if (!(Test-PatchApplied $patch)) {
-            Invoke-Checked git @('-C', $llama, 'apply', '--check', $patch)
-            Invoke-Checked git @('-C', $llama, 'apply', $patch)
-        }
-        Invoke-Checked git @('-C', $llama, 'apply', '--check', $graph)
-        Invoke-Checked git @('-C', $llama, 'apply', $graph)
-    }
-    if (!(Test-PatchApplied $gdnOutput)) {
-        Invoke-Checked git @('-C', $llama, 'apply', '--ignore-space-change', '--check', $gdnOutput)
-        Invoke-Checked git @('-C', $llama, 'apply', '--ignore-space-change', $gdnOutput)
-    }
-    if (!(Test-PatchApplied $graphReactivation)) {
-        Invoke-Checked git @('-C', $llama, 'apply', '--check', $graphReactivation)
-        Invoke-Checked git @('-C', $llama, 'apply', $graphReactivation)
-    }
+    Invoke-Checked $Python @((Join-Path $SourceDir 'scripts/prepare-backends.py'), '--backend', 'llamacpp')
 }
+
 $options = @('-S', $SourceDir, '-B', $BuildDir, '-G', 'Ninja',
     "-DCMAKE_BUILD_TYPE=$BuildType", '-DCMAKE_CXX_COMPILER=cl',
     "-DCMAKE_USER_MAKE_RULES_OVERRIDE=$rulesOverride",
