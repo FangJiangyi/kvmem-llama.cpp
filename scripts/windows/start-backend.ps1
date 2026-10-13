@@ -28,7 +28,7 @@ param(
     [ValidateSet('off', 'auto')][string]$DeviceProfile = 'off',
     [ValidateRange(0, 2147483647)][int]$ThinkingBudget = 0,
     [ValidateRange(0, 2147483647)][int]$SinkTokens = 5120,
-    [ValidateRange(0, 2147483647)][int]$RecentTokens = 5120,
+    [ValidateRange(0, 2147483647)][int]$RecentTokens = 64,
     [switch]$NoLrfu,
     [ValidateRange(0.0, 1.0)][double]$LrfuLambda = 0.5,
     [ValidateScript({ $_ -gt 0 -and $_ -le 1 })][double]$LrfuTopFraction = 0.9,

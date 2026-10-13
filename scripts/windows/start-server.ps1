@@ -12,7 +12,7 @@ param(
     [string]$ApiKeyFile = $env:LLAMA_ARG_API_KEY_FILE,
     [ValidateRange(1, 2147483647)][int]$BlockTokens = 128,
     [ValidateRange(0, 2147483647)][int]$SinkTokens = 5120,
-    [ValidateRange(0, 2147483647)][int]$RecentTokens = 5120,
+    [ValidateRange(0, 2147483647)][int]$RecentTokens = 64,
     [string]$ReasoningEffort,
     [ValidateSet('f16', 'f32', 'q8_0', 'q5_0', 'q4_0')][string]$CacheTypeK,
     [ValidateSet('f16', 'f32', 'q8_0', 'q5_0', 'q4_0')][string]$CacheTypeV,

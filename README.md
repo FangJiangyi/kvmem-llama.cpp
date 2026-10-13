@@ -8,19 +8,19 @@
 
 | 用途 / Audience | 后端 / Backend | 模型 / Model | 下载 / Download | 状态 / Status |
 |---|---|---|---|---|
-| Windows NVIDIA RTX 30/40/50 | NInfer | `.ninfer` | [v0.18.0 RC1](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0-ninfer-rc1) | 预发布 / Prerelease |
+| Windows NVIDIA RTX 30/40/50 | NInfer | `.ninfer` | [v0.18.0](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0) | 正式版 / Release |
 | Windows NVIDIA | llama.cpp | GGUF | [CUDA RC3](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) | 预发布 / Prerelease |
 | Linux / WSL2 NVIDIA | llama.cpp | GGUF | [CUDA RC3](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) | 预发布 / Prerelease |
 | Windows / Linux / WSL2 AMD | llama.cpp | GGUF | [ROCm Beta2](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta2) | 测试版 / Beta |
 | Windows Bonsai 2 | Bonsai 专用 / Dedicated | PTQ1 GGUF | [prism.3](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3-prism.3) | 专用实验版 / Experiment |
 | 自行编译 / Build from source | llama.cpp | GGUF | [v0.17.0 source](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.17.0) | 仅源码 / Source only |
 
-**Windows RTX 30/40/50 users are encouraged to try the NInfer prerelease. 推荐 Windows RTX 30／40／50 系用户尝试 NInfer 预发布版。** NInfer uses `.ninfer` models; llama.cpp uses GGUF. Models are downloaded separately. 两个后端的模型格式不同，模型需另行准备。
+**Windows RTX 30/40/50 users can download the NInfer v0.18.0 release. Windows RTX 30／40／50 系用户可下载 NInfer v0.18.0 正式版。** NInfer uses `.ninfer` models; llama.cpp uses GGUF. Models are downloaded separately. 两个后端的模型格式不同，模型需另行准备。
 
 > Development branch: the framework references pinned llama.cpp and ninfer submodules under `backends/`, with versioned KVMem integration patches. See [repository layout and builds](docs/multi-backend-repository.md), [backend capabilities](docs/multi-backend.md), and [implementation differences](docs/multi-backend-differences.md). P6-P10 final qualification is still in progress.
 
 
-This development checkout adds a Windows ninfer backend with native KVMem history storage, retrieval, multi-turn checkpoints and layer splitting across GPUs for text and resident/CPU Vision. See [multi-backend startup and build instructions](docs/multi-backend.md) for the 2026-10-07 source capabilities and their qualification scope. Existing llama.cpp entry points remain available. The prebuilt downloads below, including ninfer v0.18.0 RC1, predate that source.
+This development checkout adds a Windows ninfer backend with native KVMem history storage, retrieval, multi-turn checkpoints and layer splitting across GPUs for text and resident/CPU Vision. See [multi-backend startup and build instructions](docs/multi-backend.md) for the 2026-10-07 source capabilities and their qualification scope. Existing llama.cpp entry points remain available. The NInfer v0.18.0 release is based on RC3 with recent reduced to 64 tokens. Its workers retain the RC3 engine binaries.
 
 **QQ community / QQ 交流群：1040777853**
 
@@ -46,7 +46,7 @@ Previous milestone: [`v0.16.0-rc3`](docs/milestones/v0.16.0-rc3.md) (pre-release
 
 **Limitation:** one generation cannot exceed `--kvmem-gen-reserve` (16384 tokens on the IQ3 recipe, 12288 on IQ4), including thinking. Retrieval pins the GPU window; new tokens only use those reserved slots. We are working on fixing this. For agent use, add a line to the system prompt such as: *Keep each turn's output, including thinking, within 16384 tokens* (use 12288 on IQ4). That makes oversized single-turn replies much less likely.
 
-Source version: **0.17.0**. See the [English / 中文 release notes](docs/releases/v0.17.0.md) for the core changes. The prebuilt downloads below are older rc3/beta 2 packages, not v0.17.0 binaries.
+Source version: **0.18.0**. See the [English / 中文 release notes](docs/releases/v0.18.0.md). The Windows NInfer packages are based on RC3 with recent=64; the separate llama.cpp/ROCm packages remain at their listed versions.
 
 ## How KVMem works
 
@@ -80,7 +80,7 @@ KVMem retrieval is on by default, with 128-token blocks, query replay `auto`, qu
 
 The optional LRFU and GQA max switches are shared by the llama.cpp CLI/server and ninfer server. To enable both, add `--kvmem-lrfu --kvmem-score-agg max`. LRFU updates once after the accepted input's query statistics and retrieval replay are complete; decode pressure reselections reuse that committed history. Full prefix identity decides whether a new request inherits a prior round. Regeneration and edits restore the matching parent round. This uses query-to-mean-K retrieval scores, without collecting action-token attention or changing the retrieval budget. LRFU currently supports retrieval TopK; quota mixing is not implemented.
 
-The current Windows source launchers (`start-backend.ps1`, `start-ninfer.ps1` and IQ3/IQ4 via `start-server.ps1`) enable LRFU with lambda `0.5`, hit fraction `0.9` and GQA `max` by default. Sink and recent each default to `5120` tokens and count toward B. The unified launcher's default B is `32768`; the ninfer/IQ3/IQ4 recipes retain their existing B/R. Override keep windows with `-SinkTokens` and `-RecentTokens`, and ranking with `-LrfuLambda`, `-LrfuTopFraction` and `-ScoreAggregation`; use `-NoLrfu -ScoreAggregation mean` for plain mean retrieval. These flags require the updated workers; previously published ZIPs are unchanged.
+The current Windows source launchers (`start-backend.ps1`, `start-ninfer.ps1` and IQ3/IQ4 via `start-server.ps1`) enable LRFU with lambda `0.5`, hit fraction `0.9` and GQA `max` by default. Sink defaults to `5120` tokens and recent to `64` tokens (one page) and count toward B. The unified launcher's default B is `32768`; the ninfer/IQ3/IQ4 recipes retain their existing B/R. Override keep windows with `-SinkTokens` and `-RecentTokens`, and ranking with `-LrfuLambda`, `-LrfuTopFraction` and `-ScoreAggregation`; use `-NoLrfu -ScoreAggregation mean` for plain mean retrieval. These flags require the updated workers; previously published ZIPs are unchanged.
 
 With `--kvmem-conversations` above 1, that history is also the conversation's identity: no client API change and no conversation id are required. A request that continues a stored conversation extends it, while a request that only shares a system prompt or chat template starts a separate one instead of truncating the stored tail. A match is usable only when a recurrent checkpoint exists at or before it; otherwise the request is an ordinary cache miss. Details and limits are in [Multi-conversation KV cache](docs/multi-conversation-kv-cache.md). Combine `--parallel 2 --kvmem-conversations 3` for two GPU working sets and three host caches with dynamic lane assignment; see [Multi-lane conversations](docs/multi-lane-conversations.md).
 
