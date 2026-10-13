@@ -4,6 +4,10 @@ KVMem 在有限显存中管理长对话与 Agent 工具历史：完整原生 KV 
 
 KVMem manages long conversations and agent tool histories within a bounded GPU working set. Native KV history lives in Host RAM, with optional SSD tiering; retrieval brings selected history onto the GPU. **`master` contains the 0.18.0 multi-backend source**, and **stable NInfer 0.18.0 packages** are available for Windows RTX 30/40/50 GPUs.
 
+仓库现名为 **[kvmem/kvmem](https://github.com/kvmem/kvmem)**。旧地址 [kvmem/kvmem-llama.cpp](https://github.com/kvmem/kvmem-llama.cpp) 由 GitHub 自动跳转；旧发布与下载链接继续可用。请勿重新创建旧名称仓库，以免覆盖跳转。
+
+The repository is now **kvmem/kvmem**. GitHub redirects the former repository URL, including existing release and download links. Do not reuse the old repository name, which would replace the redirect.
+
 **QQ community / QQ 交流群：1040777853**
 
 [下载 / Downloads](#downloads) · [快速开始 / Quick start](#quick-start) · [默认配方 / Defaults](#defaults) · [性能 / Performance](#performance) · [源码 / Source](#source) · [文档 / Docs](#documentation)
@@ -16,11 +20,11 @@ KVMem manages long conversations and agent tool histories within a bounded GPU w
 
 | GPU / 显卡 | Windows x64 NInfer 0.18.0 | Size / 大小 |
 |---|---|---:|
-| RTX 30 / sm86 | [Download ZIP](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0/kvmem-v0.18.0-ninfer-windows-rtx30-sm86.zip) | 971.6 MiB |
-| RTX 40 / sm89 | [Download ZIP](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0/kvmem-v0.18.0-ninfer-windows-rtx40-sm89.zip) | 964.5 MiB |
-| RTX 50 / sm120a | [Download ZIP](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0/kvmem-v0.18.0-ninfer-windows-rtx50-sm120a.zip) | 859.0 MiB |
+| RTX 30 / sm86 | [Download ZIP](https://github.com/kvmem/kvmem/releases/download/v0.18.0/kvmem-v0.18.0-ninfer-windows-rtx30-sm86.zip) | 971.6 MiB |
+| RTX 40 / sm89 | [Download ZIP](https://github.com/kvmem/kvmem/releases/download/v0.18.0/kvmem-v0.18.0-ninfer-windows-rtx40-sm89.zip) | 964.5 MiB |
+| RTX 50 / sm120a | [Download ZIP](https://github.com/kvmem/kvmem/releases/download/v0.18.0/kvmem-v0.18.0-ninfer-windows-rtx50-sm120a.zip) | 859.0 MiB |
 
-[完整中英文 Release Note / Full release notes](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0) · [ZIP SHA256](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0/SHA256SUMS-ninfer-only.txt) · [包内使用说明 / Package guide](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0/README.md)
+[完整中英文 Release Note / Full release notes](https://github.com/kvmem/kvmem/releases/tag/v0.18.0) · [ZIP SHA256](https://github.com/kvmem/kvmem/releases/download/v0.18.0/SHA256SUMS-ninfer-only.txt) · [包内使用说明 / Package guide](https://github.com/kvmem/kvmem/releases/download/v0.18.0/README.md)
 
 运行包包含 NInfer 服务端、内嵌 Web UI、启动脚本与 CUDA 运行依赖，**不包含模型或 llama.cpp worker**。需要支持 CUDA 13.2 的 NVIDIA 驱动与 Microsoft Visual C++ 2015–2022 x64 运行库；运行预编译包无需安装 CUDA Toolkit 或 Visual Studio。NVFP4 **模型权重**仅适用于 RTX 50 系包。
 
@@ -31,9 +35,9 @@ Packages include the NInfer server, embedded Web UI, launchers and CUDA runtime 
 
 | Platform / 平台 | Backend / 后端 | Model / 模型 | Release / 版本 |
 |---|---|---|---|
-| Windows / Linux / WSL2 NVIDIA | llama.cpp | GGUF | [CUDA v0.16.0-rc3](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) |
-| Windows / Linux / WSL2 AMD | llama.cpp | GGUF | [ROCm Beta2](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta2) |
-| Windows Bonsai 2 | Dedicated / 专用 | PTQ1 GGUF | [prism.3](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3-prism.3) |
+| Windows / Linux / WSL2 NVIDIA | llama.cpp | GGUF | [CUDA v0.16.0-rc3](https://github.com/kvmem/kvmem/releases/tag/v0.16.0-rc3) |
+| Windows / Linux / WSL2 AMD | llama.cpp | GGUF | [ROCm Beta2](https://github.com/kvmem/kvmem/releases/tag/rc3-rocm-beta2) |
+| Windows Bonsai 2 | Dedicated / 专用 | PTQ1 GGUF | [prism.3](https://github.com/kvmem/kvmem/releases/tag/v0.16.0-rc3-prism.3) |
 
 这些包保留各自的功能和参数范围，不会因主线更新而获得 0.18.0 功能。Linux、ROCm 和 llama.cpp 的源码构建见下文；本次 0.18.0 正式运行包仅发布 Windows NInfer。
 
@@ -187,7 +191,7 @@ These are the completed **RC3** measurements from 2026-10-13 on **Windows, RTX 5
 
 The daily test uses one warm-up and three measured rounds with roughly 12K text, an 896×896 image and HTML/SVG generation. The long-history run injects simulated read_file results. Aggregate decode rates include reasoning and divide total output tokens by total server generation time. Tool execution is excluded; code completeness and general retrieval quality were not established. Whole-GPU VRAM peaked near **14.12 GiB**. Available system RAM fell to **8.78 MiB**, so memory pressure may affect latency and total time.
 
-[完整报告、原始配置、计时与服务日志 / Full report, configuration, timings and logs](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0/RC3-performance-results-20261013.zip)。历史 llama.cpp 性能结果见 [16 GiB 报告](docs/recommended-config-performance.md)和 [旧版 256K 工具测试](docs/long-context-benchmark-2026-09-14.md)，不与本表混为同一配置。
+[完整报告、原始配置、计时与服务日志 / Full report, configuration, timings and logs](https://github.com/kvmem/kvmem/releases/download/v0.18.0/RC3-performance-results-20261013.zip)。历史 llama.cpp 性能结果见 [16 GiB 报告](docs/recommended-config-performance.md)和 [旧版 256K 工具测试](docs/long-context-benchmark-2026-09-14.md)，不与本表混为同一配置。
 
 ## API 与 Web UI / API and Web UI
 
@@ -230,8 +234,8 @@ The default listener is local-only with no API key. For external access, the uni
 `master` is the current mainline; `v0.18.0` pins the release snapshot. Engines are submodules with versioned KVMem patches that must be prepared before building. GitHub-generated source archives omit submodule contents; use Git for development:
 
 ```sh
-git clone --recurse-submodules https://github.com/kvmem/kvmem-llama.cpp.git
-cd kvmem-llama.cpp
+git clone --recurse-submodules https://github.com/kvmem/kvmem.git
+cd kvmem
 python scripts/prepare-backends.py
 python scripts/prepare-backends.py --check
 ```
@@ -310,7 +314,7 @@ Prepare the chosen backend before GPU builds. Configure llama.cpp from the repos
 
 | Guide / 指南 | Coverage / 内容 |
 |---|---|
-| [0.18.0 release notes](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0) | 正式包、性能、来源 / Packages, performance and provenance |
+| [0.18.0 release notes](https://github.com/kvmem/kvmem/releases/tag/v0.18.0) | 正式包、性能、来源 / Packages, performance and provenance |
 | [Multi-backend repository](docs/multi-backend-repository.md) | 子模块、准备、构建、打包 / Source and build workflow |
 | [Multi-backend runtime](docs/multi-backend.md) | 启动、能力与组合 / Startup and supported combinations |
 | [Backend differences](docs/multi-backend-differences.md) | 默认值、预算、R、KV、视觉 / Parameter and behavior differences |
@@ -340,7 +344,7 @@ Dated reports preserve their original test context and candidate terminology. Us
 
 ## 致谢与许可证 / Credits and licenses
 
-感谢 [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)、原始 [Neroued/ninfer](https://github.com/Neroued/ninfer) 及社区分支的维护者与贡献者，包括 [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all) 的整合、Ryan-gsq 的 Windows/GSQ-RCO 工作，以及 3090/4090、自适应 MTP、快速 prefill 和 ngram 的贡献者。完整 NInfer 署名见 [发布说明](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0#致谢)。LRFU/GQA max 参考 [melis2023/kvmem-actkv](https://github.com/melis2023/kvmem-actkv)。感谢 Bilibili 的 melis、redsnow23 等测试者。
+感谢 [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)、原始 [Neroued/ninfer](https://github.com/Neroued/ninfer) 及社区分支的维护者与贡献者，包括 [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all) 的整合、Ryan-gsq 的 Windows/GSQ-RCO 工作，以及 3090/4090、自适应 MTP、快速 prefill 和 ngram 的贡献者。完整 NInfer 署名见 [发布说明](https://github.com/kvmem/kvmem/releases/tag/v0.18.0#致谢)。LRFU/GQA max 参考 [melis2023/kvmem-actkv](https://github.com/melis2023/kvmem-actkv)。感谢 Bilibili 的 melis、redsnow23 等测试者。
 
 Thanks to the upstream llama.cpp and NInfer teams, the ninfer-all integrators and community engine branches, Ryan-gsq's Windows/GSQ-RCO work, and contributors to GPU adaptations, adaptive MTP, fast prefill and ngram. Full NInfer attribution is in the release notes. LRFU/GQA max references kvmem-actkv; thanks also to community testers including melis and redsnow23.
 

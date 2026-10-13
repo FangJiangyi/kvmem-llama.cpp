@@ -137,6 +137,6 @@ regression checks. The four-lane run completed 743 requests with zero errors;
 P=4/N=5 migration and P=4/N=1 normalization also passed. It observed no
 throughput gain on this small-model workload and used about 1.25 GiB more VRAM.
 
-This builds on [qzshch's PR #94](https://github.com/kvmem/kvmem-llama.cpp/pull/94).
+This builds on [qzshch's PR #94](https://github.com/kvmem/kvmem/pull/94).
 Its original commit `3cc1c651d5ea64c36e3880ea71c7713823730423` is retained as an
 ancestor, with its original author, so GitHub shows the contributor's work.
