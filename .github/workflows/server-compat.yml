@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       run_ci: ${{ steps.classify.outputs.run_ci }}
+      run_cuda: ${{ steps.classify.outputs.run_cuda }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -97,7 +98,7 @@ jobs:
           ./scripts/windows/test-package.ps1 -TestExe "$PWD/build/bin/Release/kvmem_store_test.exe"
   cuda-build-linux:
     needs: changes
-    if: needs.changes.outputs.run_ci == 'true'
+    if: needs.changes.outputs.run_cuda == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     container: nvidia/cuda:12.8.1-devel-ubuntu24.04
@@ -196,6 +197,7 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           RUN_CI: ${{ needs.changes.outputs.run_ci }}
+          RUN_CUDA: ${{ needs.changes.outputs.run_cuda }}
           LINUX_RESULT: ${{ needs.host-linux.result }}
           WINDOWS_RESULT: ${{ needs.host-windows.result }}
           CUDA_RESULT: ${{ needs.cuda-build-linux.result }}
@@ -209,7 +211,12 @@ jobs:
           test "$RUN_CI" = true
           test "$LINUX_RESULT" = success
           test "$WINDOWS_RESULT" = success
-          test "$CUDA_RESULT" = success
+          if [ "$RUN_CUDA" = true ]; then
+            test "$CUDA_RESULT" = success
+          else
+            test "$RUN_CUDA" = false
+            test "$CUDA_RESULT" = skipped
+          fi
           test "$NINFER_RESULT" = success
   ui-linux:
     # Preserve both matrix check names required by master, even for documentation.

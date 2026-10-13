@@ -6,8 +6,11 @@ or push changes only documentation. Manual workflow dispatch always runs full CI
 Documentation includes root Markdown/reStructuredText files and license notices,
 documents and static images under `docs/`, and README files under `scripts/`.
 Source examples (`.py`, `.js`, `.cpp`), test fixtures, submodule revisions,
-build scripts, `VERSION` and CI configuration still run full CI, even when mixed
-with documentation edits.
+build scripts, `VERSION` and other source changes still run CI, even when mixed
+with documentation edits. Windows startup launchers and CI change-detection logic
+do not rebuild unchanged CUDA code. The CUDA job still runs for native/build changes,
+for a changed CUDA recipe or global workflow settings, and for manual dispatch.
+Unavailable comparisons default to running the CUDA job.
 
 Pull requests compare the merge base with their head; pushes compare the previous
 and new commits. Renames include the deleted path, so moving source into a Markdown

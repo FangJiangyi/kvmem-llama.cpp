@@ -1,6 +1,6 @@
 # KVMem 多后端运行
 
-本文对应 `master` 的 0.18.0 多后端源码，包含活跃 KV 的 RAM/SSD 分层。Windows NInfer [0.18.0 正式版](https://github.com/kvmem/kvmem/releases/tag/v0.18.0)基于 RC3 引擎，并将 recent 默认值改为 64 tokens。两后端参数差异见 [实现差异](multi-backend-differences.md)，历史验收范围见 [分层验收记录](active-kv-tiering-validation-20261010.md)。
+本文对应 `master` 的 0.18.0 多后端源码，包含活跃 KV 的 RAM/SSD 分层。Windows NInfer [0.18.0 正式版](https://github.com/kvmem/kvmem/releases/tag/v0.18.0)基于 RC3 引擎，默认 sink=12288 tokens（12K）、recent=1024 tokens（1K）。两后端参数差异见 [实现差异](multi-backend-differences.md)，历史验收范围见 [分层验收记录](active-kv-tiering-validation-20261010.md)。
 
 0.18.0 源码采用 `iamwavecut/ninfer-all` 的固定提交 `8319e8f51247`，llama.cpp 基线保持原值。当前迁移验收进度见 [迁移记录](ninfer-all-migration-validation.md)；下文各有日期的实验是旧基线证据，不能视为新基线已经完成同等覆盖。KVMem 暂不支持新增的 `qwen4_exp`、模型 suspend、prompt graft 和 router，开启这些组合时明确报错。
 
@@ -28,7 +28,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\start-ninf
 
 `-Worker` 可指定本地构建的 `ninfer-serve.exe` 或 `llama-kvmem-server.exe`；省略时使用包内 `workers/<backend>/` 的程序。`-DryRun` 输出启动参数，`-Describe` 查询静态能力。默认监听 `127.0.0.1:18200`，前台运行，Ctrl+C 结束本次启动的 worker。安装 NVIDIA 驱动及 Microsoft Visual C++ 2015–2022 x64 Runtime；包内保留各引擎的 DLL，模型另行提供。
 
-当前源码的 Windows 统一入口、`start-ninfer.ps1` 及 llama.cpp 的 IQ3/IQ4 入口默认开启 LRFU，`lambda=0.5`、`top-frac=0.9`，GQA 聚合使用 `max`。sink 默认 5120 tokens、recent 默认 64 tokens（一页），两项计入 B；统一入口默认 B=32768，ninfer/IQ3/IQ4 快捷配方的 B/R 保持原值。可用 `-SinkTokens`、`-RecentTokens` 覆盖；自定义小预算时也要相应缩小这两个保留窗口。`top-frac` 控制本轮得分可累加到历史的命中范围，不是 KV 预算比例；同分块也可命中。可用 `-LrfuLambda`、`-LrfuTopFraction` 和 `-ScoreAggregation mean|max` 覆盖；`-NoLrfu -ScoreAggregation mean` 恢复无历史加权的 mean 检索。`start-ninfer.ps1 -DryRun` 可查看完整参数。直接运行 worker 时仍默认关闭 LRFU、使用 mean，sink/recent 也沿用 worker 原有默认值；需要包含 LRFU 实现的新 worker，已发布的旧 ZIP 不适用这些参数。
+当前源码的 Windows 统一入口、`start-ninfer.ps1` 及 llama.cpp 的 IQ3/IQ4 入口默认开启 LRFU，`lambda=0.5`、`top-frac=0.9`，GQA 聚合使用 `max`。sink 默认 12288 tokens（12K）、recent 默认 1024 tokens（1K，16页），两项计入 B；统一入口默认 B=32768，ninfer/IQ3/IQ4 快捷配方的 B/R 保持原值。可用 `-SinkTokens`、`-RecentTokens` 覆盖；自定义小预算时也要相应缩小这两个保留窗口。`top-frac` 控制本轮得分可累加到历史的命中范围，不是 KV 预算比例；同分块也可命中。可用 `-LrfuLambda`、`-LrfuTopFraction` 和 `-ScoreAggregation mean|max` 覆盖；`-NoLrfu -ScoreAggregation mean` 恢复无历史加权的 mean 检索。`start-ninfer.ps1 -DryRun` 可查看完整参数。直接运行 worker 时仍默认关闭 LRFU、使用 mean，sink/recent 也沿用 worker 原有默认值；需要包含 LRFU 实现的新 worker，已发布的旧 ZIP 不适用这些参数。
 
 ninfer 源码的多卡采用上游 layer pipeline。`-Gpu 'GPU-a,GPU-b'` 保留 UUID 顺序，第一张卡承担 embedding、head、MTP 和 resident Vision；CPU Vision 保留原生 Host 编码路径。可加 `-StageLayers 40,24` 指定连续层数，省略时按各卡空闲内存规划；层数总和由模型装载器验证。统一启动器禁止重复或空设备、超过八卡，以及经 `WorkerArgs` 重复传入设备参数。物理卡必须具有相同 compute capability，显存容量可不同。B/R 仍是每请求的完整逻辑窗口，H 是共享预算；各卡只持有自己的层，不按卡数拆分 B/R 或重复建立 Host 历史。
 
