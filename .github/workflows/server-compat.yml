@@ -14,7 +14,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_ci: ${{ steps.classify.outputs.run_ci }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Classify documentation-only changes
+        id: classify
+        run: python3 .github/scripts/classify_changes.py
+      - name: Test CI change detection
+        if: steps.classify.outputs.run_ci == 'true'
+        run: python3 tests/test_ci_changes.py
   host-linux:
+    needs: changes
+    if: needs.changes.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -45,6 +62,8 @@ jobs:
       - run: ctest --test-dir build --output-on-failure --no-tests=error
       - run: bash scripts/test_server_portable.sh build/portable
   host-windows:
+    needs: changes
+    if: needs.changes.outputs.run_ci == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -77,6 +96,8 @@ jobs:
           $env:PATH = "$(Split-Path -Parent $dumpbin);$env:PATH"
           ./scripts/windows/test-package.ps1 -TestExe "$PWD/build/bin/Release/kvmem_store_test.exe"
   cuda-build-linux:
+    needs: changes
+    if: needs.changes.outputs.run_ci == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     container: nvidia/cuda:12.8.1-devel-ubuntu24.04
@@ -144,6 +165,8 @@ jobs:
         if: ${{ always() }}
         run: ccache --show-stats
   ninfer-pinned-sources:
+    needs: changes
+    if: needs.changes.outputs.run_ci == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -162,37 +185,56 @@ jobs:
         run: |
           python scripts/prepare-backends.py --backend ninfer
           python scripts/prepare-backends.py --backend ninfer --check
-  # Keep the existing required check name and fail if any backend check is skipped or fails.
+  # Keep required status names; only verified documentation changes may skip builds.
   host-and-server-units-linux:
     if: ${{ always() }}
-    needs: [host-linux, host-windows, cuda-build-linux, ninfer-pinned-sources]
+    needs: [changes, host-linux, host-windows, cuda-build-linux, ninfer-pinned-sources]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require all host and build checks
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUN_CI: ${{ needs.changes.outputs.run_ci }}
           LINUX_RESULT: ${{ needs.host-linux.result }}
           WINDOWS_RESULT: ${{ needs.host-windows.result }}
           CUDA_RESULT: ${{ needs.cuda-build-linux.result }}
           NINFER_RESULT: ${{ needs.ninfer-pinned-sources.result }}
         run: |
+          test "$CHANGES_RESULT" = success
+          if [ "$RUN_CI" = false ]; then
+            echo 'Documentation only: compilation and tests skipped.'
+            exit 0
+          fi
+          test "$RUN_CI" = true
           test "$LINUX_RESULT" = success
           test "$WINDOWS_RESULT" = success
           test "$CUDA_RESULT" = success
           test "$NINFER_RESULT" = success
   ui-linux:
+    # Preserve both matrix check names required by master, even for documentation.
+    needs: changes
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       matrix:
         mode: [lightweight, full]
     steps:
+      - name: Require successful change detection
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+        run: test "$CHANGES_RESULT" = success
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.run_ci == 'true'
       - uses: actions/setup-node@v4
+        if: needs.changes.outputs.run_ci == 'true'
         with:
           node-version: '24'
       - run: python3 tests/test_webui_builder.py
+        if: needs.changes.outputs.run_ci == 'true'
       - name: Build UI
+        if: needs.changes.outputs.run_ci == 'true'
         env:
           UI_MODE: ${{ matrix.mode }}
         run: |
@@ -201,3 +243,6 @@ jobs:
           else
             python3 scripts/build-webui.py
           fi
+      - name: Documentation-only result
+        if: needs.changes.outputs.run_ci == 'false'
+        run: echo 'Documentation only; UI tests and builds skipped.'
