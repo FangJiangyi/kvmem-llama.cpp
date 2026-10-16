@@ -1,5 +1,7 @@
 #include "llama-kvmem-diag.h"
 #include "llama.h"
+#include "llama-model.h"
+#include "llama-ext.h"
 #include "llama-kvmem-hooks.h"
 #include "llama-kvmem-execution.h"
 #include "kvmem/retrieval_options.hpp"
@@ -11,6 +13,8 @@
 #include "kvmem-server-options.h"
 #include "kvmem-server-auth.h"
 #include "kvmem-server-progress.h"
+#include "kvmem/monitor.hpp"
+#include "kvmem/monitor_hardware.hpp"
 #include "kvmem-lane-pool.h"
 #include "kvmem-execution-scope.h"
 #include <atomic>
@@ -1532,6 +1536,16 @@ int main(int argc, char ** argv) {
         res.status = 204;
     });
 
+    kvmem::monitor monitor;
+    kvmem::monitor_hardware hardware;
+    svr.Get("/monitor", [](const httplib::Request &, httplib::Response & res) { res.set_redirect("/monitor/"); });
+    svr.Get("/api/monitor/snapshot", [&](const httplib::Request &, httplib::Response & res) {
+        auto data = monitor.snapshot();
+        data["hardware"] = hardware.snapshot();
+        data["backend"] = "llamacpp";
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(data.dump(), "application/json");
+    });
     std::unordered_set<std::string> ui_paths;
     if (!kvmem_mount_ui(svr, ui_dir, no_ui, argv[0], &ui_paths)) return 1;
     kvmem_install_auth(svr, options.api_keys, std::move(ui_paths));
@@ -1602,6 +1616,27 @@ int main(int argc, char ** argv) {
                           {"reasoning_budget_tokens", st.reasoning_budget_default}, {"chat_template_kwargs", kwargs}}},
             {"sampling", {{"thinking", thinking_params}, {"non_thinking", plain_params}}}}}
     };
+    // Publish physical device identities from the loaded model, not from machine
+    // enumeration order. A zero-load inference device remains part of the service.
+    json monitor_devices = json::array();
+    std::set<ggml_backend_dev_t> inference_devices;
+    const auto add_monitor_device = [&](ggml_backend_dev_t device) {
+        if (!device || ggml_backend_dev_type(device) == GGML_BACKEND_DEVICE_TYPE_CPU ||
+            !inference_devices.insert(device).second) return;
+        ggml_backend_dev_props info{};
+        ggml_backend_dev_get_props(device, &info);
+        monitor_devices.push_back({{"name", info.description ? info.description : info.name},
+            {"pci_bus_id", info.device_id ? json(info.device_id) : json(nullptr)}});
+    };
+    if (mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
+        for (int i = 0; i < llama_model_n_devices(st.model); ++i)
+            add_monitor_device(llama_model_get_device(st.model, i));
+    } else {
+        for (int i = 0; i < llama_model_n_layer(st.model); ++i) add_monitor_device(st.model->dev_layer(i));
+        add_monitor_device(st.model->dev_output());
+    }
+    props["execution"] = {{"monitor_devices", monitor_devices},
+        {"mode", monitor_devices.size() < 2 ? "single" : mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR ? "tensor" : "layer"}};
     props["kvmem"]["vision"] = startup["vision"];
     props["kvmem"]["parallel"] = options.parallel;
     props["kvmem"]["conversations_requested"] = requested_conversations;
@@ -1733,6 +1768,19 @@ int main(int argc, char ** argv) {
     };
 
     auto handle_chat = [&](const httplib::Request & req, httplib::Response & res) {
+        const auto monitor_id = monitor.begin(req.path);
+        // The synchronous scope covers validation and non-streaming completion. Streaming
+        // transfers finalization to httplib's resource releaser, including failed writes.
+        bool monitor_stream = false;
+        struct monitor_scope {
+            kvmem::monitor & state; std::string id; const httplib::Request & req;
+            httplib::Response & res; bool & streaming;
+            ~monitor_scope() {
+                if (!streaming) state.finish(id,
+                    req.is_connection_closed && req.is_connection_closed() ? "disconnected" :
+                    res.status >= 400 || std::uncaught_exceptions() ? "error" : "completed");
+            }
+        } monitoring{monitor, monitor_id, req, res, monitor_stream};
         const std::time_t created = std::time(nullptr);
         // /v1/responses reuses this handler: convert the Responses request to
         // Chat Completions first, then select the Responses output shape below.
@@ -1788,6 +1836,7 @@ int main(int argc, char ** argv) {
         }
 
         const auto cancelled = [&req] { return req.is_connection_closed && req.is_connection_closed(); };
+        monitor.update(monitor_id, {{"status", "queued"}, {"limit", cr.max_tokens}});
         auto ticket = lane_pool.enqueue(cr.conversation_id);
         auto cache_reference = lane_conversations ? lane_conversations->pin(cr.conversation_id) : nullptr;
         if (!lane_pool.wait_turn(ticket, cancelled)) return;
@@ -2036,27 +2085,31 @@ int main(int argc, char ** argv) {
         request_params["n_predict"] = cr.max_tokens;
         request_params["max_tokens"] = cr.max_tokens;
         request_params["temperature"] = sparams.temp;
+        monitor.update(monitor_id, {{"status", "reading"}, {"prompt_tokens", toks.size()}, {"generated_tokens", 0}});
         st.progress.prompt((int) toks.size(), cr.max_tokens, std::move(request_params));
         st.log.start();
         LOG_INF("slot   processing task, n_prompt = %d, n_predict = %d\n", (int) toks.size(), cr.max_tokens);
         auto timings = std::make_shared<json>(json::object());
         // 1:1 upstream timings block (server-context.cpp): prompt/predicted counts, ms, per-token and per-second rates.
         // 中文：对齐上游的 timings 统计块——prompt/predicted 的计数、耗时、每 token 与每秒速率，供 /v1 响应回传
-        auto make_emit_gen_wall = [timings, &st, n_prompt = (int) toks.size()](
+        auto make_emit_gen_wall = [timings, &st, &monitor, monitor_id, n_prompt = (int) toks.size()](
                 std::chrono::steady_clock::time_point t_turn0,
                 std::chrono::steady_clock::time_point t_pf1,
                 double prefill_ms, int n_cache_hit) {
             const int cache_n = std::clamp(n_cache_hit, 0, n_prompt);
             const int prompt_n = n_prompt - cache_n;
             st.progress.prefilled(cache_n);
+            monitor.update(monitor_id, {{"status", "generating"}, {"cached_tokens", cache_n},
+                {"prefill_tps", prefill_ms > 0 ? json(1000.0 * prompt_n / prefill_ms) : json(nullptr)}});
             st.log.start_generation();
-            return [timings, &st, t_turn0, t_pf1, prefill_ms, n_prompt, prompt_n, cache_n](int n_gen, bool verbose = true) {
+            return [timings, &st, &monitor, monitor_id, t_turn0, t_pf1, prefill_ms, n_prompt, prompt_n, cache_n](int n_gen, bool verbose = true) {
                 st.progress.generated(n_gen);
                 st.log.generated(n_gen);
                 const auto now = std::chrono::steady_clock::now();
                 const double gen_ms = std::chrono::duration<double, std::milli>(now - t_pf1).count();
                 const double prompt_per_second = prefill_ms > 0.0 ? 1000.0 * (double) prompt_n / prefill_ms : 0.0;
                 const double predicted_per_second = gen_ms > 0.0 ? 1000.0 * (double) n_gen / gen_ms : 0.0;
+                monitor.update(monitor_id, {{"generated_tokens", n_gen}, {"decode_tps", predicted_per_second}});
                 *timings = {
                     {"prompt_n", prompt_n},
                     {"prompt_ms", prefill_ms},
@@ -2154,15 +2207,17 @@ int main(int argc, char ** argv) {
             const bool spec_stream = use_spec;
             res.set_header("Cache-Control", "no-cache");
             res.set_header("X-Accel-Buffering", "no");
+            auto monitor_error = std::make_shared<std::atomic<bool>>(false);
             res.set_chunked_content_provider("text/event-stream",
                 [slot, &st, &req, toks, cid, request_id, created, max_tokens, sparams, parse_tools, formatted, stops,
-                 spec_stream, ctx, vocab, make_emit_gen_wall, timings, is_responses](size_t, httplib::DataSink & sink) mutable {
+                 spec_stream, ctx, vocab, make_emit_gen_wall, timings, is_responses, monitor_error](size_t, httplib::DataSink & sink) mutable {
                     kvmem_execution_scope execution(st.execution.get());
                     StreamIo io;
                     io.on_prefill = [&st](int rows, int remaining) { st.log.prefilled(rows, remaining); };
                     io.sink = &sink;
                     io.req = &req;
                     auto send = [&](const std::string & payload) -> bool {
+                        if (payload.compare(0, 9, "{\"error\":") == 0) monitor_error->store(true);
                         const std::string line = "data: " + payload + "\n\n";
                         if (!sink.write(line.data(), line.size())) {
                             io.aborted = true;
@@ -2420,7 +2475,10 @@ int main(int argc, char ** argv) {
                     slot->unlock();
                     sink.done();
                     return true;
+                }, [&, monitor_id, monitor_error](bool success) {
+                    monitor.finish(monitor_id, monitor_error->load() ? "error" : success ? "completed" : "disconnected");
                 });
+            monitor_stream = true;
             return;
         }
 
@@ -2459,8 +2517,7 @@ int main(int argc, char ** argv) {
                     [&](llama_token id, const std::string & piece, bool) {
                         gen.push_back(id);
                         content += piece;
-                        st.progress.generated((int) gen.size());
-                        st.log.generated((int) gen.size());
+                        emit_gen_wall((int) gen.size(), false);
                     }, [&]() { return !stream_heartbeat(&io); },
                     st.active_prompt->model_pos(toks.size()) - (llama_pos) toks.size());
             if (gst.failed) {
@@ -2530,8 +2587,7 @@ int main(int argc, char ** argv) {
             }
             content += piece;
             gen.push_back(id);
-            st.progress.generated((int) gen.size());
-            st.log.generated((int) gen.size());
+            emit_gen_wall((int) gen.size(), false);
             if (strip_stop(content, stops)) {
                 break;
             }

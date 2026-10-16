@@ -178,6 +178,10 @@ NInfer 使用按层 pipeline，最多八张 GPU，要求相同 CUDA 计算能力
 
 ## API 与 Web UI
 
+**Windows 桌面控制台（源码目录）：**运行 `python scripts/local-console.py`，打开
+`http://127.0.0.1:18199/monitor/`，即可配置、启动和停止 NInfer 或 llama.cpp，选择本地模型、
+保存模板并监控服务。需要 Python，推理程序和模型单独准备。详见[控制台配置与限制](ui/README.md#independent-local-console-windows)。
+
 | 接口 | 用途 |
 |---|---|
 | `GET /health` | 就绪状态 |

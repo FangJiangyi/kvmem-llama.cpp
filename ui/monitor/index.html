@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><meta name="color-scheme" content="dark light"/>
+<title>KVMem · 运行监控</title><link rel="icon" href="data:,"/><link rel="stylesheet" href="./monitor.css"/><link rel="stylesheet" href="./launcher.css"/><script src="./i18n.js" defer></script><script src="./monitor.js" defer></script><script src="./launcher.js" defer></script>
+</head><body><div id="app" data-theme="dark">
+<header class="s-header"><span class="s-brand">KVMem</span><nav class="s-nav" aria-label="主导航"><button data-page="config" aria-pressed="false">启动配置</button><button data-page="monitor" aria-pressed="true">监控</button><button data-page="about" aria-pressed="false">关于</button></nav><div class="s-header-tools"><span class="s-status" role="status" data-connection>正在连接</span><select aria-label="布局密度" data-density-select><option value="comfortable">布局：舒适</option><option value="compact">布局：紧凑</option></select><select aria-label="颜色主题" data-theme-select><option value="dark">极客黑</option><option value="blue">架构蓝</option><option value="system">跟随系统</option></select><select aria-label="语言" data-language-select><option value="zh-CN">中文</option><option value="en">English</option></select><a href="../" target="_blank" rel="noopener" data-chat-link>聊天 ↗</a></div></header>
+<main class="s-launch" data-view="config" hidden><div data-launch-root></div></main>
+<main class="s-monitor" data-view="monitor">
+<div class="s-banner" data-banner hidden><span data-banner-text></span><button class="s-button" data-retry>重新连接</button></div>
+<form class="s-card s-auth" data-auth hidden><label for="api-key">此服务需要 API Key。密钥只保存在当前标签页，不会写入 URL。</label><input id="api-key" type="password" autocomplete="off" placeholder="输入 API Key" required/><button class="s-button" type="submit">连接</button></form>
+<section class="s-card s-state">
+<div class="s-card-head"><h1 class="s-title">模型状态</h1><span class="s-badge" data-service-state>等待服务数据</span></div>
+<div class="s-model" data-value="model">正在读取模型信息</div>
+<div class="s-state-row"><span class="s-small s-muted" data-value="execution">正在读取推理设备</span><label class="s-small s-muted">查看请求 <select data-request-select aria-label="查看请求"><option value="">暂无请求</option></select></label></div>
+<div class="s-state-row s-small"><span data-value="request-scope">暂无请求</span><span class="s-muted" data-value="output">等待服务数据</span></div>
+<div class="s-track" role="meter" aria-label="输出 token 预算使用，非完成百分比" aria-valuemin="0" aria-valuemax="100"><div class="s-bar" data-bar="output" style="width:0"></div></div>
+</section>
+<section class="s-metrics" aria-label="所选请求统计">
+<article class="s-card s-metric"><div class="s-label">生成速度</div><div class="s-number"><span data-value="decode">—</span><small>tok/s</small></div><span class="s-sub" data-request-scope>暂无请求</span><svg class="s-spark" data-series="speed" viewBox="0 0 240 32" preserveAspectRatio="none" role="img" aria-label="生成速度，尚无采样"></svg></article>
+<article class="s-card s-metric"><div class="s-label">预填充速度</div><div class="s-number"><span data-value="prefill">—</span><small>tok/s</small></div><span class="s-sub" data-request-scope>暂无请求</span><span class="s-sub">处理新输入的速度</span></article>
+<article class="s-card s-metric"><div class="s-label">逻辑上下文</div><div class="s-context-dial"><div class="s-dial" data-dial="context"><div class="s-dial-value"><span class="s-number" data-value="context-percent">—</span></div></div><span class="s-sub" data-value="context">未采集</span></div><span class="s-sub">所选请求 · 非 GPU 驻留 KV</span></article>
+<article class="s-card s-metric"><div class="s-label">输入 token 复用</div><div class="s-number" data-value="reuse">—</div><span class="s-sub" data-value="reused-tokens">未采集</span><div class="s-track"><div class="s-bar" data-bar="reuse" style="width:0"></div></div></article>
+</section>
+<section class="s-gpus" aria-label="推理显卡"><div class="s-card-head"><h2 class="s-title">推理显卡</h2><span class="s-small s-muted" data-value="gpu-count">正在读取</span></div><div class="s-gpu-grid" data-gpus></div><p class="s-small s-muted s-device-note" data-device-note>只显示当前服务实际使用的设备。</p><button class="s-text-button" data-hardware>查看全部硬件 →</button></section>
+<div class="s-bottom">
+<section class="s-card s-requests"><div class="s-card-head"><h2 class="s-title">最近请求</h2><button class="s-button" data-all aria-expanded="false">显示全部</button></div>
+<div class="s-table-wrap"><table aria-label="最近请求"><thead><tr><th>时间</th><th>状态</th><th class="s-num">输入</th><th class="s-num">输出</th><th class="s-num">生成 t/s</th><th class="s-num">耗时</th></tr></thead><tbody data-requests><tr><td colspan="6" class="s-empty">等待服务数据</td></tr></tbody></table></div>
+<p class="s-small s-muted">点击时间查看预填充、复用等详情 · 最近 100 条</p><div class="s-detail" data-detail hidden><div class="s-card-head"><strong data-detail-title></strong><button class="s-button" data-close>收起</button></div><p class="s-detail-body" data-detail-body></p><p class="s-small s-muted">仅统计请求元数据，不记录提示词或回复正文。</p></div></section>
+<section class="s-card s-cache"><h2 class="s-title">系统与缓存</h2>
+<div class="s-bar-row"><span>CPU 负载</span><span><span data-value="cpu">—</span> %</span></div>
+<div><div class="s-bar-row"><span>系统内存</span><span data-value="ram">未采集</span></div><div class="s-track"><div class="s-bar" data-bar="ram" style="width:0"></div></div></div>
+<div><div class="s-bar-row"><span>RAM 历史缓存</span><span data-value="host">未采集</span></div><div class="s-track"><div class="s-bar" data-bar="host" style="width:0"></div></div></div>
+<div><div class="s-bar-row"><span>SSD 历史缓存</span><span data-value="ssd">未采集</span></div><div class="s-track"><div class="s-bar" data-bar="ssd" style="width:0"></div></div></div>
+<details class="s-cache-details"><summary>缓存详情</summary><dl class="s-facts"><dt>保留会话</dt><dd data-value="sessions">未采集</dd><dt>历史命中 / 淘汰</dt><dd data-value="history">未采集</dd><dt>缓存磁盘读取</dt><dd><span data-value="disk">—</span> MiB/s</dd></dl><p class="s-small s-muted">仅统计 KVMem 历史数据读取。历史 payload 与会话可能共享数据，各项不相加。1 GiB = 1,024³ 字节。</p></details></section></div>
+<footer class="s-footer"><span data-footer>连接到当前 KVMem 服务</span><span>KVMem</span></footer>
+</main>
+<section class="s-monitor s-about" data-view="about" hidden>
+<div class="s-card s-cache"><h2 class="s-title">模型与引擎</h2><dl class="s-facts"><dt>模型</dt><dd data-about="model">—</dd><dt>后端</dt><dd data-about="backend">—</dd><dt>上下文上限</dt><dd data-about="context">—</dd><dt>服务地址</dt><dd data-about="origin">—</dd><dt>连接密钥</dt><dd><button class="s-button" data-forget>清除当前标签页密钥</button></dd></dl></div>
+<div class="s-card s-cache"><h2 class="s-title">硬件</h2><p class="s-small s-muted">本机显卡及其参与当前服务的情况。</p><div class="s-hardware-list" data-about="devices">未采集</div></div>
+<div class="s-card s-cache"><h2 class="s-title">说明与致谢</h2><p class="s-small s-muted">页面每秒刷新；显卡指标为整卡读数，可能包含其他程序。</p><details class="s-cache-details"><summary>指标说明</summary><p class="s-small s-muted">请求统计随所选请求变化。上下文用量为输入与已生成 token 之和；输出预算表示已用额度，不表示完成进度。生成速度包含已接受的思考 token。</p><p class="s-small s-muted">上下文用量不等于显存中的 KV 缓存量；输入 token 复用不等于历史缓存命中。</p><p class="s-small s-muted">曲线从打开页面时开始记录。后台每 5 秒刷新，断线保留最后读数并标记过期；缺失数据显示“未采集”或“—”。</p></details><p class="s-small s-muted">界面参考 Strata 仪表盘，使用 Outfit 字体。感谢开源作者。</p><details class="s-cache-details"><summary>开源许可</summary><p class="s-small"><a href="./Strata-LICENSE.txt">Strata · MIT</a> · <a href="./Outfit-OFL.txt">Outfit · SIL OFL 1.1</a></p></details></div>
+</section></div>
+<template id="gpu-card"><article class="s-card s-gpu">
+<header class="s-gpu-head"><div><h3 data-gpu="name"></h3><span class="s-small s-muted" data-gpu="id"></span></div><span class="s-badge" data-gpu="status">本服务</span></header>
+<div class="s-gpu-body"><div class="s-gpu-primary"><div class="s-label">GPU 负载</div><div class="s-dial" data-dial="load"><div class="s-dial-value"><div class="s-number"><span data-gpu="load">—</span><small>%</small></div></div><span class="s-dial-caption">0 — 100%</span></div><svg class="s-spark" viewBox="0 0 240 32" preserveAspectRatio="none" role="img" aria-label="GPU 负载，尚无采样" data-gpu-chart></svg></div>
+<div class="s-gpu-primary"><div class="s-label">整卡显存</div><div class="s-dial" data-dial="vram"><div class="s-dial-value"><div class="s-number"><span data-gpu="vram">—</span><small>GiB</small></div></div><span class="s-dial-caption" data-gpu="total">容量未采集</span></div><div class="s-sub" data-gpu="capacity">未采集</div></div>
+<dl class="s-gpu-secondary"><div><dt>温度</dt><dd><span data-gpu="temp">—</span><small> °C</small></dd></div><div><dt>功耗</dt><dd><span data-gpu="power">—</span><small> W</small></dd></div><div><dt>PCIe</dt><dd data-gpu="pcie">—</dd></div><div><dt>向 GPU</dt><dd><span data-gpu="rx">—</span><small> MiB/s</small></dd></div></dl></div></article></template>
+</body></html>

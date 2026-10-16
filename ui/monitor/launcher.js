@@ -1,0 +1,475 @@
+/* Configuration stays separate from the running service. No shell text is accepted. */
+"use strict";
+(() => {
+  const root = document.querySelector('[data-launch-root]');
+  const tr = (zh,en) => window.monitorI18n.language === 'en' ? en : zh;
+  let info, busy=false, activeTab=0, runtime=null, startPending=false, launchFailure="";
+  const perBackend = {};
+  let pickingModel = false;
+  function recentModels(backend) {
+    try {
+      const items = JSON.parse(localStorage.getItem('kvmem-recent-models-'+backend) || '[]');
+      return Array.isArray(items) ? items.filter(x => typeof x === 'string' && x.length < 8192).slice(0,8) : [];
+    } catch { return []; }
+  }
+  function rememberModel(backend, path) {
+    try { localStorage.setItem('kvmem-recent-models-'+backend, JSON.stringify([path,...recentModels(backend).filter(x=>x!==path)].slice(0,8))); } catch {}
+  }
+  let selectedPreset = '', presetUndo = null;
+  const DRAFT_KEY='kvmem-launch-draft-v2', TEMPLATE_KEY='kvmem-launch-templates-v1';
+  let saveTimer=null, dirty=false, saveError=false, templateTab='builtin';
+  // v0.18.0 Windows NInfer recipe, including the fd77613 release launcher update.
+  // Machine-specific paths and GPU placement are selected locally.
+  const presets = [
+    {id:'ninfer-v018', title:['NInfer · 0.18.0 默认','NInfer · 0.18.0 default'], note:['200K 上下文 · 36K 历史 KV · 12 GiB RAM · 图像 / MTP','200K context · 36K history KV · 12 GiB RAM · Vision / MTP'], parameters:{Backend:'ninfer',Context:204800,Budget:36864,Reserve:16384,HostMiB:12288,Prefill:256,MaxTokens:16384,SinkTokens:12288,RecentTokens:1024,KvType:'int8',Concurrency:1,RetainedSessions:1,MtpDrafts:4,AdaptiveMtp:true,NgramDrafts:31,NgramMinMatch:12,Vision:true,VisionResidency:'cpu',VisionTokens:1024,ThinkingBudget:8192,NoLrfu:false,LrfuLambda:0.5,LrfuTopFraction:0.9,ScoreAggregation:'max',DeviceProfile:'off',FastPrefill:false}},
+  ];
+  const defaults={Backend:'ninfer',Model:'',Worker:'',Gpu:'',Context:262144,Budget:32768,HostMiB:16384,Reserve:1024,Prefill:128,MaxTokens:1024,Port:18200,ListenHost:'127.0.0.1',SinkTokens:12288,RecentTokens:1024};
+  const names={llamacpp:'llama.cpp',ninfer:'NInfer'};
+  const groups=[['缓存与历史','Cache & history'],['硬件与加速','Hardware & acceleration'],['生成与思考','Generation & thinking'],['模板与图像','Templates & vision'],['服务与并发','Service & concurrency']];
+  const make=(tag,attrs={},text)=>{const el=document.createElement(tag);Object.entries(attrs).forEach(([k,v])=>el.setAttribute(k,v));if(text!==undefined)el.textContent=text;return el;};
+  function captureDraft(){
+    const parameters={};
+    root.querySelectorAll('[data-param]').forEach(el=>{
+      if(el.disabled)return;
+      const value=el.type==='checkbox'?(el.dataset.inverted==='true'?!el.checked:el.checked):el.multiple?Array.from(el.selectedOptions).map(x=>x.value).join(','):el.type==='number'&&el.value!==''?Number(el.value):el.value;
+      parameters[el.dataset.param]=value;
+    });
+    const raw={StageLayers:String(parameters.StageLayers||''),WorkerArgs:root.querySelector('[data-native]')?.value||'[]'};
+    parameters.StageLayers=raw.StageLayers.trim()?raw.StageLayers.split(',').map(x=>Number(x.trim())).filter(Number.isFinite):[];
+    try{parameters.WorkerArgs=JSON.parse(raw.WorkerArgs);}catch{parameters.WorkerArgs=[];}
+    return {version:2,parameters,raw};
+  }
+  function usableDraft(value){return value&&value.version===2&&value.parameters&&typeof value.parameters==='object'&&info.backends.includes(value.parameters.Backend)&&Array.isArray(value.parameters.StageLayers||[])&&(!value.raw||typeof value.raw==='object');}
+  function draftStatus(){
+    const el=root.querySelector('[data-draft-state]');if(!el)return;
+    el.textContent=saveError?tr('保存失败，点击重试','Save failed. Click to retry'):dirty?tr('正在保存编辑…','Saving edits…'):tr('编辑已自动保存 · 下次启动生效','Edits saved automatically · Apply on next launch');
+    el.classList.toggle('l-error',saveError);el.disabled=!saveError;
+  }
+  function saveEditing(){
+    clearTimeout(saveTimer);if(!dirty&&!saveError)return;
+    try{localStorage.setItem(DRAFT_KEY,JSON.stringify(captureDraft()));dirty=false;saveError=false;}
+    catch{saveError=true;}
+    draftStatus();
+  }
+  function scheduleSave(){dirty=true;saveError=false;draftStatus();clearTimeout(saveTimer);saveTimer=setTimeout(saveEditing,400);}
+  function restoreDraft(draft){
+    render(draft.parameters);
+    if(draft.raw){const layers=root.querySelector('[data-param=StageLayers]');if(layers&&typeof draft.raw.StageLayers==='string'){layers.value=draft.raw.StageLayers;layers.dispatchEvent(new Event('input'));}const native=root.querySelector('[data-native]');if(native&&typeof draft.raw.WorkerArgs==='string')native.value=draft.raw.WorkerArgs;}
+    draftStatus();
+  }
+  root.addEventListener('input',event=>{if(event.target.matches('[data-param], [data-native]'))scheduleSave();});
+  root.addEventListener('change',event=>{if(event.target.matches('[data-param], [data-native]'))scheduleSave();});
+  window.addEventListener('pagehide',saveEditing);
+  function readTemplates(){
+    const values=JSON.parse(localStorage.getItem(TEMPLATE_KEY)||'[]');
+    if(!Array.isArray(values))throw Error(tr('个人模板数据无法读取','Cannot read personal templates'));
+    return values.filter(x=>x&&typeof x.id==='string'&&typeof x.name==='string'&&usableDraft(x.draft)).slice(0,100);
+  }
+  function writeTemplates(values){if(values.length>100)throw Error(tr('最多保存 100 个模板','Up to 100 templates can be saved'));localStorage.setItem(TEMPLATE_KEY,JSON.stringify(values));}
+  function dialog(title,kind){
+    const el=make('dialog',{class:'l-dialog','data-dialog':kind,'aria-label':title});
+    const head=make('div',{class:'l-heading'}),close=make('button',{type:'button',class:'s-button','data-dialog-close':''},tr('关闭','Close'));
+    head.append(make('h2',{class:'s-title'},title),close);el.append(head);root.append(el);
+    close.onclick=()=>el.close();el.addEventListener('close',()=>el.remove());el.showModal();return el;
+  }
+  function showError(error){const el=dialog(tr('操作未完成','Action could not complete'),'error');el.append(make('p',{class:'l-error',role:'alert'},error.message||String(error)));}
+  function refreshTemplates(){const current=root.querySelector('.l-presets');if(current){const side=current.parentElement;current.remove();presetPanel(side);}}
+  function templateEditor(mode='create',item=null){
+    const snapshot=captureDraft(),title=mode==='delete'?tr('删除模板','Delete template'):mode==='rename'?tr('重命名模板','Rename template'):mode==='update'?tr('更新模板','Update template'):tr('另存为模板','Save as template');
+    const el=dialog(title,'template'),form=make('form'),error=make('p',{class:'l-error',role:'alert'});
+    const label=make('label',{class:'l-field'},tr('模板名称','Template name')),name=make('input',{required:'',maxlength:'80','data-template-name':''});
+    name.value=item?.name||'';label.append(name);
+    const descLabel=make('label',{class:'l-field'},tr('说明（可选）','Description (optional)')),description=make('textarea',{maxlength:'240',rows:'2','data-template-description':''});description.value=item?.description||'';descLabel.append(description);
+    if(mode==='delete')form.append(make('p',{},tr(`删除“${item.name}”？已填入编辑区的配置不受影响。`,`Delete “${item.name}”? The current draft will remain unchanged.`)));
+    else form.append(label,descLabel,make('p',{class:'l-muted'},mode==='rename'?tr('仅修改名称和说明。','Only the name and description change.'):mode==='update'?tr('将用当前编辑区的完整设置替换此模板。','Replace this template with all settings in the current draft.'):tr('保存模型路径、显卡顺序和全部参数。模板保存在当前浏览器，保存不会启动服务。','Save model paths, GPU order and all parameters in this browser. Saving does not start a service.')));
+    const submit=make('button',{type:'submit',class:'s-button l-primary','data-template-confirm':''},mode==='delete'?tr('删除模板','Delete template'):mode==='update'?tr('确认更新','Update template'):tr('保存模板','Save template'));
+    form.append(error,submit);el.append(form);if(mode!=='delete')name.focus();
+    form.onsubmit=event=>{event.preventDefault();try{
+      const list=readTemplates(),index=item?list.findIndex(x=>x.id===item.id):-1;
+      if(item&&index<0)throw Error(tr('模板已不存在，请重新打开列表','Template no longer exists. Reopen the list.'));
+      const trimmed=name.value.trim();if(mode!=='delete'&&!trimmed)throw Error(tr('请填写模板名称','Enter a template name'));
+      if(mode!=='delete'&&list.some(x=>x.id!==item?.id&&x.name.toLocaleLowerCase()===trimmed.toLocaleLowerCase()))throw Error(tr('已有同名模板，请使用其他名称','A template with this name already exists'));
+      if(mode==='delete')list.splice(index,1);
+      else{const entry={id:item?.id||crypto.randomUUID(),name:trimmed,description:description.value.trim(),draft:mode==='rename'?item.draft:snapshot};if(index<0)list.push(entry);else list[index]=entry;}
+      writeTemplates(list);templateTab='mine';el.close();refreshTemplates();message(mode==='delete'?tr('模板已删除。','Template deleted.'):tr('模板已保存到“我的模板”。','Saved to My templates.'));
+    }catch(e){error.textContent=e.message;}};
+  }
+  function focusSetting(key){
+    let el=key==='WorkerArgs'?root.querySelector('[data-native]'):root.querySelector(`[data-param=${key}]`);
+    if(key==='Gpu')el=root.querySelector('[data-gpu-choice]')||el;
+    const panel=el?.closest('[role=tabpanel]');if(panel)root.querySelector(`[aria-controls=${panel.id}]`)?.click();
+    const details=el?.closest('details');if(details)details.open=true;
+    el?.scrollIntoView({block:'center',behavior:'smooth'});el?.focus();
+  }
+  function launchData(){const data=collect();if(!data.parameters.DiskPath)delete data.parameters.DiskMiB;if(!data.parameters.Vision){delete data.parameters.VisionResidency;delete data.parameters.VisionTokens;}return data;}
+  async function checkConfiguration(){
+    const el=dialog(tr('检查配置','Check configuration'),'check'),summary=make('p',{'data-check-summary':'',role:'status'},tr('正在检查…','Checking…')),list=make('div',{class:'l-check-list'});el.append(summary,list);
+    const errors=[];
+    function row(label,value,key,ok=true){const card=make('div',{class:'l-check-row'});card.append(make('strong',{},label),make('span',{class:ok?'':'l-error'},String(value)));if(key){const fix=make('button',{type:'button',class:'s-button'},tr('前往修改','Edit setting'));fix.onclick=()=>{el.close();focusSetting(key);};card.append(fix);}list.append(card);if(!ok)errors.push(label);}
+    let data;
+    try{
+      data=launchData();const p=data.parameters;
+      row(tr('推理引擎','Backend'),names[p.Backend]||p.Backend,'Backend');
+      row(tr('模型文件','Model file'),p.Model||tr('请选择模型','Choose a model'),'Model',!!p.Model);
+      const ids=(p.Gpu||'').split(',').filter(Boolean),missing=ids.filter(id=>!info.gpus.some(g=>g.uuid===id));
+      row(tr('显卡顺序','GPU order'),ids.length?ids.map((id,i)=>`${i+1}. ${info.gpus.find(g=>g.uuid===id)?.name||id}${p.StageLayers?.[i]?tr(` · ${p.StageLayers[i]} 层`,` · ${p.StageLayers[i]} layers`):''}`).join('\n'):tr('请选择显卡','Choose a GPU'),'Gpu',ids.length>0&&!missing.length);
+      row(tr('上下文 / GPU 历史 / RAM 缓存','Context / GPU history / RAM cache'),`${p.Context??'—'} tokens / ${p.Budget??'—'} tokens / ${p.HostMiB??'—'} MiB`,'Context');
+      if(errors.length){summary.textContent=tr('需要补全或修改配置','Some settings need attention');return;}
+      const result=await api('preview',data);if(!el.isConnected)return;
+      row(tr('后端程序','Backend executable'),result.argv[0],'Worker');
+      const port=result.preflight?.port??p.Port??18200,available=result.preflight?.port_available;
+      row(tr('服务端口','Service port'),`${result.preflight?.listen_host||p.ListenHost||'127.0.0.1'}:${port} · `+(available===true?tr('可用','Available'):available===false?tr('已占用或无法绑定；启动前需释放或更换','In use or unavailable; release or change before starting'):tr('启动时检查','Checked on start')),'Port',available!==false);
+      summary.textContent=errors.length?tr('配置需要调整','Configuration needs attention'):tr('启动前检查通过','Preflight checks passed');
+      if(result.warnings)el.append(make('p',{class:'l-muted'},result.warnings));
+      const advanced=make('details',{class:'l-check-command'});advanced.append(make('summary',{},tr('高级：查看启动命令','Advanced: launch command')));
+      const quoted=result.argv.map(x=>"'"+x.replaceAll("'","''")+"'").join(' ');
+      const command=Object.entries(result.environment||{}).map(([k,v])=>`$env:${k} = '${String(v).replaceAll("'","''")}'`).join('\n')+'\n& '+quoted;
+      const code=make('pre',{class:'l-result'},command),copy=make('button',{type:'button',class:'s-button','data-copy-command':''},tr('复制启动命令','Copy launch command'));copy.onclick=async()=>{try{await navigator.clipboard.writeText(command);copy.textContent=tr('已复制','Copied');}catch{copy.textContent=tr('复制失败，请手动选择文本','Copy failed; select the text manually');}};advanced.append(code,copy);el.append(advanced);
+    }catch(error){if(!el.isConnected)return;summary.textContent=tr('检查未通过','Check failed');const text=error.message||String(error);const key=/JSON|原生参数|WorkerArgs/i.test(text)?'WorkerArgs':/Worker|后端程序/i.test(text)?'Worker':/Model|模型/i.test(text)?'Model':/StageLayers|层数/i.test(text)?'StageLayers':/Gpu|GPU|显卡/i.test(text)?'Gpu':/Port|端口/i.test(text)?'Port':null;row(tr('需要处理','Needs attention'),text,key,false);}
+    finally{if(el.isConnected)el.append(make('p',{class:'l-muted'},tr('检查不会加载模型。兼容性和实际资源需求仍需启动验证；检查通过也不会自动启动。','This check does not load a model. Compatibility and resource needs are verified at startup; passing does not start a service.')));}
+  }
+  function message(text,error=false){const el=root.querySelector('[data-launch-message]');if(el){el.textContent=text;el.classList.toggle('l-error',error);el.setAttribute('role',error?'alert':'status');}}
+  async function api(path,data){const response=await fetch('/api/launcher/'+path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json','X-KVMem-Token':info.token},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(60000)});const value=await response.json();if(!response.ok)throw Error(value.error||'HTTP '+response.status);return value;}
+  function collect(){const params={};root.querySelectorAll('[data-param]').forEach(el=>{if(el.disabled)return;const k=el.dataset.param;if(el.type==='checkbox'){if(el.dataset.inverted==='true'?!el.checked:el.checked)params[k]=true;}else if(el.multiple){params[k]=Array.from(el.selectedOptions).map(x=>x.value).join(',');}else if(el.value!==''){params[k]=el.type==='number'?Number(el.value):el.value;}});const layers=params.StageLayers;if(layers)params.StageLayers=layers.split(',').map(x=>Number(x.trim()));const raw=root.querySelector('[data-native]');if(raw?.value.trim()){const args=JSON.parse(raw.value);if(!Array.isArray(args))throw Error(tr('原生参数必须为 JSON 数组','Native arguments must be a JSON array'));params.WorkerArgs=args;}return {schema_version:1,parameters:params};}
+  function field(parent,p,key,zh,en,type='text',options=null,note=null,disabled=false){
+    const label=make('label',{class:'l-field l-row'}),title=tr(zh,en);
+    if(type==='checkbox'){
+      label.classList.add('l-toggle');
+      const copy=make('span',{class:'l-toggle-copy'});copy.append(make('span',{},title));
+      const input=make('input',{type:'checkbox',role:'switch','aria-label':title,'data-param':key});
+      input.checked=!!p[key];input.disabled=disabled;
+      let description;
+      if(note||disabled){description=make('small',{class:'l-toggle-help',id:'launch-help-'+key},note?tr(...note):tr('当前接入暂不可用','Unavailable in this integration'));input.setAttribute('aria-describedby',description.id);}
+      const control=make('span',{class:'l-toggle-control'}),state=make('span',{class:'l-toggle-state','aria-hidden':'true'});
+      state.append(make('span',{'data-toggle-on':''},tr('已开启','On')),make('span',{'data-toggle-off':''},tr('已关闭','Off')),make('span',{'data-toggle-unavailable':''},tr('不可用','Unavailable')));
+      control.append(input,state);label.append(copy,control);if(description)label.append(description);parent.append(label);return input;
+    }
+    label.append(make('span',{},title));let input;
+    if(options){input=make('select');options.forEach(([value,text])=>input.append(make('option',{value},text)));}else input=make('input',{type});
+    input.dataset.param=key;input.disabled=disabled;
+    if(type==='number'){input.min='0';input.step='1';}input.value=p[key]??'';label.append(input);
+    if(note){const help=make('details',{class:'l-field-help'});help.dataset.essential=String(disabled);help.open=disabled||document.querySelector('#app').dataset.density!=='compact';help.append(make('summary',{},tr('说明','Help')),make('small',{},tr(...note)));label.append(help);}
+    parent.append(label);return input;
+  }
+
+  function modelPicker(parent, p) {
+    const box = make('div', {class:'l-field l-model-picker'});
+    const label = make('label', {for:'launch-model'}, tr('模型文件','Model file'));
+    const row = make('div', {class:'l-model-row'});
+    const input = make('input', {id:'launch-model', type:'text', 'data-param':'Model', required:'',
+      placeholder:tr('点击选择模型，也可粘贴文件路径','Choose a model, or paste a file path')});
+    input.value = p.Model || '';
+    const browse = make('button', {type:'button', class:'s-button', 'data-browse-model':''}, tr('选择模型…','Choose model…'));
+    browse.disabled = pickingModel;
+    row.append(input, browse);box.append(label, row);
+    const recent = make('select', {'aria-label':tr('最近选择的模型','Recently selected models'),'data-recent-model':''});
+    function refreshRecent() {
+      const items = recentModels(p.Backend);
+      recent.replaceChildren(make('option',{value:''},tr('最近选择…','Recent models…')));
+      for (const path of items) recent.append(make('option',{value:path},path.split(/[\\/]/).pop()+' — '+path));
+      recent.hidden = !items.length;
+    }
+    refreshRecent();
+    recent.onchange = () => { if(recent.value){input.value=recent.value;input.dispatchEvent(new Event('input',{bubbles:true}));recent.value='';} };
+    box.append(recent);
+    const scan = make('button',{type:'button',class:'s-button l-scan-trigger','data-scan-models':''},tr('快速扫描','Quick scan'));
+    const modelTools=make('div',{class:'l-model-tools'});
+    modelTools.append(make('small',{},(p.Backend==='ninfer'?'.ninfer':'.gguf')+tr(' · 本机文件',' · Local file')),scan);
+    const dialog = make('dialog',{class:'l-model-dialog','aria-labelledby':'model-scan-title'});
+    const head = make('div',{class:'l-heading'});
+    const close = make('button',{type:'button',class:'s-button'},tr('关闭','Close'));
+    head.append(make('h2',{id:'model-scan-title',class:'s-title'},tr('候选模型','Candidate models')),close);
+    const progress = make('p',{class:'l-muted','aria-live':'polite','data-scan-status':''});
+    const scope = make('details',{class:'l-scan-scope'});scope.append(make('summary',{},tr('扫描范围','Search locations')));
+    const paths = make('div',{class:'l-muted'});scope.append(paths);
+    const results = make('div',{class:'l-scan-results','data-scan-results':''});
+    const other = make('button',{type:'button',class:'s-button','data-scan-folder':''},tr('选择其他目录扫描…','Scan another folder…'));
+    dialog.append(head,progress,scope,results,other,make('p',{class:'l-muted'},tr('候选列表按文件名筛选；模型能否运行，仍需启动校验。','Candidates are filtered by filename; launch validation still determines compatibility.')));
+    box.append(modelTools,dialog);
+    close.onclick=()=>dialog.close();
+    let scanning=false;
+    async function runScan(directory='') {
+      if(scanning)return;
+      scanning=true;other.disabled=true;results.replaceChildren();
+      progress.textContent=tr('正在扫描模型目录…','Scanning model folders…');
+      try {
+        const result=await api('scan-models',{backend:p.Backend,current_path:input.value,...(directory?{directory}:{})});
+        paths.textContent=result.roots.join('\n')||tr('未找到默认模型目录','No default model directories found');
+        progress.textContent=tr(`找到 ${result.models.length} 个候选模型`,`Found ${result.models.length} candidate models`)
+          +(result.limited?tr(' · 已达到快速扫描限制，可选择更具体的目录',' · Quick scan limit reached; choose a more specific folder'):'')
+          +(result.skipped?tr(' · 部分文件或目录无法读取',' · Some files or folders could not be read'):'');
+        if(!result.models.length)results.append(make('p',{class:'l-muted'},tr('可以选择模型所在文件夹再扫描，或直接使用“选择模型”。','Choose the model folder to scan, or use Choose model.')));
+        for(const model of result.models){
+          const pick=make('button',{type:'button',class:'l-model-candidate','data-model-candidate':model.path});
+          pick.append(make('span',{},model.name),make('small',{},`${(model.bytes/1024**3).toLocaleString(window.monitorI18n.language,{maximumFractionDigits:2})} GiB · ${model.format}`),make('small',{class:'l-candidate-path'},model.path));
+          pick.onclick=()=>{input.value=model.path;rememberModel(p.Backend,model.path);refreshRecent();input.dispatchEvent(new Event('input',{bubbles:true}));dialog.close();input.focus();message(tr('已选用候选模型；下次启动生效。','Candidate selected; applies on next launch.'));};
+          results.append(pick);
+        }
+      }catch(error){progress.textContent=error.message;}
+      finally{scanning=false;other.disabled=false;}
+    }
+    scan.onclick=()=>{if(busy)return;dialog.showModal();runScan();};
+    other.onclick=async()=>{
+      if(pickingModel||scanning)return;
+      pickingModel=true;other.disabled=true;
+      try {
+        const response=await fetch('/api/launcher/browse-model-folder',{method:'POST',headers:{'Content-Type':'application/json','X-KVMem-Token':info.token},body:JSON.stringify({backend:p.Backend,current_path:input.value}),signal:AbortSignal.timeout(315000)});
+        const result=await response.json();if(!response.ok)throw Error(result.error||'HTTP '+response.status);
+        if(result.path)await runScan(result.path);
+      }catch(error){progress.textContent=error.message;}
+      finally{pickingModel=false;other.disabled=false;}
+    };
+    browse.onclick = async () => {
+      if(pickingModel || busy) return;
+      pickingModel = true; browse.disabled = true;
+      const original = input.value;
+      browse.textContent = tr('等待选择…','Waiting…');
+      message(tr('请在系统文件选择窗口中选择模型。','Choose a model in the system file picker.'));
+      try {
+        const response = await fetch('/api/launcher/browse-model',{method:'POST',headers:{'Content-Type':'application/json','X-KVMem-Token':info.token},
+          body:JSON.stringify({backend:p.Backend,current_path:original}),signal:AbortSignal.timeout(315000)});
+        const result = await response.json();
+        if(!response.ok) throw Error(result.error || 'HTTP '+response.status);
+        if(result.path) {
+          rememberModel(p.Backend,result.path);
+          if(input.isConnected && input.value === original){input.value=result.path;input.dispatchEvent(new Event('input',{bubbles:true}));refreshRecent();message(tr('已选择模型；下次启动生效。','Model selected; applies on next launch.'));}
+          else message(tr('已加入该引擎的最近选择列表。','Added to the recent models for that backend.'));
+        } else message(tr('已取消，原模型保持不变。','Cancelled; the original model is unchanged.'));
+      } catch(error) {message(error.message,true);}
+      finally {pickingModel=false;root.querySelectorAll('[data-browse-model]').forEach(button=>{button.disabled=false;button.textContent=tr('选择模型…','Choose model…');});}
+    };
+    parent.append(box);
+  }
+  function applyPreset(preset) {
+    if (busy || !info.backends.includes(preset.parameters.Backend)) return;
+    try {
+      const before = captureDraft().parameters;
+      presetUndo = {draft: captureDraft(), selected: selectedPreset, tab: activeTab};
+      perBackend[before.Backend] = structuredClone(before);
+      const assets = perBackend[preset.parameters.Backend] || {};
+      const next = {...defaults, ...structuredClone(preset.parameters)};
+      for (const key of ['Model','Worker']) {
+        if (assets[key]) next[key] = assets[key];
+      }
+      next.Port = before.Port ?? defaults.Port;
+      next.Gpu = before.Gpu || '';
+      next.StageLayers=before.Backend===next.Backend?before.StageLayers||[]:[];
+      selectedPreset = preset.id;
+      activeTab = 0;
+      render(next);
+      scheduleSave();
+      message(tr('模板已填入编辑区，尚未启动。可以撤销本次套用。','Template applied to the draft; no service started. You can undo this change.'));
+      root.querySelector(`[data-preset="${preset.id}"]`).focus();
+    } catch (error) { message(error.message, true); }
+  }
+  function presetPanel(side) {
+    const panel = make('section', {class:'s-card l-presets'});
+    panel.append(make('h2', {class:'s-title'}, tr('启动模板','Launch templates')),
+      make('p', {class:'l-muted'}, tr('一键套用参数，再点击启动。模型路径按引擎保留。','Apply a recipe, then start. Model paths are retained per backend.')));
+    const list = make('div', {class:'l-preset-list'});
+    const switcher=make('div',{class:'l-template-tabs'});
+    for(const [id,zh,en] of [['builtin','内置模板','Built-in'],['mine','我的模板','My templates']]){const tab=make('button',{type:'button',class:'s-button','data-template-tab':id,'aria-pressed':String(templateTab===id)},tr(zh,en));tab.onclick=()=>{templateTab=id;refreshTemplates();};switcher.append(tab);}panel.append(switcher);
+    for (const preset of templateTab==='builtin'?presets:[]) {
+      const available = info.backends.includes(preset.parameters.Backend);
+      const button = make('button', {type:'button', class:'l-preset', 'data-preset':preset.id,
+        'aria-pressed':String(selectedPreset === preset.id)});
+      button.disabled = busy || !available;
+      button.append(make('span', {}, tr(...preset.title)), make('small', {},
+        available ? tr(...preset.note) : tr('当前后端目录未安装此引擎','Not installed in this backend checkout')));
+      button.onclick = () => applyPreset(preset);
+      list.append(button);
+    }
+    if(templateTab==='mine'){
+      try{
+        const saved=readTemplates();
+        if(!saved.length)list.append(make('p',{class:'l-muted'},tr('还没有个人模板。点击页面顶部“另存为模板”保存当前设置。','No templates yet. Use Save as template above to keep these settings.')));
+        for(const item of saved){
+          const wrapper=make('div',{class:'l-user-template','data-user-template':item.id}),button=make('button',{type:'button',class:'l-preset','data-apply-template':item.id,'aria-pressed':String(selectedPreset===item.id)});
+          button.append(make('span',{},item.name),make('small',{},item.description||names[item.draft.parameters.Backend]));
+          button.onclick=()=>{if(busy)return;presetUndo={draft:captureDraft(),selected:selectedPreset,tab:activeTab};selectedPreset=item.id;restoreDraft(structuredClone(item.draft));scheduleSave();message(tr('模板已填入编辑区，尚未启动。可以撤销本次套用。','Template applied to the draft; no service started. You can undo this change.'));};
+          const menu=make('details',{class:'l-template-menu'});menu.append(make('summary',{},tr('管理','Manage')));
+          for(const [mode,zh,en] of [['update','用当前设置更新','Update from current settings'],['rename','重命名','Rename'],['delete','删除','Delete']]){const action=make('button',{type:'button',class:'s-button','data-template-edit':mode},tr(zh,en));action.onclick=()=>templateEditor(mode,item);menu.append(action);}
+          wrapper.append(button,menu);list.append(wrapper);
+        }
+      }catch(error){list.append(make('p',{class:'l-error'},error.message));}
+    }
+    panel.append(list);
+    if (presetUndo) {
+      const undo = make('button', {type:'button', class:'s-button l-secondary', 'data-preset-undo':''}, tr('撤销套用','Undo template'));
+      undo.disabled = busy;
+      undo.onclick = () => {
+        if (busy) return;
+        const previous = presetUndo;
+        presetUndo = null; selectedPreset = previous.selected; activeTab = previous.tab;
+        restoreDraft(previous.draft);scheduleSave();
+        message(tr('已恢复套用模板前的配置。','Restored the configuration before applying the template.'));
+        root.querySelector('[data-param=Backend]').focus();
+      };
+      panel.append(undo);
+    }
+    panel.append(make('p', {class:'l-muted l-preset-footnote'}, tr('草稿与个人模板保存在当前浏览器。清除网站数据会删除这些设置。','Drafts and personal templates are saved in this browser. Clearing site data removes them.')));
+    const log=side.querySelector('.l-log');if(log)side.insertBefore(panel,log);else side.append(panel);
+  }
+  function render(p){
+    let refreshGpuOrder=()=>{};
+    const b=p.Backend,n=b==='ninfer',l=b==='llamacpp';
+    root.replaceChildren();
+    const heading=make('div',{class:'l-heading l-page-heading'}),intro=make('div',{class:'l-intro'}),savedState=make('button',{type:'button',class:'l-save-state l-muted','data-draft-state':'','aria-live':'polite'});savedState.onclick=saveEditing;intro.append(make('h1',{},tr('启动配置','Launch configuration')),savedState);heading.append(intro);root.append(heading);
+    const layout=make('div',{class:'l-layout'}),main=make('div',{class:'l-main'}),side=make('aside',{class:'l-side'});layout.append(main,side);root.append(layout);
+    const form=make('form',{'aria-label':tr('启动配置','Launch configuration')});form.style.display='contents';main.append(form);form.addEventListener('submit',e=>e.preventDefault());
+    const core=make('section',{class:'s-card l-essential'});core.append(make('h2',{class:'s-title'},tr('模型与资源','Model & resources')));const fields=make('div',{class:'l-fields l-core'});core.append(fields);form.append(core);
+    const backend=field(fields,p,'Backend','推理引擎','Backend','text',Object.entries(names).map(([v,t])=>[v,t]));Array.from(backend.options).forEach(o=>{o.disabled=!info.backends.includes(o.value);if(o.disabled)o.textContent+=' · '+tr('未安装','not installed');});
+    modelPicker(fields,p);
+    const gpu=field(fields,p,'Gpu','推理显卡','Inference GPUs','text',info.gpus.map(g=>[g.uuid,g.name+' · '+g.uuid.slice(-8)]),[n?'按 Ctrl 多选，按列表顺序切分':'当前控制台对此后端使用单卡',n?'Ctrl-click for multiple GPUs; ordered below':'This console currently uses one GPU for this backend']);
+    gpu.closest('label').classList.add('l-gpu-field');
+    if(n){gpu.multiple=true;gpu.size=2;Array.from(gpu.options).forEach(o=>o.selected=(p.Gpu||'').split(',').includes(o.value));}
+    else if(!p.Gpu){gpu.prepend(make('option',{value:''},tr('选择显卡','Select a GPU')));gpu.value='';}
+    gpu.required=true;
+    if(!info.gpus.length){gpu.replaceChildren(make('option',{value:''},tr('未检测到 NVIDIA 显卡','No NVIDIA GPU detected')));}
+    if(n&&info.gpus.length){
+      const old=gpu.closest('label'),box=make('div',{class:old.className});
+      box.append(...old.childNodes);old.replaceWith(box);
+      gpu.hidden=true;gpu.required=false;gpu.setAttribute('aria-hidden','true');
+      const choices=make('div',{class:'l-gpu-choices',role:'group','aria-label':tr('推理显卡','Inference GPUs')});
+      const checks=[],options=new Map(Array.from(gpu.options).map(option=>[option.value,option]));
+      let order=[...new Set((p.Gpu||'').split(',').filter(id=>options.has(id)))];
+      const ordered=make('div',{class:'l-gpu-order','data-gpu-order':'','aria-label':tr('显卡执行顺序','GPU execution order')});
+      function clearLayers(){
+        const input=root.querySelector('[data-param=StageLayers]');
+        if(input?.value.trim()){input.value='';message(tr('显卡数量已改变，原层数分配已清空，请重新设置。','GPU count changed. Previous layer allocation cleared; configure it again.'));}
+      }
+      for(const device of info.gpus){
+        const option=Array.from(gpu.options).find(x=>x.value===device.uuid);
+        const card=make('label',{class:'l-gpu-choice'}),check=make('input',{type:'checkbox','data-gpu-choice':device.uuid});
+        check.checked=option.selected;
+        const caption=make('span');caption.append(make('strong',{},device.name.replace(/^NVIDIA GeForce /,'')),make('small',{},'UUID · '+device.uuid.slice(-8)));
+        card.append(check,caption);choices.append(card);checks.push(check);
+        check.onchange=()=>{clearLayers();order=check.checked?[...order.filter(id=>id!==device.uuid),device.uuid]:order.filter(id=>id!==device.uuid);sync();gpu.dispatchEvent(new Event('input',{bubbles:true}));};
+      }
+      function drawOrder(){
+        ordered.replaceChildren();ordered.hidden=!order.length;
+        if(!order.length)return;
+        ordered.append(make('span',{class:'l-muted'},tr('执行顺序 · 从前到后','Execution order · first to last')));
+        const input=root.querySelector('[data-param=StageLayers]'),layers=(input?.value||'').split(',').map(x=>x.trim());
+        const valid=layers.length===order.length&&layers.every(x=>/^[1-9]\d*$/.test(x));
+        order.forEach((id,i)=>{
+          const device=info.gpus.find(g=>g.uuid===id),row=make('div',{class:'l-gpu-order-row','data-ordered-gpu':id,tabindex:'-1'});
+          row.append(make('span',{class:'l-gpu-position'},String(i+1)),make('span',{class:'l-gpu-order-name'},device.name.replace(/^NVIDIA GeForce /,'')+' · '+id.slice(-8)),make('small',{'data-gpu-layers':''},valid?tr(layers[i]+' 层',layers[i]+' layers'):input?.value.trim()?tr('待校验','Needs validation'):tr('自动分配','Automatic')));
+          for(const [delta,zh,en] of [[-1,'前移','Move earlier'],[1,'后移','Move later']]){
+            const move=make('button',{type:'button',class:'s-button','data-gpu-move':String(delta),'aria-label':tr(zh,en)+' · '+device.name+' · '+id.slice(-8)},tr(zh,en));
+            move.disabled=i+delta<0||i+delta>=order.length;
+            move.onclick=()=>{
+              const target=i+delta;
+              if(input?.value.trim()){
+                if(valid){[layers[i],layers[target]]=[layers[target],layers[i]];input.value=layers.join(',');}
+                else{input.value='';message(tr('原层数分配不完整，已清空；请按新的显卡顺序重新设置。','Incomplete layer allocation cleared; configure it for the new GPU order.'));}
+              }
+              [order[i],order[target]]=[order[target],order[i]];sync();gpu.dispatchEvent(new Event('input',{bubbles:true}));
+              Array.from(ordered.querySelectorAll('[data-ordered-gpu]')).find(el=>el.dataset.orderedGpu===id)?.focus();
+            };
+            row.append(move);
+          }
+          ordered.append(row);
+        });
+      }
+      function sync(){
+        for(const id of [...order,...info.gpus.map(g=>g.uuid).filter(id=>!order.includes(id))]){const option=options.get(id);gpu.append(option);option.selected=order.includes(id);}
+        checks.forEach(check=>{check.checked=order.includes(check.dataset.gpuChoice);check.closest('label').classList.toggle('is-selected',check.checked);});
+        checks[0].setCustomValidity(order.length?'':tr('请至少选择一张显卡','Select at least one GPU'));drawOrder();
+      }
+      gpu.addEventListener('change',()=>{order=Array.from(gpu.selectedOptions).map(option=>option.value);sync();});sync();gpu.after(choices);box.append(ordered);
+      refreshGpuOrder=drawOrder;
+      const gpuHelp=box.querySelector('.l-field-help');gpuHelp.dataset.essential='true';gpuHelp.open=true;gpuHelp.querySelector('small').textContent=tr('按勾选顺序加入，可前移／后移；层数分配随显卡一起移动。','GPUs join in selection order. Reorder below; assigned layers move with each GPU.');
+    }
+    field(fields,p,'Context','最大上下文 · tokens','Context limit · tokens','number');
+    field(fields,p,'Budget','GPU 历史 KV 预算 · tokens','GPU history KV budget · tokens','number',null,['不是整卡显存上限','Not a device VRAM limit']);
+    field(fields,p,'HostMiB','RAM 历史缓存 · MiB','RAM history cache · MiB','number',null,['1024 MiB = 1 GiB；不含模型内存','1024 MiB = 1 GiB; excludes model memory']);
+    for(const key of ['Context','Budget','HostMiB'])fields.querySelector(`[data-param=${key}]`).closest('label').classList.add('l-resource-field');
+    const section=make('section',{class:'s-card'}),tabs=make('div',{class:'l-tabs',role:'tablist','aria-label':tr('共性参数分组','Common settings groups')});section.append(tabs);form.append(section);const panels=[];
+    groups.forEach((g,i)=>{const tab=make('button',{type:'button',class:'l-tab',role:'tab',id:'launch-tab-'+i,'aria-selected':String(activeTab===i),'aria-controls':'launch-panel-'+i},tr(...g));tabs.append(tab);const panel=make('div',{class:'l-panel',id:'launch-panel-'+i,role:'tabpanel','aria-labelledby':tab.id});panel.hidden=activeTab!==i;const grid=make('div',{class:'l-fields'});panel.append(grid);panels.push(grid);section.append(panel);tab.onclick=()=>{activeTab=i;tabs.querySelectorAll('button').forEach((x,j)=>x.setAttribute('aria-selected',String(i===j)));section.querySelectorAll('.l-panel').forEach((x,j)=>x.hidden=i!==j);};});
+    field(panels[0],p,'Reserve','生成预留空间 · tokens','Generation reserve · tokens','number');
+    const kv=n?['int8','bf16','fp8','nvfp4','k8v4','rk8v4','rk4v4','rk4v4-e8','rk2v4-e8']:[ 'q8_0','f16','f32','q5_0','q4_0'];
+    field(panels[0],{...p,KvType:p.KvType||kv[0]},'KvType','KV 格式','KV format','text',kv.map(v=>[v,v]));
+    field(panels[0],p,'DiskPath','SSD 缓存目录（可选）','SSD cache directory (optional)','text',null,['填写目录后启用 SSD 缓存；留空不使用','Enter a directory to enable SSD caching; leave empty to keep it off']);
+    field(panels[0],{DiskMiB:4096,...p},'DiskMiB','SSD 缓存预算 · MiB','SSD cache budget · MiB','number');
+    field(panels[0],p,'SinkTokens','保留开头 · tokens','Keep prefix · tokens','number');field(panels[0],p,'RecentTokens','保留最近 · tokens','Keep recent · tokens','number');
+    if(n)field(panels[0],p,'RetainedSessions','保留会话数量（可选）','Retained sessions (optional)','number',null,['保留的空闲会话数量，不含正在使用的会话','Idle sessions to retain; excludes active sessions']);
+    const advanced=make('details',{class:'l-advanced'});advanced.append(make('summary',{},tr('高级 · 历史检索与保留策略','Advanced · History retrieval & retention')));const ag=make('div',{class:'l-fields'});advanced.append(ag);['SinkTokens','RecentTokens','RetainedSessions'].forEach(k=>{const el=panels[0].querySelector(`[data-param="${k}"]`);if(el)ag.append(el.closest('label'));});panels[0].append(advanced);
+    const retrieval=make('section',{class:'l-retrieval l-wide','data-lrfu-settings':''});
+    retrieval.append(make('h3',{class:'s-title'},tr('LRFU 与检索评分','LRFU & retrieval scoring')));
+    const retrievalFields=make('div',{class:'l-fields'});retrieval.append(retrievalFields);panels[0].append(retrieval);
+    // Keep persisted/native NoLrfu semantics; only the UI uses a positive toggle.
+    const lrfu=field(retrievalFields,p,'NoLrfu','启用 LRFU','Enable LRFU','checkbox');lrfu.dataset.inverted='true';lrfu.checked=!p.NoLrfu;
+    for(const [key,zh,en,fallback] of [['LrfuLambda','LRFU 衰减系数 λ','LRFU decay λ','0.5'],['LrfuTopFraction','LRFU 候选比例','LRFU candidate fraction','0.9']]){
+      const input=field(retrievalFields,p,key,zh,en,'number');input.step='any';input.max='1';input.placeholder=tr('默认 '+fallback,'Default '+fallback);
+    }
+    field(retrievalFields,{ScoreAggregation:'max',...p},'ScoreAggregation','注意力分数组合方式','Attention score aggregation','text',[['max',tr('最大值','Maximum')],['mean',tr('平均值','Mean')]]);
+    field(panels[1],p,'Prefill','预填充块大小 · tokens','Prefill chunk · tokens','number');
+    const layerSplit=field(panels[1],{...p,StageLayers:(p.StageLayers||[]).join(',')},'StageLayers','多卡层数分配（可选）','Layer split (optional)','text',null,[n?'依次对应上方第 1、2…张显卡，用逗号分隔；留空由后端分配':'当前接入暂不支持设置多卡层数',n?'Comma-separated counts for GPU 1, 2, … above; empty uses backend allocation':'Layer assignment is unavailable in this integration'],!n);
+    layerSplit.addEventListener('input',refreshGpuOrder);refreshGpuOrder();
+    field(panels[1],p,'MtpDrafts','MTP 推测长度 · tokens','MTP draft length · tokens','number',null,['还需模型支持；留空沿用默认','Requires model support; empty uses default'],l);
+    field(panels[1],p,'AdaptiveMtp','启用自适应 MTP','Enable adaptive MTP','checkbox',null,null,!n);field(panels[1],p,'FastPrefill','启用快速预填充','Enable fast prefill','checkbox',null,null,!n);
+    field(panels[2],p,'MaxTokens','默认最大输出 · tokens','Default output limit · tokens','number');field(panels[2],p,'ThinkingBudget','默认思考预算（可选）','Default thinking budget (optional)','number',null,['限制思考阶段的 token 数；留空使用引擎默认值','Limits thinking tokens; leave empty for the engine default'],!n);
+    panels[2].append(make('p',{class:'l-muted l-wide'},tr('温度、top-p 等采样参数目前由聊天请求设置，尚未映射为统一启动参数。','Temperature, top-p and other sampling controls currently belong to chat requests, not this launch adapter.')));
+    field(panels[3],p,'Vision','启用图像输入','Enable vision','checkbox',null,['需要模型及配套资源支持','Requires compatible model and resources'],l);
+    field(panels[3],p,'VisionTokens','图像 token 上限（可选）','Image token limit (optional)','number',null,null,l);field(panels[3],{VisionResidency:'resident',...p},'VisionResidency','图像编码器存放位置','Vision encoder placement','text',[['resident','GPU'],['cpu','CPU']],null,l);
+    panels[3].append(make('p',{class:'l-muted l-wide'},tr('聊天模板使用模型与引擎的默认设置。','Chat templates use model and engine defaults.')));
+    field(panels[4],{ListenHost:'127.0.0.1',...p},'ListenHost','监听地址','Listen address','text',[['127.0.0.1',tr('127.0.0.1 · 仅本机','127.0.0.1 · This computer')],['0.0.0.0',tr('0.0.0.0 · 所有网卡','0.0.0.0 · All interfaces')]],['选择所有网卡后，其他设备可通过本机 IP 和端口访问推理服务','All interfaces allows other devices to access inference through this computer’s IP and port']);field(panels[4],p,'Port','服务端口','Service port','number');field(panels[4],p,'Concurrency','同时处理的请求数（可选）','Simultaneous requests (optional)','number',null,[n?'范围 1–8':'当前接入暂不支持调整并发数',n?'Range 1–8':'Concurrency cannot be adjusted in this integration'],!n);
+    const native=make('details',{class:'s-card l-native'});native.append(make('summary',{},tr('引擎专属参数 · ','Engine-specific settings · ')+names[b]));const ng=make('div',{class:'l-fields'});native.append(ng);
+    if(n||l){
+      const detected=info.workers?.[b];
+      const worker=field(ng,p,'Worker','后端程序（可选）','Backend executable (optional)','text',null,
+        detected?.available?['留空自动使用已登记的后端程序','Leave empty to use the registered backend executable']:['尚未找到可用程序，请填写已安装程序的路径','No executable found; enter its installed path']);
+      worker.placeholder=detected?.available?detected.path:tr('请选择已安装的后端程序','Enter the installed backend executable');
+      if(detected?.available)worker.parentElement.append(make('small',{'data-default-worker':'',style:'overflow-wrap:anywhere'},tr('自动选用：','Automatic: ')+detected.path));
+    }
+    if(n){
+      field(ng,p,'NgramDrafts','N-gram 推测 token 数','N-gram draft tokens','number');
+      field(ng,p,'NgramMinMatch','N-gram 最短匹配','N-gram minimum match','number');
+      field(ng,p,'DeviceProfile','设备性能配置','Device profile','text',[['off',tr('关闭','Off')],['auto',tr('自动','Auto')]]);
+
+    }
+    const nativeLabel=make('label',{class:'l-field l-wide'});nativeLabel.append(make('span',{},tr('原生选项 · JSON 参数数组','Native options · JSON argument array')));const raw=make('textarea',{'data-native':'',rows:'2',spellcheck:'false'});raw.value=JSON.stringify(p.WorkerArgs||[]);nativeLabel.append(raw,make('small',{},tr('当前允许：','Currently allowed: ')+(info.native_options[b].join(', ')||tr('暂无附加选项','none'))));ng.append(nativeLabel);form.append(native);
+    const actions=make('div',{class:'l-actions l-draft-actions'});const save=make('button',{type:'button',class:'s-button','data-action':'template'},tr('另存为模板','Save as template'));const preview=make('button',{type:'button',class:'s-button','data-action':'preview'},tr('检查配置','Check configuration'));actions.append(preview,save);heading.append(actions);const output=make('pre',{class:'l-result l-notice','data-launch-message':'','aria-live':'polite'});heading.after(output);
+    const status=make('section',{class:'s-card l-runtime'});status.append(make('h2',{class:'s-title'},tr('当前运行服务','Running service')),make('p',{class:'l-status s-badge','data-runtime-state':''},tr('读取中','Loading')));const progress=make('div',{class:'l-launch-progress','data-launch-progress':'',hidden:''});progress.append(make('p',{'data-launch-phase':'',role:'status'}),make('div',{class:'l-launch-track',role:'progressbar','data-launch-track':''}),make('small',{class:'l-muted','data-launch-help':''}));status.append(progress,make('dl',{'data-runtime-details':''}));const lifecycle=make('div',{class:'l-actions'});const start=make('button',{type:'button',class:'s-button l-primary','data-action':'start'},tr('启动服务','Start service'));const stop=make('button',{type:'button',class:'s-button','data-action':'stop',disabled:''},tr('停止服务','Stop service'));lifecycle.append(start,stop);status.append(lifecycle,make('p',{class:'l-muted'},tr('只管理此控制台启动的服务。停止会卸载模型并清空其内存缓存。','Only services started here are managed. Stopping unloads the model and its in-memory cache.')));side.append(status);
+    presetPanel(side);
+    const log=make('details',{class:'s-card l-log'});log.append(make('summary',{},tr('启动日志','Startup log')));const refresh=make('button',{type:'button',class:'s-button l-secondary'},tr('刷新日志','Refresh log'));log.append(refresh,make('pre',{class:'l-result','data-log':''}));side.append(log);refresh.onclick=async()=>{try{log.querySelector('[data-log]').textContent=(await api('log')).text||tr('暂无日志','No log yet');}catch(e){message(e.message,true);}};
+    const origin=make('div',{class:'l-environment'});origin.append(make('span',{class:'l-muted'},tr('后端安装目录','Backend checkout')),make('p',{class:'l-muted',style:'overflow-wrap:anywhere'},info.backend_root));log.append(origin);
+    backend.onchange=()=>{try{const old=captureDraft().parameters;old.Backend=b;perBackend[b]=old;selectedPreset='';render(perBackend[backend.value]||{...defaults,Backend:backend.value});scheduleSave();}catch(e){backend.value=b;message(e.message,true);}};
+    [save,preview,start,stop].forEach(button=>button.onclick=()=>act(button.dataset.action));
+    updateStatus(runtime);
+    draftStatus();
+  }
+  function updateStatus(status){runtime=status;if(!status)return;window.dispatchEvent(new CustomEvent('kvmem-runtime-status',{detail:status}));const running=['starting','ready'].includes(status.state);const label=root.querySelector('[data-runtime-state]');if(!label)return;const translations={stopped:['未启动','Stopped'],starting:['正在加载模型','Loading model'],ready:['服务已就绪','Ready'],exited:['进程已退出','Process exited']};label.textContent=tr(...(translations[status.state]||translations.stopped));label.dataset.state=status.state;const dl=root.querySelector('[data-runtime-details]');dl.replaceChildren();const p=status.active_config?.parameters;for(const [zh,en,value] of [['引擎','Backend',p?names[p.Backend]:null],['模型','Model',p?.Model],['监听地址','Listen address',p?p.ListenHost||'127.0.0.1':null],['本机地址','Local URL',status.url],['进程','PID',status.pid],['退出码','Exit code',status.exit_code]]){if(value!==null&&value!==undefined){dl.append(make('dt',{},tr(zh,en)),make('dd',{title:String(value)},zh==='模型'?String(value).split(/[\\/]/).pop():String(value)));}}root.querySelector('[data-action=start]').disabled=busy||running;root.querySelector('[data-action=stop]').disabled=busy||!running;const chat=document.querySelector('[data-chat-link]');if(info){const ready=status.state==='ready'&&!!status.url;chat.hidden=false;chat.setAttribute('aria-disabled',String(!ready));if(ready)chat.href=status.url+'/';else chat.removeAttribute('href');}renderLaunchProgress();}
+  function renderLaunchProgress(){
+    const box=root.querySelector('[data-launch-progress]');if(!box)return;
+    const state=startPending?'preparing':launchFailure?'failed':runtime?.state;
+    box.hidden=!['preparing','starting','ready','exited','failed'].includes(state);
+    if(box.hidden)return;
+    const labels={preparing:['检查配置并启动进程…','Checking settings and starting process…'],starting:['正在加载模型，等待服务就绪…','Loading model; waiting for readiness…'],ready:['启动完成，可以开始聊天','Ready to chat'],exited:['服务进程已退出','Service process exited'],failed:['启动请求未完成','Launch request did not complete']};
+    box.dataset.state=state;
+    const phase=box.querySelector('[data-launch-phase]'),track=box.querySelector('[data-launch-track]');
+    phase.textContent=tr(...labels[state]);track.setAttribute('aria-label',phase.textContent);
+    track.hidden=state==='failed'||state==='exited';
+    if(state==='ready')track.setAttribute('aria-valuenow','100');else track.removeAttribute('aria-valuenow');
+    box.querySelector('[data-launch-help]').textContent=state==='failed'?launchFailure:state==='exited'?tr('请查看下方运行日志中的退出原因。','Check the service log below for the cause.'):state==='ready'?tr('右上角聊天入口已可用。','Chat is available in the top right.'):tr('请稍候。大模型首次加载可能需要较长时间。','Please wait. Loading a large model for the first time may take a while.');
+  }
+  async function act(action){
+    if(busy)return;
+    if(action==='template'){templateEditor();return;}
+    if(action==='preview'){await checkConfiguration();return;}
+    try{
+      const data=action==='stop'?{}:launchData();
+      if(action==='start'&&!root.querySelector('form').reportValidity())return;
+      saveEditing();busy=true;root.querySelectorAll('[data-action]').forEach(button=>button.disabled=true);
+      if(action==='start'){startPending=true;launchFailure='';renderLaunchProgress();root.querySelector('[data-launch-progress]').scrollIntoView({block:'nearest',behavior:'smooth'});}
+      const result=await api(action,data);startPending=false;launchFailure='';updateStatus(result);
+      message(action==='start'?tr('启动请求已提交，可查看右侧状态和日志。','Launch submitted; see status and logs.'):tr('服务已停止，配置页面仍可使用。','Service stopped; configuration remains available.'));
+    }catch(error){if(action==='start')launchFailure=error.message||String(error);showError(error);}
+    finally{startPending=false;busy=false;root.querySelectorAll('[data-action]').forEach(button=>button.disabled=false);updateStatus(runtime);}
+  }
+  async function poll(){if(info&&!busy){try{updateStatus(await api('status'));}catch(e){message(e.message,true);}}setTimeout(poll,document.hidden?5000:2000);}
+  window.addEventListener('kvmem-language-change',()=>{if(info){try{restoreDraft(captureDraft());}catch(e){message(e.message,true);}}document.querySelector('[data-page=config]').textContent=tr('启动配置','Launch configuration');});
+  async function init(){try{info=await api('info');let saved;try{saved=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null');}catch{saveError=true;}if(usableDraft(saved))restoreDraft(saved);else render(info.draft.parameters);updateStatus(info.status);if(!['starting','ready'].includes(info.status.state))document.querySelector('[data-page=config]').click();poll();}catch(e){root.replaceChildren(make('section',{class:'s-card'},tr('启动配置需要独立的本地控制台。请运行 scripts/local-console.py，然后打开它显示的地址；推理服务停止后，这个控制台仍然可用。','Launch settings require the independent local console. Run scripts/local-console.py and open its printed URL; the console remains available when inference stops.')));}}
+  init();
+})();

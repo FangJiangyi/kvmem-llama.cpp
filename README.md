@@ -178,6 +178,11 @@ The daily test uses one warm-up and three measured rounds with roughly 12K text,
 
 ## API and Web UI
 
+**Windows desktop console (source checkout):** run `python scripts/local-console.py` and open
+`http://127.0.0.1:18199/monitor/` to configure, start and stop NInfer or llama.cpp, select local
+models, save templates and monitor the service. Python is required; workers and models are
+supplied separately. See the [console setup and limitations](ui/README.md#independent-local-console-windows).
+
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Readiness |

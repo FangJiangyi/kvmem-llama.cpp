@@ -8883,17 +8883,30 @@ index 0000000000000000000000000000000000000000..c21dbb500aff087e7372f9a43e4ed85f
 +
 +} // namespace ninfer::runtime
 diff --git a/src/serve/CMakeLists.txt b/src/serve/CMakeLists.txt
-index 609c2aac1ed78eefa7d10e6289443da798aed551..a193dd0d57c9c921ff17a83f18b0d91ef9c51cb0 100644
+index 609c2aac1ed78eefa7d10e6289443da798aed551..30543736986358833f2da50245d11597cbb0c8ca 100644
 --- a/src/serve/CMakeLists.txt
 +++ b/src/serve/CMakeLists.txt
 @@ -34,6 +34,7 @@ add_library(ninfer_serve STATIC
    model_registry.cpp
  )
  ninfer_internal_includes(ninfer_serve)
-+target_link_libraries(ninfer_serve PRIVATE kvmem)
++target_link_libraries(ninfer_serve PRIVATE kvmem ${CMAKE_DL_LIBS})
  target_link_libraries(ninfer_serve
    PUBLIC ninfer_engine Threads::Threads ninfer::json ninfer::httplib
    PRIVATE ninfer_media_acquire ninfer_product_logging ninfer_product_prompt_input
+diff --git a/src/serve/anthropic_messages_http.cpp b/src/serve/anthropic_messages_http.cpp
+index e3e71b1cda34e22189a4ab3cc10392c2971c25fc..56579e6fed6b6c8cbf775b2acc1d3af58a9e216e 100644
+--- a/src/serve/anthropic_messages_http.cpp
++++ b/src/serve/anthropic_messages_http.cpp
+@@ -102,7 +102,7 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
+     const int input_tokens = prepared.prompt_tokens;
+ 
+     auto lifecycle = begin_request(make_request_log_context(
+-        req_id, "anthropic_messages", request.generation, metadata, prepared));
++        req_id, "anthropic_messages", request.generation, metadata, prepared), prepared);
+ 
+     if (!request.stream) {
+         GenerationOutcome outcome;
 diff --git a/src/serve/anthropic_messages_request.cpp b/src/serve/anthropic_messages_request.cpp
 index 20ef6e25974c1b5a2060aa8057c7d92e060c7ce2..d6bea8d3d1b31774f904773dea8b6fdb2237face 100644
 --- a/src/serve/anthropic_messages_request.cpp
@@ -8980,7 +8993,7 @@ index 0000000000000000000000000000000000000000..ab62379ec65f1872bc9aa6176c441b65
 +
 +} // namespace ninfer::serve
 diff --git a/src/serve/generation_service.cpp b/src/serve/generation_service.cpp
-index 30ecf02b267c77ff1e725ef6f245a0210bfb94bc..277c740c7bb3b2c41aea9e68e2b738468f20d848 100644
+index 30ecf02b267c77ff1e725ef6f245a0210bfb94bc..a39ae889b842673e31332c2bb79c381d727d6e85 100644
 --- a/src/serve/generation_service.cpp
 +++ b/src/serve/generation_service.cpp
 @@ -56,6 +56,11 @@ ApiError request_error_to_api_error(const ninfer::RequestError& exception) {
@@ -8995,7 +9008,44 @@ index 30ecf02b267c77ff1e725ef6f245a0210bfb94bc..277c740c7bb3b2c41aea9e68e2b73846
      case ninfer::RequestErrorKind::InvalidMedia:
          error.status = 400;
          error.code   = "invalid_media";
-@@ -264,6 +269,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
+@@ -228,17 +233,26 @@ void check_preparation_control(Clock::time_point deadline,
+ 
+ class ServiceOutputSink final : public ninfer::OutputSink {
+ public:
+-    explicit ServiceOutputSink(const StreamSink& sink) : sink_(&sink) {}
++    explicit ServiceOutputSink(const StreamSink& sink, const PreparedRequest& prepared)
++        : sink_(&sink), monitor_(prepared.monitor_update), prompt_(prepared.prompt_tokens) {}
+ 
+     void start(ninfer::GenerationStart start) override {
++        prompt_ = start.prompt.prompt_tokens;
++        cached_ = start.reused_prompt_tokens;
++        if (monitor_) monitor_({{"status", "reading"}, {"prompt_tokens", prompt_}, {"cached_tokens", cached_}});
+         if (sink_->on_start) { sink_->on_start(start); }
+     }
+ 
+     void progress(ninfer::PromptProgress progress) override {
++        cached_ = progress.reused_prompt_tokens;
++        if (monitor_) monitor_({{"status", "reading"}, {"prompt_tokens", progress.total_prompt_tokens}, {"cached_tokens", cached_}});
+         if (sink_->on_progress) { sink_->on_progress(progress); }
+     }
+ 
+     void timing(ninfer::GenerationTimingObservation timing) override {
++        if (monitor_) monitor_({{"status", "generating"}, {"generated_tokens", timing.generated_tokens},
++            {"decode_tps", timing.generation_elapsed_ns ? nlohmann::json(1e9 * timing.generated_tokens / timing.generation_elapsed_ns) : nlohmann::json(nullptr)},
++            {"prefill_tps", timing.prompt_elapsed_ns ? nlohmann::json(1e9 * (prompt_ - cached_) / timing.prompt_elapsed_ns) : nlohmann::json(nullptr)}});
+         if (sink_->on_timing) { sink_->on_timing(timing); }
+     }
+ 
+@@ -253,6 +267,8 @@ public:
+ 
+ private:
+     const StreamSink* sink_ = nullptr;
++    std::function<void(const nlohmann::json&)> monitor_;
++    int prompt_ = 0, cached_ = 0;
+ };
+ 
+ } // namespace
+@@ -264,6 +280,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
      engine_options.device                   = options.device;
      engine_options.max_context              = options.max_context;
      engine_options.kv_capacity              = options.kv_capacity;
@@ -9003,7 +9053,7 @@ index 30ecf02b267c77ff1e725ef6f245a0210bfb94bc..277c740c7bb3b2c41aea9e68e2b73846
      engine_options.max_concurrency          = options.max_concurrency;
      engine_options.max_pending_requests     = options.max_pending_requests;
      engine_options.pending_timeout_ms       = options.pending_timeout_ms;
-@@ -292,6 +298,9 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
+@@ -292,6 +309,9 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
      engine_options.cuda_graph_allowance_bytes =
          static_cast<std::size_t>(options.cuda_graph_allowance_mib) << 20;
      engine_options.wddm_evictable_budget    = options.wddm_evictable_budget;
@@ -9013,11 +9063,56 @@ index 30ecf02b267c77ff1e725ef6f245a0210bfb94bc..277c740c7bb3b2c41aea9e68e2b73846
      engine_options.suspend                  = options.suspend;
      engine_options.mlp_a8_decode            = options.mlp_a8_decode;
      engine_options.prefill_a8               = options.prefill_a8;
+@@ -394,6 +414,10 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
+                                            ninfer::GenerationObservationOptions observation,
+                                            std::function<bool()> is_cancelled,
+                                            ContextCacheHints context_cache) const {
++    if (consumer_mode == GenerationConsumerMode::Streaming) {
++        observation.live_timings = true;
++        observation.prompt_progress = true;
++    }
+     return prepare_impl(
+         request, consumer_mode, observation, std::move(is_cancelled), std::move(context_cache),
+         options_.allow_prefix_reuse ? CacheParticipation::ReadWrite : CacheParticipation::Disabled,
+@@ -614,7 +638,7 @@ std::string GenerationService::render_prompt(const GenerationRequest& request,
+ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const StreamSink* sink,
+                                          std::function<bool()> is_cancelled) {
+     std::unique_ptr<ServiceOutputSink> output_sink;
+-    if (sink != nullptr) { output_sink = std::make_unique<ServiceOutputSink>(*sink); }
++    if (sink != nullptr) { output_sink = std::make_unique<ServiceOutputSink>(*sink, prepared); }
+     ninfer::OutputSink* public_sink = output_sink.get();
+     ninfer::CancellationView cancellation;
+     if (is_cancelled || (sink != nullptr && sink->is_cancelled)) {
+diff --git a/src/serve/generation_service.h b/src/serve/generation_service.h
+index b2544e2537f973e5ed8fb8e899659fa141fd7f99..64336c8c3966c471dde1e234505bc3436f9bc94d 100644
+--- a/src/serve/generation_service.h
++++ b/src/serve/generation_service.h
+@@ -4,6 +4,7 @@
+ // adapters normalize before this layer and render IDs, usage, and response events after it.
+ 
+ #include "ninfer/engine.h"
++#include <nlohmann/json.hpp>
+ #include "serve/request.h"
+ #include "serve/serve_options.h"
+ 
+@@ -109,6 +110,7 @@ ApiError request_error_to_api_error(const ninfer::RequestError& exception);
+ // request keeps its ingress/response lifetime reservation until the HTTP response is released and
+ // is consumed exactly once by run().
+ struct PreparedRequest {
++    std::function<void(const nlohmann::json&)> monitor_update;
+     ninfer::GenerationHandle generation;
+     ninfer::ResolvedSamplingParameters sampling;
+     double prepare_seconds     = 0.0;
 diff --git a/src/serve/http_server.cpp b/src/serve/http_server.cpp
-index f078f6b21321baa69015e3b235c2df30a7befcde..1908dd60f789764a360d2c3e2fbc5618530f22f7 100644
+index f078f6b21321baa69015e3b235c2df30a7befcde..932dbaa965235692438def5dd8b87054ad95c826 100644
 --- a/src/serve/http_server.cpp
 +++ b/src/serve/http_server.cpp
-@@ -4,6 +4,7 @@
+@@ -1,9 +1,12 @@
+ #include "serve/http_server.h"
++#include "kvmem/monitor.hpp"
++#include "kvmem/monitor_hardware.hpp"
+ #include "serve/slot_files.h"
+ 
  #include "product/logging/logging.h"
  #include "serve/anthropic_messages.h"
  #include "serve/http_transport.h"
@@ -9025,7 +9120,116 @@ index f078f6b21321baa69015e3b235c2df30a7befcde..1908dd60f789764a360d2c3e2fbc5618
  #include "serve/mcp_proxy.h"
  #include "serve/openai_common.h"
  #include "serve/request_log.h"
-@@ -1031,7 +1032,7 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
+@@ -13,6 +16,7 @@
+ #include <spdlog/logger.h>
+ 
+ #include <chrono>
++#include <cuda_runtime_api.h>
+ #include <exception>
+ #include <mutex>
+ #include <stdexcept>
+@@ -30,7 +34,7 @@ constexpr std::string_view kCorsAllowedHeaders =
+ // API routes keep their own 404s. Every other GET path belongs to the WebUI, whose client-side
+ // router owns paths the server has no file for.
+ bool is_api_path(std::string_view path) {
+-    return path == "/v1" || path.starts_with("/v1/") || path == "/health" || path == "/metrics" ||
++    return path.starts_with("/api/monitor/") || path == "/v1" || path.starts_with("/v1/") || path == "/health" || path == "/metrics" ||
+            path == "/stats" || path == "/slots" || path == "/props" || path == "/models" ||
+            path.starts_with("/models/") || path == "/completion" || path == "/completions" ||
+            path == "/tokenize" || path == "/detokenize" || path == "/apply-template" ||
+@@ -296,6 +300,8 @@ HttpServer::HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> log
+       request_jsonl_(options_.request_log_jsonl, options_.artifact_path, std::move(logger),
+                      static_cast<std::uint64_t>(options_.request_log_max_mib) << 20U,
+                      options_.request_log_keep) {
++    monitor_ = std::make_unique<kvmem::monitor>();
++    monitor_hardware_ = std::make_unique<kvmem::monitor_hardware>();
+     if (options_.log_stats_panel && panel != nullptr && panel->enabled()) {
+         console_stats_ = std::make_unique<ConsoleStatsPanel>(std::move(panel));
+     }
+@@ -341,16 +347,24 @@ void HttpServer::RequestLifecycle::response_failure(const RequestFailure& failur
+     owner_->record_response_failure(context_.id, failure);
+ }
+ 
+-std::shared_ptr<HttpServer::RequestLifecycle> HttpServer::begin_request(RequestLogContext context) {
+-    return std::make_shared<RequestLifecycle>(*this, std::move(context));
++std::shared_ptr<HttpServer::RequestLifecycle> HttpServer::begin_request(RequestLogContext context, PreparedRequest& prepared) {
++    auto lifecycle = std::make_shared<RequestLifecycle>(*this, context);
++    const auto id = std::to_string(context.id);
++    prepared.monitor_update = [this, id](const nlohmann::json& values) { monitor_->update(id, values); };
++    monitor_->update(id, {{"prompt_tokens", prepared.prompt_tokens}, {"generated_tokens", 0}});
++    return lifecycle;
+ }
+ 
+ void HttpServer::record_request_start(const RequestLogContext& context) {
++    monitor_->begin(context.protocol, std::to_string(context.id));
++    monitor_->update(std::to_string(context.id), {{"limit", context.requested_output_tokens}, {"model", context.model}});
+     request_jsonl_.write_request_start(context);
+     operational_log_.request_start(context);
+ }
+ 
+ void HttpServer::record_request_rejected(const RequestRejectionLogContext& context) {
++    monitor_->begin(context.protocol, std::to_string(context.id));
++    monitor_->finish(std::to_string(context.id), "error");
+     request_jsonl_.write_request_rejected(context);
+     metrics_.record_rejection();
+     operational_log_.request_rejected(context);
+@@ -362,6 +376,12 @@ void HttpServer::record_request_rejected(const RequestRejectionLogContext& conte
+ 
+ void HttpServer::record_request_done(const RequestLogContext& context,
+                                      const GenerationOutcome& outcome) {
++    const auto cached = std::min<int>(outcome.prompt_tokens, outcome.metrics.prefix_cache_hit_tokens);
++    monitor_->update(std::to_string(context.id), {{"prompt_tokens", outcome.prompt_tokens}, {"cached_tokens", cached},
++        {"generated_tokens", outcome.completion_tokens},
++        {"prefill_tps", outcome.metrics.prompt_wall_seconds > 0 ? nlohmann::json((outcome.prompt_tokens - cached) / outcome.metrics.prompt_wall_seconds) : nlohmann::json(nullptr)},
++        {"decode_tps", outcome.metrics.generation_wall_seconds > 0 ? nlohmann::json(outcome.completion_tokens / outcome.metrics.generation_wall_seconds) : nlohmann::json(nullptr)}});
++    monitor_->finish(std::to_string(context.id), "completed");
+     request_jsonl_.write_request_done(context, outcome);
+     metrics_.record_done(outcome);
+     operational_log_.request_done(context, outcome);
+@@ -370,6 +390,7 @@ void HttpServer::record_request_done(const RequestLogContext& context,
+ 
+ void HttpServer::record_request_failure(const RequestLogContext& context,
+                                         const RequestFailure& failure) {
++    monitor_->finish(std::to_string(context.id), failure.classification == RequestFailureClass::ClientDisconnected ? "disconnected" : "error");
+     request_jsonl_.write_request_error(context, failure.machine_message);
+     metrics_.record_failure();
+     operational_log_.request_failure(context, failure);
+@@ -377,6 +398,7 @@ void HttpServer::record_request_failure(const RequestLogContext& context,
+ }
+ 
+ void HttpServer::record_response_failure(std::uint64_t request_id, const RequestFailure& failure) {
++    monitor_->finish(std::to_string(request_id), failure.classification == RequestFailureClass::ClientDisconnected ? "disconnected" : "error");
+     operational_log_.response_failure(request_id, failure);
+ }
+ 
+@@ -606,6 +628,13 @@ void HttpServer::register_routes() {
+     server_.Get("/metrics", [this](const httplib::Request& req, httplib::Response& res) {
+         handle_metrics(req, res);
+     });
++    server_.Get("/api/monitor/snapshot", [this](const httplib::Request&, httplib::Response& res) {
++        auto data = monitor_->snapshot();
++        data["hardware"] = monitor_hardware_->snapshot();
++        data["backend"] = "ninfer";
++        res.set_header("Cache-Control", "no-store");
++        res.set_content(data.dump(), "application/json");
++    });
+     server_.Get("/stats", [this](const httplib::Request& req, httplib::Response& res) {
+         handle_stats(req, res);
+     });
+@@ -750,8 +779,10 @@ void HttpServer::handle_webui(const httplib::Request& req, httplib::Response& re
+         return;
+     }
+     const bool gzip         = req.get_header_value("Accept-Encoding").find("gzip") != std::string::npos;
+-    const WebUiAsset* asset = req.path.size() > 1
+-                                  ? find_webui_asset(std::string_view(req.path).substr(1), gzip)
++    if (req.path == "/monitor") { res.set_redirect("/monitor/"); return; }
++    const std::string asset_path = req.path == "/monitor/" ? "/monitor/index.html" : req.path;
++    const WebUiAsset* asset = asset_path.size() > 1
++                                  ? find_webui_asset(std::string_view(asset_path).substr(1), gzip)
+                                   : nullptr;
+     if (asset == nullptr) { asset = find_webui_asset("index.html", gzip); }
+     if (asset == nullptr) {
+@@ -1031,7 +1062,7 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
          {"frequency_penalty", overrides.frequency_penalty.value_or(preset.frequency_penalty)},
      };
      params["seed"] = overrides.seed ? nlohmann::json(*overrides.seed) : nlohmann::json(-1);
@@ -9034,7 +9238,7 @@ index f078f6b21321baa69015e3b235c2df30a7befcde..1908dd60f789764a360d2c3e2fbc5618
          {"default_generation_settings",
           {{"n_ctx", facts.capacity.max_context},
            {"speculative", options.speculative.backend != ninfer::SpeculativeBackend::None},
-@@ -1047,6 +1048,36 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
+@@ -1047,6 +1078,36 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
          // The WebUI ungreys its "Use llama-server proxy" option from this flag alone.
          {"cors_proxy_enabled", options_.webui_mcp_proxy},
      };
@@ -9042,7 +9246,7 @@ index f078f6b21321baa69015e3b235c2df30a7befcde..1908dd60f789764a360d2c3e2fbc5618
 +    const auto& execution = service.engine_options();
 +    props["execution"] = {{"mode", execution.devices.size() > 1 ? "layer" : "single"},
 +        {"devices", execution.devices.empty() ? std::vector<int>{execution.device} : execution.devices},
-+        {"stage_layers", execution.stage_layers}};
++        {"stage_layers", execution.stage_layers}, {"monitor_devices", facts.monitor_devices}};
 +    props["kvmem"] = {{"enabled", options.kvmem.selected_tokens != 0},
 +        {"selected_tokens", options.kvmem.selected_tokens},
 +        {"reserve_tokens", options.kvmem.reserve_tokens},
@@ -9071,6 +9275,69 @@ index f078f6b21321baa69015e3b235c2df30a7befcde..1908dd60f789764a360d2c3e2fbc5618
      res.set_content(props.dump(), "application/json");
  }
  
+@@ -1341,6 +1402,26 @@ HttpServer::ModelFacts HttpServer::model_facts(const ModelRegistry::Lease& lease
+     }
+     // memory_summary() takes the Engine execution lock: computed once per Engine instance.
+     ModelFacts facts;
++    // Resolve CUDA-visible ordinals once for this loaded model. NVML ordinals are not
++    // equivalent when CUDA_VISIBLE_DEVICES reorders or hides physical devices.
++    const auto& execution = service.engine_options();
++    const auto devices = execution.devices.empty() ? std::vector<int>{execution.device} : execution.devices;
++    for (int ordinal : devices) {
++        nlohmann::json device = {{"name", "CUDA" + std::to_string(ordinal)}, {"uuid", nullptr}};
++        cudaDeviceProp properties{};
++        if (cudaGetDeviceProperties(&properties, ordinal) == cudaSuccess) {
++            std::string uuid = "GPU-";
++            constexpr char hex[] = "0123456789abcdef";
++            for (int i = 0; i < 16; ++i) {
++                if (i == 4 || i == 6 || i == 8 || i == 10) uuid += '-';
++                const auto byte = static_cast<unsigned char>(properties.uuid.bytes[i]);
++                uuid += hex[byte >> 4]; uuid += hex[byte & 15];
++            }
++            device["uuid"] = uuid;
++            device["name"] = properties.name;
++        }
++        facts.monitor_devices.push_back(std::move(device));
++    }
+     facts.service                      = &service;
+     facts.metadata                     = service.model_metadata();
+     facts.vision                       = service.engine_options().enable_vision;
+diff --git a/src/serve/http_server.h b/src/serve/http_server.h
+index 1b940d6a2eb1e3f23730b089c0a5d8bf7bda4979..4e3d92100fda9771cedc2c0afe33a80cdd523834 100644
+--- a/src/serve/http_server.h
++++ b/src/serve/http_server.h
+@@ -1,4 +1,5 @@
+ #pragma once
++namespace kvmem { class monitor; class monitor_hardware; }
+ 
+ #include "serve/console_stats.h"
+ #include "serve/generation_service.h"
+@@ -128,7 +129,7 @@ private:
+         std::atomic<State> state_{State::Pending};
+     };
+ 
+-    [[nodiscard]] std::shared_ptr<RequestLifecycle> begin_request(RequestLogContext context);
++    [[nodiscard]] std::shared_ptr<RequestLifecycle> begin_request(RequestLogContext context, PreparedRequest& prepared);
+ 
+     [[nodiscard]] httplib::Server::HandlerResponse pre_route(const httplib::Request& req,
+                                                              httplib::Response& res) const;
+@@ -180,6 +181,7 @@ private:
+     // What the server reports about one loaded model, computed once per Engine instance: an
+     // unload and a later load start a new one.
+     struct ModelFacts {
++        nlohmann::json monitor_devices = nlohmann::json::array();
+         const GenerationService* service = nullptr;
+         LoadCapacity capacity;
+         ninfer::ModelMetadata metadata;
+@@ -236,6 +238,8 @@ private:
+     OperationalLog operational_log_;
+     // Mutable: a model's server_start record is written when a const handler first sees it.
+     mutable JsonlRequestLog request_jsonl_;
++    std::unique_ptr<kvmem::monitor> monitor_;
++    std::unique_ptr<kvmem::monitor_hardware> monitor_hardware_;
+     ServeMetrics metrics_;
+     std::unique_ptr<ConsoleStatsPanel> console_stats_;
+     httplib::Server server_;
 diff --git a/src/serve/kvmem_status_json.h b/src/serve/kvmem_status_json.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..d48cc929dbad6949b8ff3e31693ef70138b02f01
@@ -9102,6 +9369,28 @@ index 0000000000000000000000000000000000000000..d48cc929dbad6949b8ff3e31693ef701
 +        {"history_restored_bytes", m.history_restored_bytes}};
 +}
 +} // namespace ninfer::serve
+diff --git a/src/serve/llamacpp_http.cpp b/src/serve/llamacpp_http.cpp
+index 3a048c6e291a89e3089b791318b7832341361a8d..838fb0e4007ba08e388dc617f2071668f7a1ee0d 100644
+--- a/src/serve/llamacpp_http.cpp
++++ b/src/serve/llamacpp_http.cpp
+@@ -214,7 +214,7 @@ void HttpServer::handle_rerank(const httplib::Request& req, httplib::Response& r
+                                                 {.phase_timings = true}, cancelled));
+                 const RequestLogMetadata metadata{.model = request.model};
+                 lifecycles.push_back(begin_request(make_request_log_context(
+-                    ++request_seq_, "rerank", judgements.back(), metadata, batch.back())));
++                    ++request_seq_, "rerank", judgements.back(), metadata, batch.back()), batch.back()));
+             }
+             for (std::size_t offset = 0; offset < batch.size(); ++offset) {
+                 GenerationOutcome outcome;
+@@ -303,7 +303,7 @@ void HttpServer::handle_text_completion(const httplib::Request& req, httplib::Re
+     TextCompletionContext context =
+         make_text_completion_context(request, std::move(prompt), prepared);
+     auto lifecycle = begin_request(
+-        make_request_log_context(req_id, protocol, request.generation, metadata, prepared));
++        make_request_log_context(req_id, protocol, request.generation, metadata, prepared), prepared);
+ 
+     if (!request.response.stream) {
+         GenerationOutcome outcome;
 diff --git a/src/serve/load_report.cpp b/src/serve/load_report.cpp
 index 3870cb4ff6acf52e59e38f9079483eb563d3ec17..cb71e1b64bc5265a6682281739c6d95489bead1b 100644
 --- a/src/serve/load_report.cpp
@@ -9129,6 +9418,19 @@ index 3870cb4ff6acf52e59e38f9079483eb563d3ec17..cb71e1b64bc5265a6682281739c6d954
      const ThroughputReport since_startup{
          .interval_seconds = std::isfinite(sample.uptime_seconds) ? sample.uptime_seconds : 0.0,
          .computed_prefill_tokens = stats.computed_prefill_tokens,
+diff --git a/src/serve/openai_chat_http.cpp b/src/serve/openai_chat_http.cpp
+index ecece39edf32624df6828ce3078929e9828c2a4f..205a499625fbb36ad80b1ec4401c79bf20a613cd 100644
+--- a/src/serve/openai_chat_http.cpp
++++ b/src/serve/openai_chat_http.cpp
+@@ -72,7 +72,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
+ 
+     const OpenAIChatResponseIdentity identity = make_openai_chat_response_identity(request.model);
+     auto lifecycle                            = begin_request(make_request_log_context(
+-        req_id, "openai_chat_completions", request.generation, metadata, prepared));
++        req_id, "openai_chat_completions", request.generation, metadata, prepared), prepared);
+ 
+     if (!request.stream) {
+         GenerationOutcome outcome;
 diff --git a/src/serve/openai_chat_request.cpp b/src/serve/openai_chat_request.cpp
 index c8277d419ce722d59c57d550524358771b5e45d6..10dde595bcc65d67e72bc8e560364f3b9c7bb759 100644
 --- a/src/serve/openai_chat_request.cpp
@@ -9292,6 +9594,19 @@ index ab01274c8a1f315ae3e86d0d48250cd990d3b114..d7927525b9b07fb98c2b665f8743ede5
  // True for OpenAI tool types the *server* would have executed - hosted search, hosted code
  // execution, hosted file search and the like. NInfer has no executor for any of them, and a client
  // never waits on one itself, so declaring one is silently dropped rather than failing the request:
+diff --git a/src/serve/openai_responses_http.cpp b/src/serve/openai_responses_http.cpp
+index a00e64f74a2da50604fb7ce16770f0d693f897ad..0e84e8b0f2d77ccf34cd706374aa565e967a5f5d 100644
+--- a/src/serve/openai_responses_http.cpp
++++ b/src/serve/openai_responses_http.cpp
+@@ -295,7 +295,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
+ 
+     const std::int64_t created = unix_time_now();
+     auto lifecycle             = begin_request(make_request_log_context(
+-        req_id, "openai_responses", resolved.generation, metadata, prepared));
++        req_id, "openai_responses", resolved.generation, metadata, prepared), prepared);
+     resolved.generation.messages.clear();
+ 
+     if (!request.stream) {
 diff --git a/src/serve/openai_responses_request.cpp b/src/serve/openai_responses_request.cpp
 index 3ba42f01dc15452752c2cef8953e64d9874e5e7a..13767f40cfbc3c3ef11f590e9db2a5bcd159fc38 100644
 --- a/src/serve/openai_responses_request.cpp
