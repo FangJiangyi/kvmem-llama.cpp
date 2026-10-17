@@ -504,8 +504,27 @@ index b1311bea4c50adf2640dda4292313fb56d7579d3..c06d9e4a63ce3013399c694bc93efcd0
  | `--ngram-draft-tokens N` | copy drafting alongside `--spec`: up to `N` tokens (1..63) copied from earlier prompt, tool-result or output text that the last `--ngram-min-match` tokens match, verified by the target; `0` disables it; see [Ngram copy proposals](ngram.md) | `15` with `--spec`, else `0` |
  | `--ngram-min-match N` | shortest match a copy is drawn from, `4..64` | `12` |
  | `--prefill-cublas` | hand wide prefill GEMMs to cuBLAS: a large prefill speedup for a small perplexity cost, and it wants a larger `--prefill-chunk` to pay (see [quality trades](maintainer/quality-trade-experiments.md)) | off |
+diff --git a/docs/gemma4.md b/docs/gemma4.md
+index ce79ebe92acfe76124a6dbff076f641837042799..c46fd0027a6bf43a08225bef9d6c30f05ad4a041 100644
+--- a/docs/gemma4.md
++++ b/docs/gemma4.md
+@@ -380,10 +380,10 @@ mask. The mask of its next token is computed on a thread of its own from the gra
+ after the last accepted token, while the GPU runs the decode step that produces the token's
+ logits: the step does not wait for the mask, and a row whose mask is late keeps its logits and is
+ sampled once the mask is ready, while the other requests go on. With `--spec mtp` such a request
+-also drafts while its masks take at most 4 ms: a speculative round fills one mask per draft
+-position in parallel while the verification runs. A request whose masks cost more decodes without
+-drafts, its next mask starting as soon as a token is accepted, and drafts again once they are
+-cheap. A single mask over 5 s, or a grammar with no admissible token, fails the request with an
++also drafts when the usual context, output-budget and assistant-state checks allow it: a speculative
++round fills one mask per draft position in parallel while the verification runs. Mask duration
++does not disable drafts; slow masks can extend the speculative round's sampling wait.
++A single mask over 5 s, or a grammar with no admissible token, fails the request with an
+ explicit error.
+ 
+ String length bounds (`minLength`, `maxLength`) cost the most: a position inside a counted string
 diff --git a/docs/maintainer/engine-architecture.md b/docs/maintainer/engine-architecture.md
-index 0b8433ae2a50fbc679ebcff2b0d1b9a3db216705..ef1bf51cae47ee03599dcc9a70759a6678a07deb 100644
+index 0b8433ae2a50fbc679ebcff2b0d1b9a3db216705..55f8131923dd8a8bc299dafb2ba727ba48a0e3e9 100644
 --- a/docs/maintainer/engine-architecture.md
 +++ b/docs/maintainer/engine-architecture.md
 @@ -577,7 +577,7 @@ live KV 与 State 的 lane；未启用时每个 prefill unit 只多一次 relaxe
@@ -517,6 +536,26 @@ index 0b8433ae2a50fbc679ebcff2b0d1b9a3db216705..ef1bf51cae47ee03599dcc9a70759a66
    KV plane、GDN state、replay records 和 workspace，位于各自设备上；仍然是一个 Program、一个 KV page
    allocator（每个 plane 绑定一个 rank）、一个 Scheduler 和一个 commit 序列。embedding、head、round state、
    sampling 和 MTP 留在 rank 0，residual 经 `StageLink` 逐 stage 传递并由最后一个 stage 送回。KV 容量取各设备
+@@ -695,12 +695,13 @@ captures D2H draft transfer and a host function that starts the lanes' jobs from
+ verification, then a host function that collects the jobs and the H2D mask transfer before the
+ acceptance. Host functions call no CUDA API; they capture exceptions for rethrow after stream
+ synchronization and before any token can be published. All node addresses belong to Program and
+-outlive graph replay. A structured lane whose last masks took over 4 ms verifies no drafts (its
+-extent is zero) until they are cheap again. Its next mask then computes ahead: the Engine asks
+-`Program::structured_readiness` for every decode-ready lane before a round, which starts the
+-lane's job at its committed ledger frontier and leaves the lane out of rounds until the job is
+-ready; the round adopts the finished job instead of starting one. A job that fails, or runs over
+-5 s, ends that request with an explicit error.
++outlive graph replay. Mask duration never clips the speculative extent. Draft availability,
++the configured speculative policy, output budget and context capacity still bound it. Slow masks
++can hold the speculative round at sampling. For ordinary decoding, the Engine asks
++`Program::structured_readiness` for every decode-ready lane before a round; its job starts at
++the committed ledger frontier, and the lane sits out rounds until that job is ready. The ordinary
++round adopts the finished job. A failed or over-budget ordinary readiness job ends its request
++with an explicit error.
+ 
+ Draft frames are compact at each round's actual proposal width, which may be narrower than the
+ maximum ngram/copy window. D2H staging must preserve the fixed host-row pitch used by the grammar
 diff --git a/docs/maintainer/paged-kv-cache.md b/docs/maintainer/paged-kv-cache.md
 index 6f63bd3ef323a3dc8a9c0a692e343a763e93ffdf..da1b169a125f943e3e70ba66109ce2b1335e3db6 100644
 --- a/docs/maintainer/paged-kv-cache.md
@@ -757,8 +796,24 @@ index a401ba13e9af78c5545f79e6264eb8d5b89247c9..ad854fe1bdb2e18d6073d458a6cde940
  ## Round shapes
  
  A round in which at least one row has a copy proposal is a copy round and verifies at the ngram
+diff --git a/docs/qwen3-8-flash-next.md b/docs/qwen3-8-flash-next.md
+index 548122fc105d63c2a13d5e86cf1ca6de817de7f8..428392585375e76da3da4391ad7838693fbec555 100644
+--- a/docs/qwen3-8-flash-next.md
++++ b/docs/qwen3-8-flash-next.md
+@@ -389,8 +389,9 @@ disk, which a later run finds there too.
+ Structured output (`--structured-output` for the server, `--json`/`--json-schema` for the CLI) works
+ as for Gemma 4 ([Structured output](gemma4.md#structured-output)): the grammar's token mask applies
+ to every sampled token, it is computed on a thread of its own while the step runs, a row whose mask
+-is late samples once it is ready without holding the others, and a request drafts while its masks
+-take at most 4 ms. So do
++is late samples once it is ready without holding the others during ordinary decoding. Draft
++eligibility does not depend on mask duration; a speculative round waits for all required masks
++before acceptance. So do
+ [token log probabilities](serving.md#token-log-probabilities): a request that asks gathers each
+ sampled token's top 20 from the same logits before sampling.
+ 
 diff --git a/docs/serving.md b/docs/serving.md
-index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b1319438439cf0bc4 100644
+index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374d47f3090 100644
 --- a/docs/serving.md
 +++ b/docs/serving.md
 @@ -148,7 +148,9 @@ accepted as `auto`, `high` or `low`. `auto` and `high` see the image at the reso
@@ -772,7 +827,27 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
  `auto` when the server runs with `--lenient-image-detail`. Gemma 4 maps the three to its budgets:
  `low` 70 soft tokens, `auto` the release's 280, `high` the `--vision-max-merged` bound (1120 by
  default).
-@@ -351,14 +353,36 @@ asking for raw JSON without Markdown fences and retaining tools for information
+@@ -220,13 +222,13 @@ milliseconds per token with a large vocabulary).
+ 
+ Every model computes a constrained request's masks on host threads while the GPU runs the step
+ that needs them: the next token's mask, or in a speculative round one mask per draft position,
+-filled in parallel. Speculation is automatic: a constrained request verifies drafts (MTP,
+-DFlash/DFlash2, a context lookup) while its masks take at most 4 ms, which the verification
+-hides, and decodes without drafts while they cost more, resuming once they are cheap again.
+-A costly mask holds only its own request. Gemma 4 and Qwen3.8-Flash-Next run the decode step
++filled in parallel. Grammar-mask duration does not disable draft verification: MTP,
++DFlash/DFlash2 and context lookup retain their configured policy, output/context limits and
++available-draft checks. Slow masks can extend a speculative round's wait before sampling.
++Gemma 4 and Qwen3.8-Flash-Next run an ordinary decode step
+ without it: the row keeps its logits and samples once the mask is ready, while the other requests
+-go on. The Qwen3.5 family computes such a request's next mask after each of its tokens and leaves
+-the request out of decode rounds until the mask is ready. A mask over 5 s fails its request with
++go on. With speculation disabled, the Qwen3.5 family computes the next mask ahead and leaves
++the request out of decode rounds until that mask is ready. A mask over 5 s fails its request with
+ an explicit error, and so does a Gemma 4 or Flash-Next decoding request without a token for 120 s
+ ([Gemma 4](gemma4.md#structured-output)). A generated token the grammar does not admit, which the
+ masks should have excluded, fails its own request with an internal error (HTTP 500) and leaves
+@@ -351,14 +353,42 @@ asking for raw JSON without Markdown fences and retaining tools for information
  This helps the model choose the intended final-answer branch when tools remain enabled; the
  token grammar enforces validity independently. Tool selection and termination remain model
  decisions under `tool_choice:"auto"`; use `tool_choice:"none"` when no further tools are needed.
@@ -786,13 +861,19 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
 -decoded text output.
 +Requests without an explicit response format receive no JSON format instruction or JSON body grammar.
 +
-+Tool requests use constrained decoding by default, independently of `--structured-output`.
-+`tool_constraints:"basic"` restricts native Qwen calls to declared/allowed tool names and complete
++Tool requests default to `tool_constraints:"auto"`. Ordinary non-strict auto requests use native
++tool parsing without an added generation grammar. Required/named/allowed selections, strict tools
++and parallel-call restrictions still activate the constraints needed to enforce those requests,
++independently of `--structured-output`.
++Explicit `tool_constraints:"basic"` restricts native Qwen calls to declared/allowed tool names and complete
 +terminal call sequences. Non-strict parameter values retain best-effort normalization.
 +An empty non-strict value may share its opening and closing framing newline; it is normalized
 +independently of the next parameter. Strict values retain their canonical framing and exact codecs.
-+`tool_constraints:"auto"` opts out of this automatic basic grammar only when the request has no
-+strict tools, required/named/allowed selection, or parallel-call restriction.
++With `tool_choice:"none"`, the default auto mode neither builds a prohibition grammar nor publishes
++structured tool calls. Tool definitions remain in the reusable prompt, so the model may still emit
++tool markup as ordinary content; this mode does not guarantee a tag-free final answer. Explicit
++basic mode retains the prohibition grammar. A JSON response format under none retains its JSON
++grammar without a tool-call alternative in both modes.
 +
 +`strict:true` enforces the supported JSON Schema subset for tool arguments. Its root must resolve
 +to one `type:"object"` with `additionalProperties:false`. Required fields, nested JSON objects and
@@ -805,7 +886,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
 +
 +OpenAI `required` supports multiple declarations; a named OpenAI choice produces exactly one call.
 +Anthropic `any` requires at least one call, and a named Anthropic choice allows repeated calls to
-+that tool unless parallel use is disabled. `none` blocks tool calls. Allowed selections and `none`
++that tool unless parallel use is disabled. `none` suppresses structured tool calls. Allowed selections and `none`
 +retain the original prompt declarations and their order so KV reuse is independent of selection.
 +Thinking remains available with required/named choices. With a JSON response format, `auto` permits
 +either the JSON final body or tool calls; `required` permits calls, and `none` permits the JSON body.
@@ -817,7 +898,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
  
  Only normal completed final-content responses guarantee a complete JSON document satisfying the supported
  schema. Token/context limits, cancellation, transport failure, or generation errors can leave a
-@@ -844,11 +868,10 @@ The endpoint supports:
+@@ -844,11 +874,10 @@ The endpoint supports:
  - function tools and free-form `custom` tools, the latter served to the model as a
    single-string-input function under the caller's own tool name so callers that dispatch by name
    keep working;
@@ -833,7 +914,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
  - assistant tool-call history, tool-result messages, and legacy function-call history;
  - the top-level `reasoning_effort` field, where the `default` and `auto` aliases resolve to the
    server-configured level;
-@@ -861,7 +884,8 @@ The endpoint supports:
+@@ -861,7 +890,8 @@ The endpoint supports:
  Options whose observable behavior the Engine cannot provide are rejected when they request that
  behavior. This includes JSON constrained output on a server without `--structured-output` (unless
  it runs with `--unconstrained-response-format`), nonzero `logit_bias`, audio/file input or audio
@@ -843,7 +924,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
  Each capability rejection identifies the affected field and the guarantee NInfer cannot provide.
  The vLLM/llama.cpp constrained-decoding extensions (`grammar`, `structured_outputs`, `guided_json`,
  `guided_regex`, `guided_choice`, and `guided_grammar`) are rejected explicitly instead of being
-@@ -910,7 +934,8 @@ value text, while `<` or the end of the output, after optional whitespace, makes
+@@ -910,7 +940,8 @@ value text, while `<` or the end of the output, after optional whitespace, makes
  value. A value therefore cannot contain a closing parameter tag followed by markup, nor an unmatched
  nested parameter opener; either makes the call malformed.
  
@@ -853,7 +934,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
  opens with a complete call, each marker is tried in order, and the first complete region that
  consumes the rest of the response becomes the structured turn; quoted markup before it stays
  ordinary content. Generated reasoning closes only at a `</think>` followed by format whitespace or
-@@ -1316,15 +1341,15 @@ wire response contains typed `output` Items.
+@@ -1316,15 +1347,15 @@ wire response contains typed `output` Items.
  | `metadata` | at most 16 string pairs; keys at most 64 characters and values at most 512 |
  | `client_metadata` | Codex client extension; an object or `null`, accepted as opaque tracing metadata with no generation effect |
  | `reasoning.effort` | `none` requests disabled thinking; other standard effort values pass to the selected template |
@@ -872,7 +953,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
  | `max_tool_calls` | non-negative integer accepted as a hosted-tool no-op; NInfer does not execute hosted tools |
  | `truncation` | omitted or `disabled`; overlong input fails instead of silently dropping Items |
  | `top_logprobs` | integer in `[0,20]`; a nonzero value also asks for [token log probabilities](#token-log-probabilities) |
-@@ -1419,7 +1444,7 @@ NInfer renders these definitions in the Qwen prompt and parses model output into
+@@ -1419,7 +1450,7 @@ NInfer renders these definitions in the Qwen prompt and parses model output into
  `function_call` output Items. Each output has a protocol Item `id` (`fc_...`) and a distinct
  `call_id` (`call_...`). The client executes the function and sends a `function_call_output` Item in
  a later request. Only functions in the current effective tool set can become structured calls;
@@ -881,7 +962,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
  declaration order, while `tool_choice:"none"` disables structured tool output even when the history
  contains earlier calls.
  
-@@ -1441,14 +1466,18 @@ NInfer does not execute functions or enforce JSON Schema through constrained dec
+@@ -1441,14 +1472,18 @@ NInfer does not execute functions or enforce JSON Schema through constrained dec
  `strict:true`, hosted tools, remote MCP tools, and custom free-form tools are rejected. Deferred
  loading, output schemas, and caller restrictions that exclude direct invocation are also rejected
  because their semantics cannot be honored.
@@ -902,7 +983,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
  - an assistant `message` containing an `output_text` part;
  - one or more `function_call` Items.
  
-@@ -1499,13 +1528,11 @@ The normal lifecycle is:
+@@ -1499,13 +1534,11 @@ The normal lifecycle is:
  4. matching `*.done`, `response.content_part.done`, and `response.output_item.done` events;
  5. exactly one `response.completed`, `response.incomplete`, or `response.failed` terminal event.
  
@@ -921,7 +1002,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
  
  For `include:["reasoning.encrypted_content"]`, the in-progress
  `response.output_item.added` Item omits `encrypted_content` because the complete reasoning text is
-@@ -1578,8 +1605,8 @@ curl http://127.0.0.1:8080/v1/responses/input_tokens \
+@@ -1578,8 +1611,8 @@ curl http://127.0.0.1:8080/v1/responses/input_tokens \
  Unsupported Create fields include Conversations, prompt templates, context management, hosted
  moderation, `include` values other than
  `reasoning.encrypted_content`, background execution, compaction, files/audio, and
@@ -932,7 +1013,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
  
  
  ## Anthropic Messages
-@@ -1643,16 +1670,11 @@ protocol-validated value to the selected template, substituting the nearest valu
+@@ -1643,16 +1676,11 @@ protocol-validated value to the selected template, substituting the nearest valu
  accepts as described above. `output_config.format` accepts `{"type":"json_schema","schema":{...}}`,
  enforced strictly (see [Structured output](#structured-output)); Count Tokens ignores it.
  
@@ -947,7 +1028,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..bf5b8696599d7e2e1ccc228b13194384
 -tools, tools that exclude direct model calls, Anthropic-provided/server tools, toolsets, MCP, and
 -containers are rejected because their required constraint or executor is absent. `tool_result` preserves text/image order and marks
 +User-defined tools support `name`, `description`, object `input_schema`, `strict` and
-+`input_examples`. `auto`, `none`, a named `tool`, and `any` use the common constrained selection
++`input_examples`. `auto`, `none`, a named `tool`, and `any` use the common tool selection
 +rules described above; `any` without tools is rejected. `disable_parallel_tool_use:true` constrains
 +generation to one call. Deferred tools, tools excluding direct model calls, Anthropic-provided
 +server tools, toolsets, MCP and containers remain unsupported. `tool_result` preserves text/image order and marks
@@ -1026,7 +1107,7 @@ index 0000000000000000000000000000000000000000..9c7ede518ca14fd2f735f9cfe5336c5f
 +                std::uint32_t block_tokens, Tensor& output, cudaStream_t stream);
 +} // namespace ninfer::ops
 diff --git a/include/ninfer/types.h b/include/ninfer/types.h
-index 6c481086733f6801140d4777747d7a80ad8ad0e7..63f51933b439420c8dd4f9ef0008ad088f4fd116 100644
+index 6c481086733f6801140d4777747d7a80ad8ad0e7..f20623387fdedd9f37572a9fc22e74adcc48e706 100644
 --- a/include/ninfer/types.h
 +++ b/include/ninfer/types.h
 @@ -140,8 +140,9 @@ struct SpeculativeOptions {
@@ -1132,7 +1213,7 @@ index 6c481086733f6801140d4777747d7a80ad8ad0e7..63f51933b439420c8dd4f9ef0008ad08
 +    ToolChoiceMode mode = ToolChoiceMode::Auto;
 +    std::optional<std::vector<std::string>> allowed_names;
 +    bool parallel = true;
-+    ToolConstraintMode constraints = ToolConstraintMode::Basic;
++    ToolConstraintMode constraints = ToolConstraintMode::Automatic;
 +};
 +
  struct RequestOptions {
@@ -2870,7 +2951,7 @@ index 92b37774e08d3b98ce7dbba9eaf4178d12016a4f..ced302201f9ca4ac01d6b5e744884345
      std::vector<MediaPlaceholderByteSpec> media_placeholders;
      std::vector<MediaTokenRunByteSpec> media_token_runs;
 diff --git a/src/models/qwen3_5/frontend/frontend.cpp b/src/models/qwen3_5/frontend/frontend.cpp
-index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..8fa7d084fd0cdd935b34f51686861d132a69baf0 100644
+index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..0668f92a56b70fbea5a1556a6df0fe6704d5544c 100644
 --- a/src/models/qwen3_5/frontend/frontend.cpp
 +++ b/src/models/qwen3_5/frontend/frontend.cpp
 @@ -14,6 +14,7 @@
@@ -2931,7 +3012,7 @@ index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..8fa7d084fd0cdd935b34f51686861d13
      if (impl_->ngram_sources_enabled) {
          result.ngram_boundaries = impl_->ngram_boundaries;
          build_ngram_index(result);
-@@ -1470,21 +1486,32 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
+@@ -1470,23 +1486,34 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
                                              const StopPolicy& caller_stop,
                                              const OutputOptions& output,
                                              const ThinkingControlOptions& thinking,
@@ -2965,10 +3046,13 @@ index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..8fa7d084fd0cdd935b34f51686861d13
          text::StructuredOutputEnvelope envelope;
          if (prompt.data_->starts_in_reasoning) { envelope.reasoning_close = "</think>"; }
 -        if (prompt.data_->tool_call_output) {
-+        if (!tools_constrained && prompt.data_->tool_call_output) {
++        if (!tools_constrained && contract) {
              envelope.alternative_format =
-                 fi::structured_tool_call_format(*prompt.data_->tool_call_output);
+-                fi::structured_tool_call_format(*prompt.data_->tool_call_output);
++                fi::structured_tool_call_format(*contract);
          }
+         std::lock_guard lock(impl_->grammar_mutex);
+         if (!impl_->grammar_compiler) {
 @@ -1494,19 +1521,25 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
              for (std::size_t id = 0; id < vocab.size(); ++id) {
                  if (impl_->tokenizer->is_valid_token(id) &&
@@ -3434,10 +3518,10 @@ index 2a52830c80e8cce7bf871a2a4e048ba611cd6c09..5ed8c930a63d1477a80a6c7ae0205b06
      std::string content;
 diff --git a/src/models/qwen3_5/frontend/tool_contract.cpp b/src/models/qwen3_5/frontend/tool_contract.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d891700806f48db8b235173679fffc3d22b0c5d4
+index 0000000000000000000000000000000000000000..a55eb81a9bd83662a71c3f68d339b9b1dd5ec371
 --- /dev/null
 +++ b/src/models/qwen3_5/frontend/tool_contract.cpp
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,302 @@
 +#include "models/qwen3_5/frontend/tool_call_parser.h"
 +#include "text/structured_output.h"
 +#include "text/schema_normalization.h"
@@ -3677,6 +3761,11 @@ index 0000000000000000000000000000000000000000..d891700806f48db8b235173679fffc3d
 +std::shared_ptr<const ToolCallOutputContract>
 +select_tool_call_contract(const std::shared_ptr<const ToolCallOutputContract>& declarations,
 +                          const ToolChoice& choice) {
++    // Keep the tool definitions in the reusable prompt, but do not decode calls or build a
++    // prohibition grammar for the default none path. Generated markup can remain plain text.
++    if (choice.mode == ToolChoiceMode::None &&
++        choice.constraints == ToolConstraintMode::Automatic)
++        return {};
 +    if (choice.allowed_names) {
 +        for (const auto& name : *choice.allowed_names) {
 +            if (!declarations ||
@@ -3685,7 +3774,8 @@ index 0000000000000000000000000000000000000000..d891700806f48db8b235173679fffc3d
 +                fail("tool choice refers to undeclared tool: " + name);
 +        }
 +    }
-+    if (declarations && choice.mode == ToolChoiceMode::Auto && choice.parallel &&
++    if (declarations && declarations->forced_tool_name.empty() &&
++        choice.mode == ToolChoiceMode::Auto && choice.parallel &&
 +        !choice.allowed_names && choice.constraints == ToolConstraintMode::Automatic &&
 +        std::none_of(declarations->tools.begin(), declarations->tools.end(),
 +                     [](const auto& tool) { return tool.strict; }))
@@ -3707,7 +3797,8 @@ index 0000000000000000000000000000000000000000..d891700806f48db8b235173679fffc3d
 +        selected->constrained = true;
 +        return selected;
 +    }
-+    selected->constrained = selected->required || !selected->parallel ||
++    selected->constrained = selected->required || !declarations->forced_tool_name.empty() ||
++                            !selected->parallel ||
 +                            choice.allowed_names.has_value() ||
 +                            choice.constraints == ToolConstraintMode::Basic ||
 +                            std::any_of(selected->tools.begin(), selected->tools.end(),
@@ -3954,7 +4045,7 @@ index 11a33ca2e9d96e5c2fab28baa12317bf7452c9a9..c6cbb78ed37f3a9ffc8c20d0a51ac20c
  
  struct OrdinaryBatchContext {
 diff --git a/src/models/qwen3_5/program/decode.cpp b/src/models/qwen3_5/program/decode.cpp
-index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610bb9288efd 100644
+index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb7104a231 100644
 --- a/src/models/qwen3_5/program/decode.cpp
 +++ b/src/models/qwen3_5/program/decode.cpp
 @@ -16,6 +16,7 @@
@@ -3973,7 +4064,50 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
          card.set_stage_runtime(state.execution.stages);
          card.set_expert_runtime(state.execution.experts);
          card.set_rope_yarn(state.execution.rope_yarn);
-@@ -529,7 +531,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
+@@ -186,7 +188,6 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
+         request.sampling_host.token_mask_stride = structured_round->stride();
+         structured_round->fill(sequence.lane, *request.grammar, device.stream);
+     }
+-    request.mask_cost = {};
+     request.next_mask.reset();
+     request.speculative_stats = SpeculativeStats{
+         .backend               = speculative_backend,
+@@ -440,17 +441,11 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
+                                      {minimum_count, maximum_count});
+ }
+ 
+-std::uint32_t ProgramImpl::speculative_extent(const RequestControl& request) noexcept {
+-    return request.grammar && !request.mask_cost.speculates()
+-               ? 0U
+-               : std::numeric_limits<std::uint32_t>::max();
+-}
+-
+ StructuredReadiness ProgramImpl::structured_readiness(SequenceHandle handle) {
+     if (!structured_round || !valid_sequence(handle)) { return {}; }
+     const std::uint32_t lane = ContractAccess::lane(handle).value;
+     RequestControl& request  = requests[lane];
+-    if (!request.grammar || request.mask_cost.speculates()) {
++    if (!request.grammar || speculative_backend != SpeculativeBackend::None) {
+         request.next_mask.reset();
+         return {};
+     }
+@@ -490,13 +485,8 @@ ProgramImpl::take_next_mask(RequestControl& request, const SequenceState& sequen
+     return std::exchange(request.next_mask, nullptr);
+ }
+ 
+-void ProgramImpl::observe_masks(std::span<const std::uint32_t> lanes) {
+-    if (!structured_round) { return; }
+-    structured_round->check();
+-    for (const std::uint32_t lane : lanes) {
+-        RequestControl& request = requests[lane];
+-        if (request.grammar) { request.mask_cost.observe(structured_round->seconds(lane)); }
+-    }
++void ProgramImpl::check_masks() {
++    if (structured_round) { structured_round->check(); }
+ }
+ 
+ void ProgramImpl::validate_licensed_tokens(std::span<const TokenId> tokens) const {
+@@ -529,7 +519,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
                  lanes.begin() + static_cast<std::ptrdiff_t>(row)) {
              throw std::invalid_argument("ordinary batch contains an invalid or duplicate lane");
          }
@@ -3982,7 +4116,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
          const RequestControl& request = requests[lane];
          if (request.lifecycle != Lifecycle::Active ||
              budgets[row].generated_tokens_remaining == 0 || !sequence.kv ||
-@@ -541,7 +543,10 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
+@@ -541,7 +531,10 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
              sequence.prefix_digests.size() != sequence.ledger_frontier) {
              throw std::logic_error("ordinary batch row is not decode-ready");
          }
@@ -3994,7 +4128,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
      }
  
      const auto start = Clock::now();
-@@ -567,9 +572,13 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
+@@ -567,9 +560,13 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
              const std::uint32_t frontier       = sequence.execution_frontier;
              ordinary_host_ingress->tokens[row] = sequence.ledger.back();
              ordinary_host_ingress->cache_positions[row] =
@@ -4009,7 +4143,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
              ordinary_host_ingress->rope_positions[row] =
                  checked_i32(frontier, "ordinary batch RoPE position") + sequence.rope_delta;
              ordinary_host_ingress->text_kv_table_rows[row] =
-@@ -602,6 +611,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
+@@ -602,6 +599,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
              *ordinary_host_egress,
              state_images->continuation_hidden_store()};
  
@@ -4017,15 +4151,19 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
          mark_workspace_usage(workspace_plan.ordinary_round);
          execution::ordinary_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                           envelope, executable);
-@@ -616,6 +626,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
-         observe_masks(lanes);
+@@ -613,9 +611,10 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
+                                          static_cast<std::uint64_t>(lanes.size()));
+             device.synchronize();
+         }
+-        observe_masks(lanes);
++        check_masks();
          timing.end_wait();
  
 +        read_memory_candidates();
          const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
          for (std::size_t row = 0; row < lanes.size(); ++row) {
              SequenceState& sequence    = active_sequence(lanes[row]);
-@@ -629,6 +640,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
+@@ -629,6 +628,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
              if (request.logprobs) {
                  round_logprobs[row] = fetched_logprob(static_cast<std::int32_t>(row), token);
              }
@@ -4033,7 +4171,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
              sequence.text_kv_valid = base_E + 1;
              commit_sequence_kv(sequence, sequence.text_kv_valid, 0);
              sequence.tail_hidden_valid = true;
-@@ -692,7 +704,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -692,7 +692,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                  lanes.begin() + static_cast<std::ptrdiff_t>(row)) {
              throw std::invalid_argument("MTP batch contains an invalid or duplicate lane");
          }
@@ -4042,7 +4180,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
          const RequestControl& request = requests[lane];
          if (request.lifecycle != Lifecycle::Active ||
              budgets[row].generated_tokens_remaining == 0 || !sequence.kv || !sequence.kv->backend ||
-@@ -707,7 +719,12 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -707,7 +707,12 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
              sequence.mtp_draft_count > draft_window) {
              throw std::logic_error("MTP batch row is not decode-ready");
          }
@@ -4056,7 +4194,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
          signals[row]     = &request.mtp_signal;
          room[row]        = std::min(budgets[row].generated_tokens_remaining,
                                      capacity - sequence.execution_frontier);
-@@ -733,6 +750,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -733,6 +738,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                         mtp_minimum_adaptive_window(draft_window), draft_window);
      }
      const std::uint32_t width = verify_window + 1;
@@ -4064,7 +4202,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
  
      const auto started = Clock::now();
      try {
-@@ -741,7 +759,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -741,7 +747,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                               static_cast<std::uint64_t>(lanes.size()));
          DecodeGraphExecutable* executable = nullptr;
          execution::MtpCausalAttentionEnvelopes envelopes =
@@ -4073,7 +4211,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
          if (use_cuda_graph) {
              DecodeGraphFamily& family = copy_round ? ngram_graphs : mtp_graphs;
              DecodeGraphProfile& profile =
-@@ -749,7 +767,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -749,7 +755,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                       maximum_frontier, "MTP batch", verify_window);
              executable = &install_graph_profile(family, profile, "MTP batch");
              envelopes  = mtp_causal_attention_envelopes(profile.max_execution_frontier,
@@ -4082,9 +4220,13 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
          }
  
          bool logprobs = false;
-@@ -768,7 +786,12 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
-                  verify_window, max_by_budget, capacity - sequence.execution_frontier - 1,
-                  speculative_extent(request)});
+@@ -765,10 +771,14 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+             const std::uint32_t extent        = std::min(
+                 {row_copy ? static_cast<std::uint32_t>(match.tokens.size())
+                           : sequence.mtp_draft_count,
+-                 verify_window, max_by_budget, capacity - sequence.execution_frontier - 1,
+-                 speculative_extent(request)});
++                 verify_window, max_by_budget, capacity - sequence.execution_frontier - 1});
              mtp_host_ingress->anchors[row]        = sequence.ledger.back();
 -            mtp_host_ingress->base_frontiers[row] = checked_i32(frontier, "MTP batch frontier");
 +            mtp_host_ingress->base_frontiers[row] = checked_i32(compact_position(sequence, frontier), "MTP batch cache frontier");
@@ -4096,7 +4238,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
              mtp_host_ingress->remaining_budgets[row] =
                  checked_i32(budgets[row].generated_tokens_remaining, "MTP batch remaining budget");
              mtp_host_ingress->current_extents[row]      = static_cast<std::int32_t>(extent);
-@@ -790,7 +813,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -790,7 +800,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
              const StateImageSelectors selectors            = state_selectors(sequence);
              mtp_host_ingress->state_source_slots[row]      = selectors.source;
              mtp_host_ingress->state_destination_slots[row] = selectors.destination;
@@ -4105,7 +4247,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
              mtp_host_ingress->sampling[row]                = request.sampling_host;
              logprobs = logprobs || request.logprobs;
              if (request.grammar) {
-@@ -821,6 +844,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -821,6 +831,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
              *mtp_host_egress,
              state_images->continuation_hidden_store()};
  
@@ -4113,7 +4255,44 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..70998ba9b382965418620fea8043610b
          mark_workspace_usage(workspace_plan.mtp_round);
          execution::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                      verify_window, draft_window, envelopes, executable);
-@@ -1269,6 +1293,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
+@@ -832,7 +843,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+                                          static_cast<std::uint64_t>(lanes.size()));
+             device.synchronize();
+         }
+-        observe_masks(lanes);
++        check_masks();
+         timing.end_wait();
+ 
+         const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
+@@ -1004,8 +1015,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
+                                            ? static_cast<std::uint32_t>(matches[row].tokens.size())
+                                            : (drafter_runs ? draft_window : 0U);
+         const std::uint32_t extent =
+-            std::min({proposed, max_by_budget, capacity - sequence.execution_frontier - 1U,
+-                      speculative_extent(request)});
++            std::min({proposed, max_by_budget, capacity - sequence.execution_frontier - 1U});
+         maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
+         maximum_target_tokens =
+             std::max(maximum_target_tokens, sequence.execution_frontier + extent + 1U);
+@@ -1046,7 +1056,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
+                     ? static_cast<std::uint32_t>(matches[row].tokens.size())
+                     : (drafter_runs ? draft_window : 0U);
+             const std::uint32_t extent = std::min(
+-                {proposed, max_by_budget, capacity - frontier - 1U, speculative_extent(request)});
++                {proposed, max_by_budget, capacity - frontier - 1U});
+             dflash_host_ingress->anchors[row] = sequence.ledger.back();
+             dflash_host_ingress->execution_frontiers[row] =
+                 checked_i32(frontier, "DFlash batch frontier");
+@@ -1117,7 +1127,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
+                                          static_cast<std::uint64_t>(lanes.size()));
+             device.synchronize();
+         }
+-        observe_masks(lanes);
++        check_masks();
+         timing.end_wait();
+ 
+         const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
+@@ -1269,6 +1279,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
      }
      trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
      if (terminal) { sequence.mtp_draft_count = 0; }
@@ -4410,7 +4589,7 @@ index 9811b10e74fcf5099736f13f261a3bd94ec989e7..33ff71025d88f72bad3b89e2702c5c78
      std::uint64_t vision_patches = 0;
      if (plan.vision) {
 diff --git a/src/models/qwen3_5/program/planning/startup.cpp b/src/models/qwen3_5/program/planning/startup.cpp
-index ce8d779d32c5fe46b980d9ef82c5f01cd9a3f9bd..449af7339cb4bbc7653ef0566208c7c3a87aadf8 100644
+index ce8d779d32c5fe46b980d9ef82c5f01cd9a3f9bd..bdd503297f347eca08c2c358ab02b76d877260aa 100644
 --- a/src/models/qwen3_5/program/planning/startup.cpp
 +++ b/src/models/qwen3_5/program/planning/startup.cpp
 @@ -133,7 +133,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
@@ -4474,7 +4653,7 @@ index ce8d779d32c5fe46b980d9ef82c5f01cd9a3f9bd..449af7339cb4bbc7653ef0566208c7c3
                                                static_cast<std::int32_t>(plan.max_concurrency)},
                                               "sampling token counts");
 -        if (plan.structured_output) {
-+        { // Every generation lane can receive a default constrained tool request.
++        { // Every generation lane can receive an explicitly constrained tool request.
              out.grammar_masks =
                  add_tensor(builder, DType::I32,
                             {static_cast<std::int32_t>(
@@ -5056,7 +5235,7 @@ index 572568ec0e3b3c96edb04067d5617b713744bf52..d9a7f83978e3057f46a09ab22501fa8a
  bool Program::hybrid_prefix_cache() const noexcept { return impl_->hybrid_prefix_cache(); }
  
 diff --git a/src/models/qwen3_5/program/program.h b/src/models/qwen3_5/program/program.h
-index 36af6e27ead9c3ce27d0c61d3f8be45f35972730..35ce4c86f81ad837ce8b375ec5215aed6b951c8c 100644
+index 36af6e27ead9c3ce27d0c61d3f8be45f35972730..c631ffe55da38750d3abeadeee522602ddac9046 100644
 --- a/src/models/qwen3_5/program/program.h
 +++ b/src/models/qwen3_5/program/program.h
 @@ -859,6 +859,7 @@ struct PrefillProgress {
@@ -5067,7 +5246,7 @@ index 36af6e27ead9c3ce27d0c61d3f8be45f35972730..35ce4c86f81ad837ce8b375ec5215aed
      runtime::ExecutionTiming timing;
      std::optional<PendingBatch> pending;
      std::optional<CaptureOffer> capture;
-@@ -1076,6 +1077,13 @@ public:
+@@ -1076,12 +1077,19 @@ public:
      // True while the sequence's next media item is still encoding in a concurrent overlay Vision
      // window; the Engine gives that lane no prefill unit until it completes.
      [[nodiscard]] bool vision_pending(SequenceHandle sequence) const noexcept;
@@ -5081,6 +5260,15 @@ index 36af6e27ead9c3ce27d0c61d3f8be45f35972730..35ce4c86f81ad837ce8b375ec5215aed
      // Replaces the sampling of an active sequence from its next round; the grammar mask and the
      // penalty counts carry over.
      void update_sampling(SequenceHandle sequence, const ResolvedSamplingParameters& sampling);
+-    // A decode-ready sequence whose grammar masks are costly decodes without drafts, its next mask
+-    // computing on a thread of its own from the first call after its last commit; the Engine
+-    // leaves the lane out of rounds until it is ready, so its mask holds no other lane's round.
++    // With ordinary decoding, the next grammar mask computes ahead after the last commit; the
++    // Engine leaves that lane out of rounds until it is ready. Speculative rounds compute their
++    // masks alongside verification and do not change draft eligibility based on mask duration.
+     [[nodiscard]] StructuredReadiness structured_readiness(SequenceHandle sequence);
+     // Blocks until the open context transaction's submitted Host transfer completes, so an idle
+     // worker resumes the transaction as soon as it can progress. Returns false, without
 @@ -1190,6 +1198,8 @@ public:
      continuation_summary(const ContinuationHandle& continuation) const;
  
@@ -5304,7 +5492,7 @@ index fe4ad6a6ad4c8394f1de3b942a6c942f21d1cbcd..3125563797d60c240f3b347299c0e621
      out.max_context     = capacity;
      out.kv_capacity     = kv_capacity;
 diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
-index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..7b3fccb0e8c488427015e19b0acbfa62a3a40f28 100644
+index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16fbadcfdbe 100644
 --- a/src/models/qwen3_5/program/program_impl.h
 +++ b/src/models/qwen3_5/program/program_impl.h
 @@ -6,6 +6,12 @@
@@ -5494,7 +5682,19 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..7b3fccb0e8c488427015e19b0acbfa62
      std::uint32_t text_kv_valid           = 0;
      std::uint32_t mtp_kv_valid            = 0;
      std::uint32_t dflash_context_frontier = 0;
-@@ -548,6 +686,9 @@ struct RequestControl {
+@@ -533,10 +671,7 @@ struct RequestControl {
+     PendingCandidate pending;
+     ops::SamplingConfig sampling_host;
+     std::shared_ptr<text::GrammarState> grammar;
+-    // With a grammar: whether its masks are cheap enough for its rounds to verify drafts, and
+-    // while they are not, the mask of its next token computing ahead of its next round, started
+-    // at the ledger frontier it was computed for.
+-    runtime::GrammarMaskCost mask_cost;
++    // An ordinary decoder's next mask computed ahead at its committed ledger frontier.
+     std::shared_ptr<runtime::GrammarMaskJob> next_mask;
+     std::uint32_t next_mask_frontier = 0;
+     std::chrono::steady_clock::time_point next_mask_started;
+@@ -548,6 +683,9 @@ struct RequestControl {
      detail::PhysicalResources active_resources;
      detail::PhysicalResources optional_resources;
      bool publish_continuation = true;
@@ -5504,7 +5704,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..7b3fccb0e8c488427015e19b0acbfa62
      // The sequence's own output ceiling: the largest frontier its lease may ever cover, so
      // on-demand growth never leases pages the request cannot reach.
      std::uint32_t lease_ceiling = 0;
-@@ -573,12 +714,16 @@ struct RequestControl {
+@@ -573,12 +711,16 @@ struct RequestControl {
          // not the restore succeeds; after a failed restore the prefill recomputes [0, frontier)
          // and keeps those tokens out of its reports, so the admitted suffix stays exact.
          std::uint32_t disk_restore_frontier = 0;
@@ -5521,7 +5721,13 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..7b3fccb0e8c488427015e19b0acbfa62
          MtpBridgeMode mtp_bridge            = MtpBridgeMode::None;
      };
  
-@@ -597,6 +742,9 @@ struct RequestControl {
+@@ -591,12 +733,14 @@ struct RequestControl {
+         prefill.reset();
+         lifecycle            = Lifecycle::Empty;
+         pending              = {};
+-        mask_cost            = {};
+         next_mask_frontier   = 0;
+         logprobs             = false;
          active_resources     = {};
          optional_resources   = {};
          publish_continuation = true;
@@ -5531,7 +5737,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..7b3fccb0e8c488427015e19b0acbfa62
          lease_settled        = false;
          lease_space_limited  = false;
          lease_minimum_target = {};
-@@ -701,6 +849,11 @@ public:
+@@ -701,6 +845,11 @@ public:
      // True while this sequence waits for a media item submitted to a concurrent overlay window:
      // the lane must not be given a prefill unit, and every other lane keeps running.
      [[nodiscard]] bool vision_pending(SequenceHandle sequence) const noexcept;
@@ -5543,7 +5749,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..7b3fccb0e8c488427015e19b0acbfa62
      void update_sampling(SequenceHandle sequence, const ResolvedSamplingParameters& sampling);
      [[nodiscard]] StructuredReadiness structured_readiness(SequenceHandle sequence);
      [[nodiscard]] bool wait_context_transfer() noexcept;
-@@ -770,6 +923,7 @@ public:
+@@ -770,6 +919,7 @@ public:
      [[nodiscard]] KVEntitlementShape kv_entitlement_shape() const noexcept;
      [[nodiscard]] std::uint32_t concurrent_output_budget(std::uint32_t prompt_tokens) const noexcept;
      [[nodiscard]] bool isolated_request_feasible(const RequestBasePlan& base) const noexcept;
@@ -5551,7 +5757,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..7b3fccb0e8c488427015e19b0acbfa62
  
      [[nodiscard]] bool hybrid_prefix_cache() const noexcept { return hybrid_ != nullptr; }
  
-@@ -828,11 +982,24 @@ public:
+@@ -828,11 +978,24 @@ public:
      void reset_memory_peaks() noexcept;
  
      friend struct qwen3_5::detail::PressurePlanningSessionImpl;
@@ -5576,7 +5782,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..7b3fccb0e8c488427015e19b0acbfa62
      const std::uint32_t max_concurrency;
      // Frozen context-cache shape: an engaged host budget has already resolved host_state_slots,
      // host_kv_capacity_bytes and the long-anchor count on the plan this Program was built from.
-@@ -937,6 +1104,26 @@ public:
+@@ -937,6 +1100,26 @@ public:
      std::optional<DFlashPersistentState> dflash;
      qwen3_5::RoundState io;
      Tensor prefill_hidden;
@@ -5603,7 +5809,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..7b3fccb0e8c488427015e19b0acbfa62
      std::optional<Tensor> score_hidden;
      Tensor sampling_config;
      Tensor token_counts;
-@@ -1226,6 +1413,7 @@ private:
+@@ -1226,6 +1409,7 @@ private:
          bool cancel_pending                 = false;
          bool prepared                       = false;
          bool terminal                       = false;
@@ -5611,7 +5817,25 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..7b3fccb0e8c488427015e19b0acbfa62
      };
  
      std::uint64_t next_materialization_id_ = 1;
-@@ -1733,6 +1921,57 @@ private:
+@@ -1698,15 +1882,12 @@ private:
+                                        std::span<const std::uint32_t> starts,
+                                        std::span<const std::uint32_t> counts);
+     void validate_licensed_tokens(std::span<const TokenId> tokens) const;
+-    // The drafts a lane's round may verify: none for a structured lane whose masks cost more than
+-    // a verification hides, so its round computes one mask for it.
+-    [[nodiscard]] static std::uint32_t speculative_extent(const RequestControl& request) noexcept;
+     // The lane's next mask computed ahead (structured_readiness), handed to the round when it
+     // verifies no drafts; otherwise none and the round starts the lane's masks itself.
+     [[nodiscard]] std::shared_ptr<runtime::GrammarMaskJob>
+     take_next_mask(RequestControl& request, const SequenceState& sequence, std::uint32_t extent);
+-    // After a round: rethrows a mask job's error and updates each structured lane's mask cost.
+-    void observe_masks(std::span<const std::uint32_t> lanes);
++    // After a round: rethrows a mask job's error before tokens can be published.
++    void check_masks();
+     void mark_workspace_usage(std::size_t phase_bytes) noexcept;
+     [[nodiscard]] std::vector<NgramProposer::Match>
+     propose_ngram(std::span<const std::uint32_t> lanes,
+@@ -1733,6 +1914,57 @@ private:
                                          std::uint32_t backend_pages);
      void bind_sequence_kv(SequenceState& sequence);
      void unbind_sequence_kv(SequenceState& sequence) noexcept;
@@ -7496,6 +7720,23 @@ index 4b55fec491e2f2f15258fafff61f074c6973c1cc..d649126916bfc9370fc3a36dc69b26af
      void publish_copied_checkpoint(StateImageHandle handle) {
          Object& object       = require_copied_destination(handle);
          object.content_epoch = next_epoch();
+diff --git a/src/models/qwen3_5/program/structured_round.cpp b/src/models/qwen3_5/program/structured_round.cpp
+index 0701716bde1ac17667820c163f84ca0be6cb315f..f9a3d852de1d5391828f6af79768523de4bd5bb6 100644
+--- a/src/models/qwen3_5/program/structured_round.cpp
++++ b/src/models/qwen3_5/program/structured_round.cpp
+@@ -100,6 +100,12 @@ void CUDART_CB StructuredRound::collect(void* opaque) noexcept {
+                 if (!self.error_) { self.error_ = job->error(); }
+                 continue;
+             }
++            if (const auto problem = runtime::grammar_mask_problem(*job); !problem.empty()) {
++                if (!self.error_) {
++                    self.error_ = std::make_exception_ptr(std::runtime_error(problem));
++                }
++                continue;
++            }
+             std::copy_n(job->masks(), job->columns() * self.words_,
+                         static_cast<std::uint32_t*>(self.host_masks_.data()) +
+                             lane * self.width_ * self.words_);
 diff --git a/src/models/qwen3_5/program/transactions/commit.cpp b/src/models/qwen3_5/program/transactions/commit.cpp
 index 9a1a1b398f7e05a3fd002c282d7aad89989f0974..3b7e895ba40af86c676fb70ea6ce69be0aae34eb 100644
 --- a/src/models/qwen3_5/program/transactions/commit.cpp
@@ -7844,6 +8085,60 @@ index 0000000000000000000000000000000000000000..6aec9a7edb679d64ccf32c70ff4bd68a
 +}
 +
 +} // namespace ninfer::product
+diff --git a/src/runtime/contract/grammar_masks.h b/src/runtime/contract/grammar_masks.h
+index 362100902e4b71a44187ca16d8e80f184d1b3989..61858a77d6e1e6f3a43b6c8bb2fd08fe3ae6def5 100644
+--- a/src/runtime/contract/grammar_masks.h
++++ b/src/runtime/contract/grammar_masks.h
+@@ -1,14 +1,13 @@
+ #pragma once
+ 
+-// Structured-output masks off the engine thread (the Gemma 4 and Qwen3.8-Flash-Next cores) and the
+-// per-request mask cost that decides whether a structured request speculates (every core).
++// Structured-output masks computed off the engine thread.
+ //
+ // A structured request samples under its grammar's token mask. Computing a mask can cost from
+ // microseconds to many milliseconds with a large vocabulary, so the cores compute it on a thread of
+ // their own (a GrammarMaskJob, from a fork of the grammar) while the GPU runs, instead of holding
+ // every request's round for it. A speculative round needs one mask per draft and the bonus; their
+ // columns fill in parallel (GrammarState::fill_masks) while the verification runs, which hides a few
+-// milliseconds per column. A request whose masks cost more decodes without drafts.
++// milliseconds per column. Mask duration never changes the request's draft eligibility.
+ 
+ #include "ninfer/types.h"
+ #include "text/structured_output.h"
+@@ -27,32 +26,9 @@
+ 
+ namespace ninfer::runtime {
+ 
+-// The mask time above which a structured request decodes without drafts: about what a
+-// verification hides on the GPU.
+-inline constexpr double kSpeculativeMaskSeconds = 0.004;
+ // One mask over this budget fails its request: the grammar is too costly to serve.
+ inline constexpr double kGrammarMaskBudgetSeconds = 5.0;
+ 
+-// A structured request's recent mask time: how long its next token's mask, or a speculative round's
+-// columns filled in parallel, took to compute.
+-class GrammarMaskCost final {
+-public:
+-    void observe(double seconds) noexcept {
+-        seconds_ = seen_ ? seconds_ + kAlpha * (seconds - seconds_) : seconds;
+-        seen_    = true;
+-    }
+-    // Speculate until masks have shown themselves costly.
+-    [[nodiscard]] bool speculates() const noexcept {
+-        return !seen_ || seconds_ <= kSpeculativeMaskSeconds;
+-    }
+-    [[nodiscard]] double seconds() const noexcept { return seconds_; }
+-
+-private:
+-    static constexpr double kAlpha = 0.25;
+-    double seconds_ = 0.0;
+-    bool seen_      = false;
+-};
+-
+ // Masks of one structured request computed on a thread of its own from a fork of its grammar taken
+ // at start: the next token's (no drafts), or a speculative round's columns after its drafts. The
+ // job owns its result; a request that goes away leaves a running job to finish and be discarded.
 diff --git a/src/runtime/contract/request.h b/src/runtime/contract/request.h
 index e47e8d08b61e5b2b3473afada7c1943db9d7b68b..5cc761d8360dc2d2b0adf4c904ef20f1689db43d 100644
 --- a/src/runtime/contract/request.h
@@ -8328,6 +8623,54 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
      const bool thorough_admission_search_;
      const bool branch_anchors_;
      const bool endpoint_anchors_;
+diff --git a/src/runtime/engine/gemma4_core.cpp b/src/runtime/engine/gemma4_core.cpp
+index f7e6a397c2494a07525496f73dce16b0d71af129..49be2b002878e4f931d3443317a57cf5dfb1ea35 100644
+--- a/src/runtime/engine/gemma4_core.cpp
++++ b/src/runtime/engine/gemma4_core.cpp
+@@ -351,7 +351,6 @@ struct Gemma4Core::Request {
+     // its own masks, one per column after its drafts.
+     bool constrained = false;
+     std::shared_ptr<runtime::GrammarMaskJob> mask;
+-    runtime::GrammarMaskCost mask_cost;
+     bool awaiting_sample           = false;
+     std::int32_t awaiting_purpose  = 0;
+     // The last prompt chunk or accepted token, which the progress watchdog measures from.
+@@ -605,7 +604,7 @@ struct Gemma4Core::Impl {
+     // now, a step ahead; one that speculates fills its round's columns during the verification.
+     void next_mask(const std::shared_ptr<Request>& request) {
+         Request& r = *request;
+-        if (r.constrained && active(request) && !(drafts > 0 && r.mask_cost.speculates())) {
++        if (r.constrained && active(request) && drafts == 0) {
+             schedule_mask(r);
+         } else {
+             r.mask.reset();
+@@ -619,7 +618,6 @@ struct Gemma4Core::Impl {
+     bool mask_usable(const std::shared_ptr<Request>& request) {
+         const auto& job = request->mask;
+         if (!job) { return true; }
+-        request->mask_cost.observe(job->seconds());
+         const std::string problem = runtime::grammar_mask_problem(*job);
+         if (problem.empty()) { return true; }
+         fail(request, std::make_exception_ptr(RequestError(
+@@ -1482,9 +1480,7 @@ struct Gemma4Core::Impl {
+     // and no switch of sampling parameters pending (a reasoning block that has not closed yet when
+     // the request samples its answer differently).
+     [[nodiscard]] bool speculates(const Request& r) const {
+-        // A structured row speculates while its masks are cheap enough for the round to fill its
+-        // columns during the verification; otherwise it decodes plainly, a mask ahead.
+-        return drafts > 0 && (!r.constrained || r.mask_cost.speculates()) && r.feed.size() == 1 &&
++        return drafts > 0 && r.feed.size() == 1 &&
+                instance.executor->can_draft(r.slot) &&
+                r.position + drafts + 1 <= max_context &&
+                r.output.model_token_budget_remaining(r.budget->remaining()) > 1 &&
+@@ -1763,7 +1759,6 @@ struct Gemma4Core::Impl {
+                                                   : nullptr;
+             if (const auto& job = column_masks[j]) {
+                 job->wait();
+-                batch[j]->mask_cost.observe(job->seconds());
+                 mask_failures[j] = runtime::grammar_mask_problem(*job);
+                 if (mask_failures[j].empty()) {
+                     // Columns past the row's own drafts are never taken; they stay unrestricted.
 diff --git a/src/runtime/engine/kv_capacity.cpp b/src/runtime/engine/kv_capacity.cpp
 index 9850bbd4f061e805d24246a331abb48a04416362..bc30fb482d778cc43b1b193dcbcf369ce48996b8 100644
 --- a/src/runtime/engine/kv_capacity.cpp
@@ -8941,10 +9284,18 @@ index cd7f87b002f20171e1106953d61a44411b3e15bf..53c6adac16c5487790f19fd6b1aaae95
      const models::qwen3_5::execution::Parameters parameters;
      models::qwen3_5::Frontend frontend;
 diff --git a/src/runtime/engine/qwen4_exp_core.cpp b/src/runtime/engine/qwen4_exp_core.cpp
-index 1a495ef75c0bea5fd9955daed20830f784294ce6..36eae122b6ea62a3dc6c4d3a51abcc5159f08b1a 100644
+index 1a495ef75c0bea5fd9955daed20830f784294ce6..dc43ff407fa26a91d59da2ec73b58f3d28ec336a 100644
 --- a/src/runtime/engine/qwen4_exp_core.cpp
 +++ b/src/runtime/engine/qwen4_exp_core.cpp
-@@ -545,7 +545,7 @@ struct Qwen4ExpCore::Impl {
+@@ -405,7 +405,6 @@ struct Qwen4ExpCore::Request {
+     // are kept (saved_logits) and the token is sampled once the mask is ready.
+     bool constrained = false;
+     std::shared_ptr<runtime::GrammarMaskJob> mask;
+-    runtime::GrammarMaskCost mask_cost; // whether its masks are cheap enough to speculate
+     bool awaiting_sample          = false;
+     std::int32_t awaiting_purpose = 0;
+     // Its last accepted token, which the progress watchdog measures a decoding request from.
+@@ -545,7 +544,7 @@ struct Qwen4ExpCore::Impl {
          const std::size_t rows = slots.size();
          // A sampling call's columns per row: one, or a verification's drafts and bonus.
          const std::size_t width = std::size_t(drafts) + 1;
@@ -8953,7 +9304,43 @@ index 1a495ef75c0bea5fd9955daed20830f784294ce6..36eae122b6ea62a3dc6c4d3a51abcc51
              token_mask = DeviceBuffer(rows * width * mask_words() * sizeof(std::uint32_t));
              host_mask  = std::make_unique<PinnedHostBuffer>(rows * width * mask_words() *
                                                              sizeof(std::uint32_t));
-@@ -2391,7 +2391,7 @@ Qwen4ExpCore::Submission Qwen4ExpCore::submit(models::qwen3_5::PreparedPrompt pr
+@@ -650,7 +649,7 @@ struct Qwen4ExpCore::Impl {
+     // now, a step ahead; one that speculates fills its round's columns during the verification.
+     void next_mask(const std::shared_ptr<Request>& request) {
+         Request& r = *request;
+-        if (r.constrained && active(request) && !(drafts > 0 && r.mask_cost.speculates())) {
++        if (r.constrained && active(request) && drafts == 0) {
+             schedule_mask(r);
+         } else {
+             r.mask.reset();
+@@ -664,7 +663,6 @@ struct Qwen4ExpCore::Impl {
+     bool mask_usable(const std::shared_ptr<Request>& request) {
+         const auto& job = request->mask;
+         if (!job) { return true; }
+-        request->mask_cost.observe(job->seconds());
+         const std::string problem = runtime::grammar_mask_problem(*job);
+         if (problem.empty()) { return true; }
+         fail(request, std::make_exception_ptr(RequestError(
+@@ -1687,9 +1685,7 @@ struct Qwen4ExpCore::Impl {
+     // switch of sampling parameters pending (a reasoning block that has not closed yet when the
+     // request samples its answer differently).
+     [[nodiscard]] bool speculates(const Request& r) const {
+-        // A structured row speculates while its masks are cheap enough for the round to fill its
+-        // columns during the verification; otherwise it decodes plainly, a mask ahead.
+-        return drafts > 0 && (!r.constrained || r.mask_cost.speculates()) && r.feed.size() == 1 &&
++        return drafts > 0 && r.feed.size() == 1 &&
+                instance.executor->can_draft(r.slot) &&
+                r.position + drafts + 1 <= max_context &&
+                r.output.model_token_budget_remaining(r.budget->remaining()) > 1 &&
+@@ -1991,7 +1987,6 @@ struct Qwen4ExpCore::Impl {
+                                                   : nullptr;
+             if (const auto& job = column_masks[j]) {
+                 job->wait();
+-                batch[j]->mask_cost.observe(job->seconds());
+                 mask_failures[j] = runtime::grammar_mask_problem(*job);
+                 if (mask_failures[j].empty()) {
+                     // Columns past the row's own drafts are never taken; they stay unrestricted.
+@@ -2391,7 +2386,7 @@ Qwen4ExpCore::Submission Qwen4ExpCore::submit(models::qwen3_5::PreparedPrompt pr
          impl_->instance.frontend.thinking_control_token_count());
      request->output = impl_->instance.frontend.make_output_session(
          prompt, options.stop, options.output, options.execution.thinking,
@@ -10609,7 +10996,7 @@ index b8d4e3dabc5fbb82bab450c135816c465c1f4167..8d8e528cf59fbc6416ce8acec4068748
      struct Impl;
      std::unique_ptr<Impl> impl_;
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 02cfe0513466f9f1e78a264eb9a01e360c7542c2..da31dc680f7a9fe6d8b3a1c69af70c318fa50a78 100644
+index 02cfe0513466f9f1e78a264eb9a01e360c7542c2..f04cd8a0cbfb38a1d1daf80c7d05a7f7001523f5 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
 @@ -9,10 +9,21 @@ include(cmake/BenchSupportTests.cmake)
@@ -10634,7 +11021,7 @@ index 02cfe0513466f9f1e78a264eb9a01e360c7542c2..da31dc680f7a9fe6d8b3a1c69af70c31
  # Exit code 77 is a skip for every test (tests/cuda_availability.h). Without a usable CUDA device --
  # no GPU, no driver, or only the toolkit's stub driver, as on a CI runner -- a test that has no check
  # of its own fails on its first CUDA call with one of these runtime messages; report that as skipped
-@@ -21,8 +32,112 @@ ninfer_finalize_bundle(ninfer_tests)
+@@ -21,8 +32,114 @@ ninfer_finalize_bundle(ninfer_tests)
  get_property(_ninfer_all_tests DIRECTORY PROPERTY TESTS)
  set_tests_properties(${_ninfer_all_tests} PROPERTIES SKIP_RETURN_CODE 77 SKIP_REGULAR_EXPRESSION
    "CUDA driver is a stub library;no CUDA-capable device is detected;CUDA driver version is insufficient for CUDA runtime version")
@@ -10721,12 +11108,14 @@ index 02cfe0513466f9f1e78a264eb9a01e360c7542c2..da31dc680f7a9fe6d8b3a1c69af70c31
 +
 +set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_kvmem_product_tests_PROGRAMS
 +  ninfer_serve_options_test ninfer_openai_schema_test ninfer_openai_responses_test
-+  ninfer_openai_responses_store_test ninfer_load_report_test ninfer_resource_manager_test)
++  ninfer_openai_responses_store_test ninfer_load_report_test ninfer_resource_manager_test
++  ninfer_anthropic_schema_test)
 +ninfer_finalize_bundle(ninfer_kvmem_product_tests)
 +ninfer_stage_runtime_dlls(ninfer_kvmem_product_tests)
 +set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_refresh_contract_tests_PROGRAMS
 +  ninfer_bench_support_test ninfer_tool_call_parser_test ninfer_structured_output_test
-+  ninfer_resource_manager_test ninfer_qwen3_5_frontend_test ninfer_speculative_round_test)
++  ninfer_resource_manager_test ninfer_qwen3_5_frontend_test ninfer_speculative_round_test
++  ninfer_qwen3_5_structured_round_test)
 +ninfer_finalize_bundle(ninfer_refresh_contract_tests)
 +ninfer_stage_runtime_dlls(ninfer_refresh_contract_tests)
 +add_test(NAME ninfer_openai_image_detail_chat_test
@@ -10748,22 +11137,23 @@ index 02cfe0513466f9f1e78a264eb9a01e360c7542c2..da31dc680f7a9fe6d8b3a1c69af70c31
 +ninfer_finalize_bundle(ninfer_kvmem_nvfp4_tests)
 +ninfer_stage_runtime_dlls(ninfer_kvmem_nvfp4_tests)
 diff --git a/tests/README.md b/tests/README.md
-index 2a5ca0eb92d7c45741eaad388f0d2f9f789b00c7..7d6a8cc421eddc5e0d1504794e4d694eb248f96b 100644
+index 2a5ca0eb92d7c45741eaad388f0d2f9f789b00c7..2be1812fb7e033aaa502bb73383fd26bfc28e889 100644
 --- a/tests/README.md
 +++ b/tests/README.md
-@@ -22,6 +22,11 @@ benchmark-report, and external protocol behavior. Repository verification princi
+@@ -22,6 +22,12 @@ benchmark-report, and external protocol behavior. Repository verification princi
    consumer.
  
  Tests are grouped by observable risk, not by mirroring every source file or class.
-+The standalone `ninfer_memory_frontend --tool-output-only` checks default constrained tool
-+publication and continuation/truncation, plus explicitly unconstrained quoted-marker handling.
++The standalone `ninfer_memory_frontend --tool-output-only` checks explicit basic tool publication,
++default auto parsing without a grammar, default none text-only publication, none with JSON,
++continuation/truncation and unconstrained quoted-marker handling.
 +`ninfer_tool_constraints_test` covers grammar selection, strict codecs, non-strict normalization
 +and protocol translation. `ninfer_tool_call_parser_test` retains the supported free-generation
 +decoder checks used by `tool_constraints:"auto"` when no explicit constraint requires the grammar.
  `CMakeLists.txt` includes explicit registrations from `cmake/`, `artifact/`, `models/qwen3_5/`
  and `ops/`. Registration helpers live in `cmake/NinferTests.cmake`; included manifests keep
  executables and CTest working directories under `build/tests/`.
-@@ -409,6 +414,113 @@ boundary preservation. `--concurrency 8 --draft-tokens 15 --modes dflash2` exerc
+@@ -409,6 +415,113 @@ boundary preservation. `--concurrency 8 --draft-tokens 15 --modes dflash2` exerc
  the largest draft and batch dimensions. A separate DFlash-capable artifact can use `--modes dflash`.
  The server is terminated on success or failure. An occupied test port causes the test to stop.
  
@@ -10877,7 +11267,7 @@ index 2a5ca0eb92d7c45741eaad388f0d2f9f789b00c7..7d6a8cc421eddc5e0d1504794e4d694e
  ## Container build cache
  
  Check the Dockerfile's incremental-build and configuration-invalidation behavior without compiling
-@@ -525,3 +637,147 @@ The physical selection disables device-profile calibration (`device_profile=off`
+@@ -525,3 +638,147 @@ The physical selection disables device-profile calibration (`device_profile=off`
  correctness gate. It does not qualify device-profile performance. The runner must record distinct
  GPU UUIDs for CUDA devices 0 and 1. A `0,0` result does not qualify two physical GPUs. On `sm_75`,
  use the pinned groupwise Qwen3.6 artifact; NVFP4 expert banks are not supported.
@@ -14949,7 +15339,7 @@ index d439f60af8281a67ae30852cb78915e417f8b242..f73303ed76881c1fb6a5682967f50763
              while (first < want.size() && first < got.size() && want[first] == got[first]) { ++first; }
              std::cerr << "  first difference at token " << first << '\n';
 diff --git a/tests/models/qwen3_5/test_frontend.cpp b/tests/models/qwen3_5/test_frontend.cpp
-index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fec3561062 100644
+index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b41fc3fcc2 100644
 --- a/tests/models/qwen3_5/test_frontend.cpp
 +++ b/tests/models/qwen3_5/test_frontend.cpp
 @@ -2102,7 +2102,7 @@ int test_terminal_flush(const Frontend& frontend) {
@@ -14961,7 +15351,16 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
      const Frontend frontend = make_frontend(resources());
  
      ninfer::ChatMessage message;
-@@ -2120,15 +2120,17 @@ int test_structured_tool_output() {
+@@ -2115,20 +2115,25 @@ int test_structured_tool_output() {
+     input.options.tool_jsons.push_back(
+         R"({"type":"function","function":{"name":"TaskUpdate","parameters":{"type":"object","properties":{"taskId":{"type":"string"},"enabled":{"type":"boolean"},"count":{"type":"integer"}},"required":["taskId"]}}})");
+     auto prompt = frontend.prepare(std::move(input));
++    ninfer::ToolChoice basic;
++    basic.constraints = ninfer::ToolConstraintMode::Basic;
+     auto session =
+-        frontend.make_output_session(prompt, {}, ninfer::OutputOptions{.tool_name_max_length = 64});
++        frontend.make_output_session(prompt, {}, ninfer::OutputOptions{.tool_name_max_length = 64},
++                                     {}, {}, basic);
  
      const std::string generated =
          "Calling.  \n<tool_call>\n<function=TaskUpdate>\n<parameter=taskId>\n1\n"
@@ -14985,7 +15384,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
                        "frontend did not hide the terminal tool-call suffix");
      const std::vector<ninfer::GeneratedToolCall> calls = session.take_tool_calls();
      failures += check(calls.size() == 1 && calls.front().name == "TaskUpdate",
-@@ -2148,6 +2150,23 @@ int test_structured_tool_output() {
+@@ -2148,6 +2153,73 @@ int test_structured_tool_output() {
                                !arguments.contains("enabled") && arguments.at("count") == "many",
                            "frontend did not preserve normalized tool arguments");
      }
@@ -14994,7 +15393,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
 +    std::string compact = generated;
 +    const auto empty = compact.find("<parameter=enabled>\n\n");
 +    compact.erase(empty + std::string_view("<parameter=enabled>\n").size(), 1);
-+    auto compact_session = frontend.make_output_session(prompt, {});
++    auto compact_session = frontend.make_output_session(prompt, {}, {}, {}, {}, basic);
 +    tokens = fixture_tokenizer().encode(compact);
 +    tokens.push_back(6);
 +    (void)compact_session.preview_model(tokens, static_cast<std::uint32_t>(tokens.size() + 1U),
@@ -15006,10 +15405,60 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
 +                          compact_session.tool_call_parse_diagnostics() ==
 +                              session.tool_call_parse_diagnostics(),
 +                      "compact empty parameter consumed the next argument or lost diagnostics");
++    ninfer::ToolChoice none = basic;
++    none.mode = ninfer::ToolChoiceMode::None;
++    auto no_tools = frontend.make_output_session(prompt, {}, {}, {}, {}, none);
++    const auto none_grammar = no_tools.grammar_state();
++    failures += check(bool(none_grammar), "explicit basic none lost its prohibition grammar");
++    if (none_grammar) {
++        bool rejected = false;
++        try { none_grammar->fork()->accept(fixture_tokenizer().encode(generated)); }
++        catch (const std::logic_error&) { rejected = true; }
++        failures += check(rejected, "explicit basic none admitted tool markup as text");
++        none_grammar->fork()->accept(fixture_tokenizer().encode("Tools are disabled."));
++    }
++
++    // The default auto path keeps native call parsing, including the empty-argument fix,
++    // without constructing a generation grammar. Use real special-token delimiters too.
++    auto native = frontend.make_output_session(
++        prompt, {}, ninfer::OutputOptions{.preserve_special_tokens = true});
++    failures += check(!native.grammar_state(), "default auto unexpectedly enabled tool grammar");
++    (void)native.preview_model(tokens, static_cast<std::uint32_t>(tokens.size() + 1U),
++                               ninfer::FinishReason::OutputLimit);
++    (void)native.commit_preview();
++    const auto native_calls = native.take_tool_calls();
++    failures += check(calls.size() == 1 && native_calls.size() == 1 &&
++                          native_calls.front().name == "TaskUpdate" &&
++                          native_calls.front().arguments_json == calls.front().arguments_json,
++                      "default auto lost native call parsing or argument normalization");
++
++    none.constraints = ninfer::ToolConstraintMode::Automatic;
++    auto free_none = frontend.make_output_session(
++        prompt, {}, ninfer::OutputOptions{.preserve_special_tokens = true}, {}, {}, none);
++    failures += check(!free_none.grammar_state(), "default none unexpectedly enabled tool grammar");
++    (void)free_none.preview_model(tokens, static_cast<std::uint32_t>(tokens.size() + 1U),
++                                  ninfer::FinishReason::OutputLimit);
++    const auto none_output = free_none.commit_preview();
++    failures += check(free_none.take_tool_calls().empty() &&
++                          channel_text(none_output, ninfer::OutputChannel::Content) == compact,
++                      "default none decoded calls or discarded the model's plain text");
++
++    const ninfer::StructuredOutputOptions json{ninfer::StructuredOutputKind::JsonObject, {}, false};
++    auto json_none = frontend.make_output_session(prompt, {}, {}, {}, json, none);
++    const auto json_grammar = json_none.grammar_state();
++    failures += check(bool(json_grammar), "default none lost explicit JSON grammar");
++    if (json_grammar) {
++        bool rejected = false;
++        const auto call_only = compact.substr(compact.find("<tool_call>"));
++        try { json_grammar->fork()->accept(fixture_tokenizer().encode(call_only)); }
++        catch (const std::logic_error&) { rejected = true; }
++        failures += check(rejected, "none plus JSON admitted a tool-call alternative");
++        json_grammar->fork()->accept(fixture_tokenizer().encode("{\"ok\":true}"));
++    }
      return failures;
  }
  
-@@ -2213,6 +2232,69 @@ ninfer::models::qwen3_5::PreparedPrompt thinking_prompt(const Frontend& frontend
+@@ -2213,6 +2285,69 @@ ninfer::models::qwen3_5::PreparedPrompt thinking_prompt(const Frontend& frontend
      return frontend.prepare(std::move(input));
  }
  
@@ -15079,7 +15528,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
  int test_reasoning_close_requires_boundary(const Frontend& frontend) {
      auto prompt  = thinking_prompt(frontend);
      auto session = frontend.make_output_session(prompt, {});
-@@ -2293,7 +2375,7 @@ int test_thinking_budget_ignores_quoted_close(const Frontend& frontend) {
+@@ -2293,7 +2428,7 @@ int test_thinking_budget_ignores_quoted_close(const Frontend& frontend) {
      return failures;
  }
  
@@ -15088,7 +15537,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
      const Frontend frontend = make_frontend(resources());
  
      ninfer::ChatMessage message;
-@@ -2306,8 +2388,10 @@ int test_tool_marker_after_quoted_marker() {
+@@ -2306,8 +2441,10 @@ int test_tool_marker_after_quoted_marker() {
      input.options.tool_jsons.push_back(
          R"({"type":"function","function":{"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}})");
      auto prompt = frontend.prepare(std::move(input));
@@ -15101,7 +15550,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
  
      const std::string quoted =
          "<tool_call>\\n<function=shell>\\n<function=command>\\nbroken\\n</parameter>\\n"
-@@ -2412,6 +2496,33 @@ int test_thinking_budget_control(const Frontend& frontend) {
+@@ -2412,6 +2549,33 @@ int test_thinking_budget_control(const Frontend& frontend) {
                            session.model_token_budget_remaining(17) == 17,
                        "thinking control accounting or post-close license is incorrect");
  
@@ -15135,7 +15584,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
      const auto content_decision = session.preview_model(std::array<ninfer::TokenId, 1>{0}, 17,
                                                          ninfer::FinishReason::OutputLimit);
      failures +=
-@@ -2433,17 +2544,21 @@ int test_thinking_budget_control(const Frontend& frontend) {
+@@ -2433,17 +2597,21 @@ int test_thinking_budget_control(const Frontend& frontend) {
                            !natural_session.thinking_stats().applied,
                        "natural thinking close left control armed");
  
@@ -15168,7 +15617,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
  
      auto limit_prompt  = thinking_prompt(frontend);
      auto limit_session = frontend.make_output_session(limit_prompt, {}, {},
-@@ -3208,6 +3323,40 @@ int test_media_preparation_cancellation() {
+@@ -3208,6 +3376,40 @@ int test_media_preparation_cancellation() {
      return check(false, "cancelled media preparation completed successfully");
  }
  
@@ -15209,7 +15658,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
  int test_ngram_proposal_only_sources() {
      ninfer::models::qwen3_5::FrontendOptions options;
      options.vision_enabled        = false;
-@@ -3394,29 +3543,25 @@ int test_forced_tool_call(const Frontend& frontend) {
+@@ -3394,29 +3596,25 @@ int test_forced_tool_call(const Frontend& frontend) {
      };
  
      const ForcedOutcome complete =
@@ -15251,7 +15700,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
      return failures;
  }
  
-@@ -3554,11 +3699,32 @@ int test_gemma_forced_tool_call() {
+@@ -3554,11 +3752,32 @@ int test_gemma_forced_tool_call() {
      return failures;
  }
  
@@ -15285,7 +15734,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
      failures += test_ngram_proposal_only_sources();
      failures += test_tokenizer_config_merge();
      failures += test_bpe_merge_order();
-@@ -3595,10 +3761,12 @@ int main() {
+@@ -3595,10 +3814,12 @@ int main() {
      failures += test_cross_round_stop(frontend);
      failures += test_same_token_stop_priority(frontend);
      failures += test_terminal_flush(frontend);
@@ -15300,7 +15749,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..267ac0f6af45a501a9a7c1d65563e8fe
      failures += test_reasoning_close_requires_boundary(frontend);
      failures += test_reasoning_close_resolves_at_terminal(frontend);
      failures += test_thinking_budget_control(frontend);
-@@ -3619,4 +3787,8 @@ int main() {
+@@ -3619,4 +3840,8 @@ int main() {
      failures += test_gemma_media_layout();
      failures += test_gemma_forced_tool_call();
      return failures == 0 ? 0 : 1;
@@ -15376,10 +15825,10 @@ index 5210c7c6a53926cd360203f67fed844577f4670f..94a61a649b1211d00ecee30b27af2734
          std::cout << "model config, binding, resources and Use checks passed\n";
 diff --git a/tests/models/qwen3_5/test_tool_constraints.cpp b/tests/models/qwen3_5/test_tool_constraints.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ee965ac359a0f3706a519320e86a6de0441980cd
+index 0000000000000000000000000000000000000000..a4190cd9f32dd3335ef523d275f0ba3f5a7be4d2
 --- /dev/null
 +++ b/tests/models/qwen3_5/test_tool_constraints.cpp
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,217 @@
 +#include "models/qwen3_5/frontend/tool_call_parser.h"
 +#include "models/qwen3_5/frontend/tool_grammar.h"
 +#include "text/structured_output.h"
@@ -15411,6 +15860,15 @@ index 0000000000000000000000000000000000000000..ee965ac359a0f3706a519320e86a6de0
 +        R"({"type":"function","function":{"name":"alpha","parameters":{"type":"object","properties":{"s":{"type":"string"},"n":{"type":"integer"}}}}})",
 +        R"({"type":"function","function":{"name":"beta","parameters":{"type":"object","properties":{}}}})"};
 +    auto base = fi::build_tool_call_output_contract(declarations, true);
++    ToolChoice basic; basic.constraints = ToolConstraintMode::Basic;
++    require(!fi::select_tool_call_contract(base, {})->constrained,
++            "default auto retains native parsing without a generation grammar");
++    ToolChoice free_none; free_none.mode = ToolChoiceMode::None;
++    require(!fi::select_tool_call_contract(base, free_none),
++            "default none neither constrains generation nor decodes tool calls");
++    const auto forced = fi::build_tool_call_output_contract(declarations, true, "beta");
++    require(fi::select_tool_call_contract(forced, {})->constrained,
++            "a prompt with a forced opener retains constraints under the default auto mode");
 +    const std::string call = "<tool_call>\n<function=beta>\n</function>\n</tool_call>";
 +    auto compile = [&](ToolChoice choice, StructuredOutputOptions body = {}, std::string close = "") {
 +        auto contract = fi::select_tool_call_contract(base, choice);
@@ -15430,8 +15888,8 @@ index 0000000000000000000000000000000000000000..ee965ac359a0f3706a519320e86a6de0
 +    require(!accepts(required, ""), "required blocks EOS before a tool call");
 +    require(!accepts(required, "text"), "required must block text and early EOS");
 +    require(!accepts(required, "<tool_call>\n<function=unknown>"), "declared names only");
-+    require(accepts({}, "prefix " + call), "auto permits text before first call");
-+    require(!accepts({}, call + "garbage"), "terminal call sequence forbids trailing text");
++    require(accepts(basic, "prefix " + call), "basic auto permits text before first call");
++    require(!accepts(basic, call + "garbage"), "basic terminal call sequence forbids trailing text");
 +    required.allowed_names = std::vector<std::string>{"alpha"};
 +    require(!accepts(required, call), "allowed subset enforced");
 +    required.allowed_names = std::vector<std::string>{"beta"};
@@ -15442,20 +15900,20 @@ index 0000000000000000000000000000000000000000..ee965ac359a0f3706a519320e86a6de0
 +    require(!accepts(allowed_auto, call), "auto also blocks tools outside allowed subset");
 +    required.allowed_names.reset(); required.parallel = false;
 +    require(!accepts(required, call + "\n" + call), "parallel=false enforced in generation");
-+    ToolChoice none; none.mode = ToolChoiceMode::None;
++    ToolChoice none = basic; none.mode = ToolChoiceMode::None;
 +    require(accepts(none, "normal answer"), "none admits text");
 +    require(!accepts(none, call), "none blocks tool marker");
 +    require(accepts(required, "reasoning</think>\n\n" + call, true, {}, "</think>"), "required with thinking");
 +    StructuredOutputOptions json{StructuredOutputKind::JsonSchema,
 +        R"({"type":"object","properties":{"ok":{"const":true}},"required":["ok"],"additionalProperties":false})", true};
-+    require(accepts({}, "{\"ok\":true}", true, json), "JSON body composed with auto tools");
-+    require(accepts({}, call, true, json), "JSON body tool alternative");
++    require(accepts(basic, "{\"ok\":true}", true, json), "JSON body composed with basic auto tools");
++    require(accepts(basic, call, true, json), "JSON body tool alternative");
 +    require(!accepts(required, "{\"ok\":true}", true, json), "required overrides JSON body alternative");
 +    require(accepts(none, "{\"ok\":true}", true, json), "none retains JSON body constraint");
 +    StructuredOutputOptions unique{StructuredOutputKind::JsonSchema,
 +        R"({"type":"array","items":{"type":"string"},"uniqueItems":true})",false};
-+    require(accepts({}, "[\"a\",\"b\"]",true,unique), "composed final JSON keeps uniqueItems validator");
-+    require(!accepts({}, "[\"a\",\"a\"]",true,unique), "composed final JSON blocks duplicate strings");
++    require(accepts(basic, "[\"a\",\"b\"]",true,unique), "composed final JSON keeps uniqueItems validator");
++    require(!accepts(basic, "[\"a\",\"a\"]",true,unique), "composed final JSON blocks duplicate strings");
 +    auto transaction = compile(required);
 +    std::vector<std::uint32_t> before(9), after(9), speculative(27);
 +    transaction->fill_masks(before, {});
@@ -15502,13 +15960,13 @@ index 0000000000000000000000000000000000000000..ee965ac359a0f3706a519320e86a6de0
 +    require(arguments["s"]=="  abc  " && arguments["n"]==3 && arguments["o"]["ok"]==true, "strict codecs preserve exact argument values");
 +    fi::ToolCallOutputDecoder truncated(typed,128); (void)truncated.feed(strict_call.substr(0, strict_call.size()-1));
 +    require(truncated.finish().tool_calls.empty(), "truncated call never repaired or invented");
-+    auto parallel = fi::select_tool_call_contract(base, {});
++    auto parallel = fi::select_tool_call_contract(base, basic);
 +    fi::ToolCallOutputDecoder partial(parallel,128); (void)partial.feed(call+"\n<tool_call>\n<function=alpha>\n");
 +    require(partial.finish().tool_calls.size()==1, "keep completed call before truncated second call");
 +    const std::vector<std::string> non_strict_defs = {
 +        R"({"function":{"name":"normalize","parameters":{"type":"object","properties":{"enabled":{"type":"boolean"},"count":{"type":"integer"}}}}})"};
 +    const auto non_strict = fi::select_tool_call_contract(
-+        fi::build_tool_call_output_contract(non_strict_defs, true), {});
++        fi::build_tool_call_output_contract(non_strict_defs, true), basic);
 +    for (const std::string empty_value : {std::string("\n"), std::string("\n\n")}) {
 +        const auto value = "<tool_call>\n<function=normalize>\n<parameter=enabled>" + empty_value +
 +            "</parameter>\n<parameter=count>\nmany\n</parameter>\n</function>\n</tool_call>";
@@ -15552,6 +16010,7 @@ index 0000000000000000000000000000000000000000..ee965ac359a0f3706a519320e86a6de0
 +               {"tools",Json::array({Json::parse(declarations[0]),Json::parse(declarations[1])})}, {"tool_choice","required"}};
 +    auto cr=parse_chat_completion_request(chat,limits).generation;
 +    require(cr.tool_choice.mode==ToolChoiceMode::Required && cr.tools.size()==2, "Chat required preserves declarations");
++    require(cr.tool_choice.constraints==ToolConstraintMode::Automatic, "Chat defaults to auto tool constraints");
 +    chat["tool_choice"]={{"type","allowed_tools"},{"allowed_tools",{{"mode","required"},{"tools",Json::array({{{"type","function"},{"name","beta"}}})}}}};
 +    cr=parse_chat_completion_request(chat,limits).generation;
 +    require(cr.tools.size()==2 && cr.tool_choice.allowed_names->size()==1, "Chat allowed selection keeps prompt declarations");
@@ -15566,10 +16025,15 @@ index 0000000000000000000000000000000000000000..ee965ac359a0f3706a519320e86a6de0
 +    Json responses={{"model","test"},{"input","hi"},{"tools",Json::array({{{"type","function"},{"name","typed"},{"strict",true},{"parameters",Json::parse(strict_def[0])["function"]["parameters"]}}})},{"tool_choice","required"},{"tool_constraints","basic"}};
 +    auto rr=parse_openai_responses_create_request(responses,limits);
 +    require(rr.prompt.generation.tools[0].strict && rr.prompt.generation.tool_choice.mode==ToolChoiceMode::Required, "Responses strict and required transport");
++    responses.erase("tool_constraints");
++    rr=parse_openai_responses_create_request(responses,limits);
++    require(rr.prompt.generation.tool_choice.constraints==ToolConstraintMode::Automatic,
++            "Responses defaults to auto tool constraints");
 +    Json anth={{"model","test"},{"max_tokens",128},{"messages",Json::array({{{"role","user"},{"content","hi"}}})},
 +               {"tools",Json::array({{{"name","alpha"},{"input_schema",Json::object()}},{{"name","beta"},{"input_schema",Json::object()}}})},{"tool_choice",{{"type","any"}}}};
 +    auto ar=parse_anthropic_messages_request(anth,limits).generation;
 +    require(ar.tool_choice.mode==ToolChoiceMode::Required && ar.tools.size()==2, "Anthropic any over multiple tools");
++    require(ar.tool_choice.constraints==ToolConstraintMode::Automatic, "Anthropic defaults to auto tool constraints");
 +    anth["tool_choice"]={{"type","tool"},{"name","beta"}};
 +    ar=parse_anthropic_messages_request(anth,limits).generation;
 +    options=to_request_options(ar,server,resolve_prompt_semantics(ar,server),true);
