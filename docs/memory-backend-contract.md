@@ -79,6 +79,33 @@ Linux 目前只有公共层 WSL/GCC 证据，没有原生 Linux CUDA 推理验�
 
 `MemorySession::prepare_reselect` 只调用既有 `pick_topk_blocks`，核对 policy/native catalog 的粒度、块身份和有效长度后，生成 `WorkingSetPlan`，不调用会修改旧 remap 元数据的 `set_selection`。选块算法没有复制。原生兼容桥尚在使用的旧执行元数据暂时保留。
 
+## LCP 与前缀 checkpoint
+
+主线的公共前缀恢复核心来自 `9d88c5c`，接入 llama.cpp 和 NInfer。
+`prefix_checkpoint.hpp` 统一恢复边界、留点规划与 `CheckpointCatalog`，不解释原生状态字节。
+适配器仍须证明 token、媒体、位置、KV/统计及执行状态在同一已提交边界有效。
+
+当旧 checkpoint 晚于本轮最长公共前缀（LCP）时，不能直接恢复它；公共层仍保留已观察到的
+LCP，作为重新计算时捕获复用锚点的提示。`prefix_anchor` 将提示限制在恢复点与 query 之间，
+避开不可拆分的媒体组。捕获完成后才能发布，捕获失败允许后续请求重新计算。
+
+`ReuseAnchor` 服务下一轮尾部改写，`QueryReplay` 服务本轮 query 重放；相同边界可共享状态。
+新锚点替代旧锚点的保留优先级，后续 endpoint 不应将它挤出目录。回退撤销更晚的目录项，
+活跃请求持有的状态引用继续存活。目录默认保留 llama 四项、NInfer 五个用途槽；共享状态按
+所有者地址只计一次。checkpoint 及统计附件仍独立于 KV payload 的 H 预算计量。
+
+候选选择取适配器校验通过的最大合法 frontier；NInfer 在相同 frontier 保留 Endpoint 优先规则。
+会话归属、分支规则、原生 KV 格式和 MTP 接受边界继续由后端负责。llama 多会话的 continuation
+判定仍可能让请求走 fresh。会话选择在持锁的实际 admission 中重新计算候选的 token/media LCP，
+并将它作为本次冷算的捕获提示传给 driver；已绑定的 conversation id 仍限制候选，显式 reset
+清除提示。该提示不随会话状态交换、不参与恢复授权，也不承诺任意历史编辑首次就能复用。
+本功能沿现有 KVMem 路径自动工作，没有新增启动参数或 UI 开关。
+
+验证入口：公共层 `prefix_checkpoint_test`；llama 的 `kvmem-prefix-reuse-regression` 在没有
+`KVMEM_TEST_MODEL`/`KVMEM_TEST_GPU` 时以 77 跳过，有模型时运行六轮尾部改写 HTTP 回归；
+NInfer 的 `ninfer_p4_history` 提供 `prefix-anchor` 与 `prefix-anchor-ssd` 模式，检查原生状态、
+复用进度和取消恢复。SSD 模式还要求实际发生冷 KV 读写，不能用仅开启参数代替验收。
+
 ## 职责
 
 | 对象 | 负责 | 引擎继续负责 |
@@ -89,6 +116,7 @@ Linux 目前只有公共层 WSL/GCC 证据，没有原生 Linux CUDA 推理验�
 | `PayloadLayout` / `NativeKvPayload` | 原生 bytes、所有 planes、stride、alignment、格式版本 | 解释量化编码，执行实际复制 |
 | `MemoryBackend` / `MemoryTransfer` | 必须实现的适配器契约 | 唯一的设备分配器、reservation、stream、event 和 graph |
 | `CheckpointIdentity` | 精确检查后端/模型/布局/会话/执行历史/frontier | checkpoint 字节、GDN 还原与 query 重放 |
+| `CheckpointCatalog` | 最大合法恢复点、用途、目录保留及数量/字节约束 | 原生状态、完整前缀证明、状态捕获/恢复和安全执行边界 |
 
 新后端不能继承旧 `KvMemBackend` 的默认空复制来表示已支持。`MemoryBackend`、`MemoryTransfer` 全部必需操作均为纯虚函数；缺失 backend、返回空 transaction 或缺少所需能力会明确失败。
 
