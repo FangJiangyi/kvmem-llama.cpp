@@ -2,6 +2,9 @@
 
 日期：2026-10-07。状态：**M0–M6 迁移完成，核心测试通过**。
 
+2026-10-17 的 `08fd7019925f` 刷新单独记录在本文末尾。上述完成状态和下文旧版本表只对应
+10 月 7 日迁移，不代表刷新后的基线已经完成相同覆盖；当前源码来源以 `backends/versions.json` 为准。
+
 本代码分支收录已完成验收的迁移源码、固定上游版本和集成补丁。原混合工作区保留；迁移阶段没有覆盖原后端源码或替换运行服务。后续 Q2 制品验证和服务配置见下文。实施过程和恢复方法见 [迁移计划](ninfer-all-migration-plan.md)。构建产物、模型、个人 DSH 配置和原始会话日志不随源码提交。
 
 ## 固定版本与可复现性
@@ -114,3 +117,103 @@ Ryan 原有 strict/mixed 内存策略已在 M1 保留和适配，default/strict/
 DSH 默认连接指向该 Q2 模型。使用已安装的 DSH 适配器完成两次短流式请求，验证工具调用、模拟工具结果与 assistant replay。此检查覆盖模型接口和工具协议，**不覆盖真实 PowerShell 执行器**。随后独立诊断发现 DSH Desktop 0.2.0-rc.2 的 Windows 沙箱 PTY 启动失败；普通 PowerShell PTY 和带有效输入管道的同一只读沙箱命令可执行，沙箱 PTY 子进程以 127 退出。具体原生调用尚未确认，未改动 DSH 代码或文件保护规则，也没有把它归为 KVMem 推理回归。
 
 后续原始证据在操作者本机 `q2-real-model-20261007/`：`test-results.json`、`service/live-check.json`、`dsh/adapter-verification.json` 和 `dsh/pty-diagnosis-summary.json`。没有运行性能测试或新增长上下文扫描。
+
+## 2026-10-17：Qwen3.8-27B 上游刷新（本地验收完成）
+
+工作分支 `feat/ninfer-all-27b-refresh` 基于 master `27a221e`，将 NInfer 固定到
+`08fd7019925f43b4b42539400afd461b70f7144a`。本轮只验证 Qwen3.8-27B Dense，保留 LCP、
+LRFU、RAM/SSD、MTP/ngram、工具和 reasoning 补丁及公共 CLI。35B MoE、Flash-Next、Gemma 4 的
+KVMem 接入不在本轮范围；独立模型族及 host/disk expert 与 KVMem 的未适配组合明确拒绝。
+
+原始 172 文件补丁三方应用后有 39 个文本冲突；退役/移动文件不恢复。上游 `unique_strings`
+已演进为 `string_constraints`，工具语法直接使用新类和新构造参数。原生模式保留本地 mixed/strict
+驻留策略（KVMem 仍只允许 default），普通分配采用上游新的 CUDA/WDDM 实现；未恢复旧 D3D12 arena。
+
+两套程序使用相同 VS2022/MSVC 14.44、CUDA 13.2.86、Release `120a`/SM120 native，8 并行构建。
+原版引擎源码未改；原版 benchmark 只通过公开 Aggregate observation 启用阶段计时，并在 JSON
+增加已有 wall-time 字段和输出 token，测量方式与整合版相同。CPU 转换检查 11 项已通过；
+原版和整合版 worker、benchmark 均已完成编译。24 组定向运行检查的最终结果全部通过，
+覆盖 CLI/serve 参数、容量、字符串约束、工具语法、frontend、耦合 MTP、Chat/Responses、
+load report、mean-K、INT8 prompt 与量化 attention 深度、历史恢复、LCP/SSD、随机采样 MTP，
+以及 RAM/SSD C2 并发。量化 attention 使用独立数值参考，覆盖 head16/24、8192/61440 深度及
+边界；真实历史测试启用原生 KV/GDN 字节校验。实际 HTTP health、props、models、生成、
+重复生成和 stats 通过，worker 正常退出；重复生成复用 31/32 个输入 token。
+
+本轮实际失败及处理：
+
+| 项目 | 结论与验证 |
+|---|---|
+| 工具结构化编译 API 变化 | 改用上游 StringConstraintState 和新的 GrammarState 构造参数；完整 worker 编译及结构化/工具测试通过。 |
+| GDN GGUF 控制矩阵 | 适配初版遗漏旧补丁对 Q2 等已注册 GGUF 格式的支持；测试改为直接调用生产 gdn_control_source 后复现失败，统一解码入口并删除重复旧 helper，11 项转换测试通过。 |
+| 图像 detail 协议 | 保留原 KVMem 已支持的 original→auto 别名，采用上游 low/high 的实际语义；内部 unknown 状态改用 optional 区分空字符串与缺失，严格模式拒绝空/未知值，Chat/Responses 检查通过。这里只验证协议，不声明本轮真实 Vision 运行覆盖。 |
+| 取消 prefill 后的旧测试 | 旧主线 LCP binary 同样复现“必须零复用”断言失败。实际完整检查点在 frontier41，取消处理到128；prefix/payload/state 均精确。测试允许合法完整检查点，要求复用不越过已处理输入，完整历史回归通过；未修改生产取消/恢复行为。 |
+| SSD 冷请求的合批断言 | H64 MiB、D512 MiB 下异步读取使冷短回复错开，不能要求冷轮必然合批；冷轮仍检查状态、输出隔离和实际 SSD 写入，热会话仍要求实际合批及取消隔离。最终 cancel-one 为52轮/53行，resume-peers 为11轮/18行，SSD 读约1.02 GB、写约1.40 GB，无错误，资源释放通过。 |
+
+功能性检查按空闲卡选择：小夹具与独立数值检查使用 RTX 5050 Laptop；实际 27B 模型使用
+RTX 5060 Ti。没有把功能运行期间的耗时作为性能结果。
+
+性能方案固定使用 RTX 5060 Ti（`GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`）和同一 IQ3_S 文件，
+INT8 KV、prefill256、Graph。原版 logical ctx 和 Main KV 容量均为 B+G；整合版使用相同 B、G、
+逻辑长度和实际 Main KV 容量。输入 P=B，每次请求 257 个输出（首 token 后计时 256 个），
+不触发容量换页。先测关闭 MTP，再测固定 MTP4/ngram0；自适应 MTP/ngram31 单独列出，
+因为原版校验语料中 248 个 ngram 草稿全部命中，不能把这项复制效果解释为神经 MTP 的普遍速度。
+
+主要指标为 `256 / generation_wall_seconds`；同时保留 Program decode、prompt wall 和整轮耗时，
+避免只计算 Program 执行时间而漏计 Engine/KVMem 工作。每组预热 1 次、正式重复 3 次；
+昂贵的 transfer verification 与长历史换页检查独立运行，不进入同输入性能结果。
+
+两版均用 `--device-profile auto`，实际选择相同的上游内置 RTX 5060 Ti/180 W/2026-10-16
+配置（78 routed keys，catalog `5893cf72e3d60377`）；本机旧 catalog 的个人配置被两版同时忽略。
+关闭 fast-prefill，保持 CUDA Graph；MTP 有效草稿宽度固定为 4，ngram0，不启用 attention window。
+KVMem 为 H12288 MiB、sessions1、LRFU、score-agg=max，不启用 SSD；小预算 sink/recent 各512，
+默认预算 sink12288/recent1024。普通组先测原版、MTP 组先测 KVMem；所有编译和前置功能测试
+已结束，无其他模型同时占用该卡。每个请求都重新处理输入，禁用前缀复用和上下文保留。
+
+### 同输入、同激活历史的结果
+
+下表为生成 wall throughput 的三次均值，括号内为最小–最大值，单位 token/s。
+
+| B / G | 推测设置 | 原版 | KVMem | KVMem 速度变化 |
+|---|---|---|---|---|
+| 2048 / 512 | 关闭 MTP | 31.606（31.602–31.609） | 31.425（31.415–31.433） | −0.57% |
+| 2048 / 512 | 固定 MTP4，ngram0 | 88.646（88.490–88.732） | 87.620（87.503–87.736） | −1.16% |
+| 36864 / 16384 | 关闭 MTP | 28.989（28.984–28.991） | 28.750（28.726–28.786） | −0.83% |
+| 36864 / 16384 | 固定 MTP4，ngram0 | 80.824（80.789–80.845） | 79.979（79.963–80.012） | −1.04% |
+| 2048 / 512 | 自适应 MTP4，ngram31（复制语料，单列） | 314.003（313.335–314.812） | 309.292（308.718–309.634） | −1.50% |
+
+| B / G、推测设置 | 输入 wall token/s：原版 → KVMem | 输入速度变化 | 整轮秒数：原版 → KVMem |
+|---|---|---|---|
+| 2048 / 512，关闭 MTP | 794.112 → 774.234 | −2.50% | 10.679 → 10.792 |
+| 2048 / 512，固定 MTP4/ngram0 | 784.460 → 768.017 | −2.10% | 5.499 → 5.589 |
+| 36864 / 16384，关闭 MTP | 715.430 → 665.985 | −6.91% | 60.361 → 64.265 |
+| 36864 / 16384，固定 MTP4/ngram0 | 711.655 → 663.671 | −6.74% | 54.971 → 58.754 |
+| 2048 / 512，自适应 MTP4/ngram31 | 783.567 → 766.588 | −2.17% | 3.446 → 3.518 |
+
+五个配对的实际 KV 容量、KV payload 字节数、输入和输出数量均相同，每个配对的全部六次
+输出 token 序列一致。小预算容量2560，普通/MTP payload 为86507520/92049408字节；
+默认预算容量53248，普通/MTP payload 为1799356416/1911951360字节。
+另行诊断确认未换页时 `history == logical`，从 P=B 的历史逐步增长，
+两版同时保留相同的 MTP lookahead。G 是物理容量预留，不表示每步已经激活了 B+G 个历史键。
+
+四个普通/神经 MTP 对照的生成速度差为 −0.57%～−1.16%；最明显成本在默认预算的冷输入处理，
+慢6.74%～6.91%，整轮多约3.8～3.9秒。没有把这些较小生成差异称为噪声，也没有声称开销为零。
+这里测的是开启 LRFU、统计与历史管理后的整体差异，尚未逐项 profiling 分解原因。
+
+复制语料的 ngram 每次请求运行8次验证、248/248草稿命中；其300+ token/s不能推广为一般对话或纯神经
+MTP 速度。该组 Program decode 指标原版314.25、KVMem321.98，看似变快，但实际 generation wall
+为314.00、309.29，故以实际 wall 结论报告为慢1.50%。
+
+### 独立换页与边界
+
+同一新版自动 device profile 下，额外使用 B2048/G512、P4096、固定 MTP4/ngram0 做诊断，
+实际发生5次换页，原生 KV payload 与 GDN state 校验均精确；逻辑 frontier4349 对应紧凑 history2045，
+保持物理容量2560。它与上表输入不同且启用昂贵校验，只证明状态/位置正确，不纳入性能配对。
+
+本轮是固定 raw-token 语料、INT8、单5060 Ti的代表性比较，不包含多轮聊天命中收益、长历史选择质量、
+其他 KV 格式、Vision、多卡、35B/MoE/新模型族或 Linux 的重新验收，也未运行远端 CI。
+没有替换现有运行服务或自动合并 master。llama.cpp 和公共 KVMem core 本轮没有修改。
+
+本机源码、构建日志和原始结果位于 `ninfer-upstream-20261017/`，不随源码提交。
+`validation/results.json` 保留失败及修复后结果，按配置名称取最后一次结果；旧 binary 的取消复用失败
+和冷 SSD 未重叠日志也单独保留。`performance/comparison.json`、各组 JSON、metadata/命令及 GPU 采样
+保存完整分布和条件。原版仅报告插桩的精确差异在 `baseline-report-only.patch`；其引擎源码未修改。

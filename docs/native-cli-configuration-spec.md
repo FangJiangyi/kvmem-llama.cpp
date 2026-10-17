@@ -2,7 +2,7 @@
 
 本规范以当前 `llama-kvmem-server.exe` 和 `ninfer-serve.exe` 的命令行接口为基础，覆盖原生参数、KVMem 自有接口、公共配置映射和组合校验。llama.cpp/NInfer 原生参数名称和含义保持不变；KVMem 自己增加的接口统一名称、定义和配置来源，必要时修改两个适配层。启动脚本的现有参数不限制本规范的范围。
 
-基线为 2026 年 10 月 17 日本地 master `37bbe3d`，使用 [版本清单](../backends/versions.json) 固定的后端及 KVMem 补丁。本文已更新本地 KVMem CLI v1 的实现；“公共入口建议”和“UI 建议”仍包含后续配置系统设计。当前范围是 llama.cpp 与 NInfer 的服务 worker；离线实验工具 `llama-kvmem-cli` 和底层 Engine API 不属于本轮服务 CLI 迁移。
+基线为 2026 年 10 月 17 日的 KVMem CLI v1；本轮 `feat/ninfer-all-27b-refresh` 工作分支将 NInfer 更新到 `08fd7019925f`，精确来源以 [版本清单](../backends/versions.json) 为准。“公共入口建议”和“UI 建议”仍包含后续配置系统设计。当前范围是 llama.cpp 与 NInfer 的服务 worker；离线实验工具 `llama-kvmem-cli` 和底层 Engine API 不属于本轮服务 CLI 迁移。
 
 ## 一 接口归属与命名边界
 
@@ -300,12 +300,14 @@ KVMem 新公共配置的默认策略由一份版本化定义提供，模板可�
 | 原生参数 | 输入和原生行为 |
 |---|---|
 | `--help` / `-h` | 作为首参数显示帮助并退出 |
+| `--version` | 显示原生版本和构建标识并退出 |
 | `<model.ninfer>` | 普通模式首个位置参数；路由模式不提供该参数 |
 | `--model-id` | API 模型名，省略使用 artifact metadata.name |
 | `--chat-template` | 模板文件路径，不是模板正文 |
 | `--max-context` | 正整数 tokens，默认 8192 |
 | `--max-concurrency` | 1–8，默认 1 |
 | `--prefill-chunk` | 正的 128 整数倍，默认 1024；KVMem 下不超过 R |
+| `--decode-rounds-per-prefill` | 每个 prefill chunk 之间的 decode 轮次，0–4096；默认 0 按 chunk/64 自动计算；1 为交替执行 |
 | `--default-max-tokens` | 显式正整数；省略按上下文和并发准入预算计算；0 被当前解析器拒绝 |
 | `--device` | CUDA 可见设备索引，默认 0；与 devices 互斥 |
 | `--devices` | 解析器接受 1–8 个有序设备索引；2–8 项启用 layer pipeline；原生还允许重复设备索引用于单卡阶段测试，普通 UI 的显卡选择不产生重复项 |
@@ -313,10 +315,20 @@ KVMem 新公共配置的默认策略由一份版本化定义提供，模板可�
 | `--device-profile` | auto/off/calibrate，默认 auto |
 | `--device-profile-path` | 自定义设备 profile 文件 |
 | `--context-cost-presets` | 自定义上下文成本配置文件 |
-| `--expert-residency` | device/host/disk，默认 device；Flash Next 专用，当前该模型不支持 KVMem |
-| `--expert-cache-mib` | 非负 MiB 或 auto；host/disk 专家缓存，默认 auto；disk 需要缓存 |
+| `--expert-residency` | device/host/disk，默认 device；上游 Qwen MoE、Flash-Next、Gemma MoE 专家放置；当前 KVMem 不接 host/disk 专家路径 |
+| `--expert-cache-mib` | 非负 MiB 或 auto；host/disk 常驻专家缓存，默认 auto；Qwen MoE 的 0 只保留层 bank，Flash-Next disk 模式仍需要缓存 |
+| `--expert-misses` | Flash-Next 原生 staged/mapped 专家缺失处理；默认 staged；不作为公共 KV 设置 |
+| `--expert-dma-share` | Flash-Next 保留的 CPU/GPU 专家实验比例，0–1，默认 1；本轮不扩展 CPU 专家执行，也不接 KVMem |
+| `--expert-cpu-threads` | 上述原生专家实验的 CPU 线程，1–256，默认自动 |
+| `--expert-cache-adaptive` | 原生专家实验的动态缓存替换开关 |
+| `--expert-profile` / `--expert-profile-out` | 原生专家计数配置的读取/记录路径 |
 | `--ngram-table` | Flash Next 的模型 n-gram 表文件；不同于推测解码 ngram |
-| `--ngram-ram` | 将模型 n-gram 表加载到 RAM |
+| `--ngram-residency` | Flash-Next 模型表的 disk/ram/ram-hot，默认 disk；上游已用 `--ngram-residency ram` 替代旧 `--ngram-ram` |
+| `--ngram-io` | 模型表文件的 buffered/direct/mmap，默认 buffered |
+| `--ngram-io-depth` | 模型表并行行读取数，1–1024，默认 64 |
+| `--ngram-hot-profile` | ram-hot 热行配置，覆盖表内配置 |
+| `--ngram-ram-mib` | 模型表的 RAM 行与索引预算；disk 默认 0，ram-hot 默认 4096 MiB；不是 KVMem H |
+| `--ngram-lock` | ram/ram-hot 下锁定表行的物理内存；受系统权限约束 |
 | `--no-ngram-table` | 禁用模型 n-gram 表的原生实验选项；保留专属入口 |
 
 ### KVMem
@@ -361,7 +373,8 @@ KVMem 新公共配置的默认策略由一份版本化定义提供，模板可�
 | `--rope-scaling-factor` | 线性插值因子 1–32；默认 1 关闭；不是 YaRN 因子的别名 |
 | `--rope-scaling-original-context` | 线性插值阈值，默认模型原生窗口 |
 | `--cuda-memory-policy` | default/mixed/strict/strict-RESERVE-STEP；默认 default；当前 KVMem 只允许 default |
-| `--wddm-evictable-budget` | 需要 Windows D3D12 构建的原生预算模式；不可视为普通跨平台开关 |
+| `--wddm-evictable-budget` | 新基线的 Windows 原生容量预算：普通 CUDA 分配并在启动时提交；不再依赖旧 D3D12 arena，不可与 mixed/strict 混用；KVMem 仍使用显式 B+G 容量 |
+| `--gpu-clock-floor` | 原生请求运行期间的 GPU 最低 graphics clock（MHz）；默认关闭，驱动权限不足时给出诊断；不是 KV 预算参数 |
 
 ### 原生上下文缓存
 
@@ -376,7 +389,10 @@ KVMem 新公共配置的默认策略由一份版本化定义提供，模板可�
 | `--device-state-slots` | checkpoint 的额外设备槽位，默认并发数；catalog 专用 |
 | `--host-state-slots` | Host checkpoint 槽位，默认 8；catalog 专用 |
 | `--host-kv-mib` | Host 原生缓存 KV，默认 8192 MiB；catalog 专用 |
-| `--host-cache-mib` | 原生缓存 Host 总预算，默认 8192 MiB；0 仅设备缓存；不等于 KVMem H |
+| `--host-cache-mib` | 原生缓存 Host 总预算，默认 8192 MiB；auto 按加载权重后的可用内存计算；0 仅设备缓存；不等于 KVMem H |
+| `--host-cache-reserve-mib` | auto 时为后续增长保留的 Host 内存，默认 3072 MiB |
+| `--host-cache-max-mib` | auto Host 预算上限；不是 KVMem H |
+| `--host-cache-percent` | auto Host 预算上限占整机内存的百分比，1–100 |
 | `--max-private-continuations` | 私有 continuation 目录规模，默认 2×并发；catalog 专用 |
 | `--max-shared-prefixes` | 共享前缀规模，默认 max(并发,7)；catalog 专用 |
 | `--max-long-anchors-per-continuation` | 每 continuation 的长锚点上限，默认 2，自动锚点模式为 4 |
@@ -411,7 +427,9 @@ KVMem 新公共配置的默认策略由一份版本化定义提供，模板可�
 |---|---|
 | `--spec` | mtp/dflash/dflash2；省略关闭；KVMem 只允许 mtp |
 | `--draft-tokens` | 启用推测解码时 1–15；省略为 0，不能只写 spec 而漏掉有效草稿数量 |
-| `--lm-head-draft` | 使用优化的 proposal head；依赖推测解码 |
+| `--lm-head-draft` | 使用优化的 proposal head；有该组件时默认自动采用；依赖推测解码 |
+| `--full-draft-head` | 对草稿使用完整输出头；与优化 proposal head 选择相对，保留原生名称 |
+| `--draft-min-p` | Flash-Next MTP 置信度阈值，0–1，默认 0；不作为 Qwen Dense KVMem 参数 |
 | `--adaptive-mtp` | 自适应 MTP 宽度，draft-tokens 为上限；默认固定策略 |
 | `--mtp-attention-window` | 默认 0 看完整历史；正值至少为 drafts+1；当前 KVMem 不允许非零 |
 | `--ngram-draft-tokens` | 0 关闭，开启 1–63；启用 spec 且省略时默认 15；并发>1 时大于 15 自动降为 15 |
@@ -459,6 +477,7 @@ KVMem 新公共配置的默认策略由一份版本化定义提供，模板可�
 | `--unconstrained-response-format` | 未开结构化输出时允许无约束生成对应格式请求；与 structured-output 互斥 |
 | `--assistant-prefill` | 继续末尾 assistant 内容；要求关闭思考 |
 | `--lenient-assistant-history` | 兼容 function_call 后的 assistant text/reasoning 历史布局 |
+| `--lenient-image-detail` | 将未知图像 detail 按 auto 处理；默认拒绝未知值；既有 original→auto 兼容值仍直接支持，low/high 按上游新语义传递；不改变是否支持图像 |
 | `--usage-chunk-choice` | 为流式 usage chunk 加空增量 choice，兼容特定客户端 |
 
 ### 网络 日志与响应存储

@@ -25,6 +25,12 @@ llama.cpp keeps its existing revision. Qualification progress and limits are in
 qualification reports describe the Ryan baseline. New upstream releases are adopted
 deliberately, with an updated integration patch and prepared-tree hash.
 
+The 2026-10-17 development refresh pins `08fd7019925f43b4b42539400afd461b70f7144a`.
+Its qualification targets Qwen3.8-27B Dense and a native-versus-KVMem IQ3_S throughput
+comparison at equal Main KV capacity (native context = KVMem B+G). It does not qualify
+35B MoE, Flash-Next or Gemma 4 for KVMem. Current evidence is recorded in the same
+migration record; the earlier release results apply to their dated baseline.
+
 ## Checkout and preparation
 
 ```sh
