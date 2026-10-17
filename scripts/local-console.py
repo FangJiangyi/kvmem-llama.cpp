@@ -31,7 +31,8 @@ DEFAULTS = dict(Backend='ninfer', Model='', Worker='', Gpu='', Context=262144,
                 SinkTokens=12288, RecentTokens=1024)
 STRINGS = {'Backend', 'Model', 'Worker', 'Gpu', 'ListenHost', 'KvType', 'DiskPath',
            'VisionResidency',
-           'DeviceProfile', 'ScoreAggregation'}
+           'DeviceProfile', 'ScoreAggregation', 'ApiKey', 'ModelAlias', 'LogLevel',
+           'ChatTemplateFile', 'ThinkingMode'}
 INTEGERS = {'Context', 'Budget', 'Reserve', 'HostMiB', 'Prefill', 'MaxTokens', 'Port',
             'MtpDrafts', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions',
             'VisionTokens', 'ThinkingBudget', 'SinkTokens', 'RecentTokens', 'DiskMiB'}
@@ -40,6 +41,12 @@ DECIMALS = {'LrfuLambda', 'LrfuTopFraction'}
 # Deliberately limited native escape hatch. Common options must not be duplicated.
 NATIVE = {'llamacpp': {'--threads', '--threads-batch', '--n-gpu-layers'},
           'ninfer': {'--threads'}}
+
+
+def without_secrets(data):
+    clean = copy.deepcopy(data)
+    clean.get('parameters', {}).pop('ApiKey', None)
+    return clean
 
 
 def normalize(data, backends):
@@ -68,6 +75,18 @@ def normalize(data, backends):
         raise ValueError('ListenHost must be 127.0.0.1 or 0.0.0.0')
     if not 1 <= p.get('Port', 18200) <= 65535:
         raise ValueError('Port must be between 1 and 65535')
+    if p.get('ApiKey') and (len(p['ApiKey']) > 512 or not re.fullmatch(r'[A-Za-z0-9._~+/-]+=*', p['ApiKey'])):
+        raise ValueError('ApiKey must be a single ASCII token (letters, digits, . _ ~ + / - and optional trailing =)')
+    if p.get('LogLevel', '') not in {'', 'off', 'error', 'warning', 'info', 'trace', 'debug'}:
+        raise ValueError('Unsupported LogLevel')
+    if p.get('ThinkingMode', 'default') not in {'default', 'on', 'off'}:
+        raise ValueError('ThinkingMode must be default, on or off')
+    if p['Backend'] == 'ninfer' and p.get('ThinkingMode') == 'on':
+        raise ValueError('NInfer supports default/off at startup; thinking-on is selected by requests')
+    if p.get('Concurrency') is not None and not 1 <= p['Concurrency'] <= (8 if p['Backend'] == 'ninfer' else 4):
+        raise ValueError('Concurrency must be 1..8 for NInfer or 1..4 for llama.cpp')
+    if p.get('ChatTemplateFile') and not Path(p['ChatTemplateFile']).is_file():
+        raise ValueError('ChatTemplateFile must be an existing template file')
     gpu = p.get('Gpu', '')
     if gpu and not all(re.fullmatch(r'GPU-[0-9a-fA-F-]{8,64}', x) for x in gpu.split(',')):
         raise ValueError('Select GPUs by UUID, separated by commas')
@@ -146,6 +165,7 @@ class Controller:
         self.picker_lock = threading.Lock()
         self.process = self.job = self.log = None
         self.active = None
+        self.redactions = set()
         self.exit_code = None
         self.draft_path = self.state_dir / 'launch-draft.json'
         self.log_path = self.state_dir / 'service.log'
@@ -168,26 +188,32 @@ class Controller:
 
     def draft(self):
         if self.draft_path.exists():
-            return json.loads(self.draft_path.read_text(encoding='utf-8'))
+            return without_secrets(json.loads(self.draft_path.read_text(encoding='utf-8')))
         return {'schema_version': 1, 'parameters': dict(DEFAULTS)}
 
     def save(self, data):
-        clean = normalize(data, self.backends)
+        clean = without_secrets(normalize(data, self.backends))
         with self.lock:
             temp = self.draft_path.with_suffix('.tmp')
             temp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding='utf-8')
             temp.replace(self.draft_path)
         return clean
 
-    def plan(self, data):
+    def redact(self, text):
+        for secret in sorted(self.redactions, key=len, reverse=True):
+            text = text.replace(secret, '<redacted>')
+        return text
+
+    def plan(self, data, *, reveal_secrets=False):
         clean = normalize(data, self.backends)
+        api_key = clean['parameters'].pop('ApiKey', '')
+        if api_key:
+            self.redactions.add(api_key)
         if os.name != 'nt':
             raise ValueError('Service launch currently requires Windows PowerShell')
         params = clean['parameters']
         if params.get('Port', 18200) == self.port:
             raise ValueError('Inference service and console must use different ports')
-        # KVMem enablement is explicit for the llama worker. Its original launcher
-        # remains unchanged; this controller is a KVMem-specific caller.
         params = copy.deepcopy(params)
         if not params.get('Worker'):
             worker = self.worker_defaults()[params['Backend']]
@@ -197,8 +223,6 @@ class Controller:
             params['Worker'] = worker['path']
         elif not Path(params['Worker']).is_file():
             raise ValueError('指定的后端程序不存在，请检查“引擎专属参数 → 后端程序”：' + params['Worker'])
-        if params['Backend'] == 'llamacpp':
-            params['WorkerArgs'] = ['--kvmem'] + params.get('WorkerArgs', [])
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', encoding='utf-8',
                                          dir=self.state_dir, delete=False) as stream:
             json.dump(params, stream, ensure_ascii=False); name = stream.name
@@ -211,19 +235,21 @@ class Controller:
                                  cwd=self.backend_root,
                                  creationflags=subprocess.CREATE_NO_WINDOW)
             if run.returncode:
-                raise ValueError(run.stderr.strip()[-6000:] or run.stdout.strip()[-6000:])
+                raise ValueError(self.redact(run.stderr.strip()[-6000:] or run.stdout.strip()[-6000:]))
             # PowerShell warnings may precede the JSON result.
             start = run.stdout.find('{')
             result = json.loads(run.stdout[start:])
             argv = result.get('argv')
             if not isinstance(argv, list) or not argv or any(not isinstance(x, str) or '\x00' in x for x in argv):
                 raise ValueError('Launcher returned invalid argv')
-            result['warnings'] = run.stdout[:start].strip()
+            if api_key:
+                argv.extend(['--api-key', api_key if reveal_secrets else '<redacted>'])
+            result['warnings'] = self.redact(run.stdout[:start].strip())
             return result
         finally:
             Path(name).unlink(missing_ok=True)
 
-    def browse_model(self, data, folder=False):
+    def browse_model(self, data, folder=False, template=False):
         if not isinstance(data, dict) or set(data) - {'backend', 'current_path'}:
             raise ValueError('Expected backend and optional current_path')
         backend, current = data.get('backend'), data.get('current_path', '')
@@ -240,7 +266,7 @@ class Controller:
             powershell = str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe')
             result = subprocess.run([powershell, '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
                                      '-File', str(ROOT / 'scripts/windows/select-model.ps1'),
-                                     '-Backend', backend, '-InitialDirectory', str(initial.resolve())] + (['-Folder'] if folder else []),
+                                     '-Backend', backend, '-InitialDirectory', str(initial.resolve())] + (['-Folder'] if folder else ['-Template'] if template else []),
                                     capture_output=True, encoding='utf-8', errors='replace', timeout=300,
                                     creationflags=subprocess.CREATE_NO_WINDOW)
             if result.returncode:
@@ -256,7 +282,7 @@ class Controller:
                     raise ValueError('Select a model directory')
                 return {'path': str(path)}
             suffix = '.ninfer' if backend == 'ninfer' else '.gguf'
-            if not path.is_file() or path.suffix.lower() != suffix:
+            if not path.is_file() or (not template and path.suffix.lower() != suffix):
                 raise ValueError(f'{backend} requires a {suffix} model file')
             return {'path': str(path), 'name': path.name}
         except subprocess.TimeoutExpired:
@@ -361,12 +387,17 @@ class Controller:
                 self._release()
             result = {'state': 'starting' if running else ('exited' if self.exit_code is not None else 'stopped'),
                       'pid': self.process.pid if running else None, 'exit_code': self.exit_code,
-                      'active_config': self.active, 'url': None}
+                      'active_config': without_secrets(self.active) if self.active else None,
+                      'api_key_configured': bool(self.active and self.active['parameters'].get('ApiKey')), 'url': None}
             if running:
                 port = self.active['parameters'].get('Port', 18200)
                 result['url'] = f'http://127.0.0.1:{port}'
                 try:
-                    with urllib.request.urlopen(result['url'] + '/health', timeout=0.5) as response:
+                    target = result['url'] + '/health'
+                    api_key = self.active['parameters'].get('ApiKey')
+                    if api_key:
+                        target = urllib.request.Request(target, headers={'Authorization': 'Bearer ' + api_key})
+                    with urllib.request.urlopen(target, timeout=0.5) as response:
                         if response.status == 200:
                             result['state'] = 'ready'
                 except urllib.error.HTTPError as error:
@@ -388,7 +419,7 @@ class Controller:
                 raise ValueError('A managed service is already running; stop it before starting another')
             self._release()
             clean = normalize(data, self.backends)
-            result = self.plan(clean)
+            result = self.plan(clean, reveal_secrets=True)
             port = clean['parameters'].get('Port', 18200)
             with socket.socket() as probe:
                 if os.name == 'nt':
@@ -431,7 +462,12 @@ class Controller:
             return ''
         with self.log_path.open('rb') as stream:
             stream.seek(0, 2); stream.seek(max(0, stream.tell() - 32768))
-            return stream.read().decode('utf-8', errors='replace')
+            return self.redact(stream.read().decode('utf-8', errors='replace'))
+
+    def monitor_authorization(self):
+        with self.lock:
+            key = self.active['parameters'].get('ApiKey') if self.active else None
+            return 'Bearer ' + key if key else None
 
 
 def gpu_inventory():
@@ -505,8 +541,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(503, {'error': 'No managed service is running'}); return
                 # Fixed read-only routes to the owned service, never an arbitrary URL.
                 request = urllib.request.Request(state['url'] + path)
-                if self.headers.get('Authorization'):
-                    request.add_header('Authorization', self.headers['Authorization'])
+                authorization = self.control.monitor_authorization() or self.headers.get('Authorization')
+                if authorization:
+                    request.add_header('Authorization', authorization)
                 try:
                     with urllib.request.urlopen(request, timeout=5) as response:
                         body = response.read(4 * 1024 * 1024 + 1)
@@ -550,6 +587,7 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(size))
             actions = {'/api/launcher/save': self.control.save, '/api/launcher/preview': self.control.plan,
                        '/api/launcher/browse-model': self.control.browse_model,
+                       '/api/launcher/browse-template': lambda data: self.control.browse_model(data, template=True),
                        '/api/launcher/browse-model-folder': lambda data: self.control.browse_model(data, folder=True),
                        '/api/launcher/scan-models': self.control.scan_models,
                        '/api/launcher/start': self.control.start, '/api/launcher/stop': lambda _: self.control.stop()}
@@ -558,7 +596,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(404, {'error': 'Not found'}); return
             self.reply(200, action(data))
         except (ValueError, OSError, subprocess.SubprocessError) as error:
-            self.reply(400, {'error': str(error)})
+            self.reply(400, {'error': self.control.redact(str(error))})
 
 
 def main():

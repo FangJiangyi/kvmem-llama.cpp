@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory)][ValidateSet('ninfer', 'llamacpp')][string]$Backend,
     [string]$InitialDirectory = '',
-    [switch]$Folder
+    [switch]$Folder,
+    [switch]$Template
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -20,8 +21,8 @@ try {
             $dialog.SelectedPath = $InitialDirectory
         }
     } else {
-    $dialog.Title = 'KVMem - Select model'
-    $dialog.Filter = if ($Backend -eq 'ninfer') { 'NInfer model (*.ninfer)|*.ninfer' } else { 'GGUF model (*.gguf)|*.gguf' }
+    $dialog.Title = if ($Template) { 'KVMem - Select chat template' } else { 'KVMem - Select model' }
+    $dialog.Filter = if ($Template) { 'Chat template (*.jinja;*.j2;*.txt)|*.jinja;*.j2;*.txt|All files (*.*)|*.*' } elseif ($Backend -eq 'ninfer') { 'NInfer model (*.ninfer)|*.ninfer' } else { 'GGUF model (*.gguf)|*.gguf' }
     $dialog.CheckFileExists = $true
     $dialog.CheckPathExists = $true
     $dialog.Multiselect = $false

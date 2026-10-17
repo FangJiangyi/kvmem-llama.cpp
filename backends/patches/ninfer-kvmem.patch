@@ -947,7 +947,7 @@ index 0000000000000000000000000000000000000000..c958ba04a4438eb0b1e0f3b0bfec0ab4
 +                std::uint32_t block_tokens, Tensor& output, cudaStream_t stream);
 +} // namespace ninfer::ops
 diff --git a/include/ninfer/types.h b/include/ninfer/types.h
-index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..9818e2101ec045898342d794f30e0c582760efdf 100644
+index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..50f0643ec10e947c9bd420a27a89b1e1877f6410 100644
 --- a/include/ninfer/types.h
 +++ b/include/ninfer/types.h
 @@ -133,8 +133,9 @@ struct SpeculativeOptions {
@@ -1103,7 +1103,7 @@ index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..9818e2101ec045898342d794f30e0c58
 +    std::uint64_t transfer_staging_bytes = 0;
 +    std::uint64_t statistics_staging_bytes = 0;
 +    std::uint32_t mtp_resident_pages = 0;
-+    std::uint32_t retained_sessions = 0;
++    std::uint32_t retained_sessions = 0, active_sessions = 0, retained_sessions_limit = 0;
 +    std::uint64_t history_hits = 0, history_misses = 0, history_evictions = 0;
 +    std::uint64_t disk_hits = 0, disk_writes = 0, disk_errors = 0;
 +    std::uint64_t active_payload_reservation_bytes = 0;
@@ -5031,7 +5031,7 @@ index d3c606707501aec60c9283ec0b2c3a2c73f6493e..29d23036d7f52500be3b594b25840a74
      // Hybrid prefix cache mode (ContextCacheMode::Hybrid). Admission runs as the same context
      // transaction the Engine drives for Legacy materialization: quote, reserve, then
 diff --git a/src/models/qwen3_5/program/program_impl.cpp b/src/models/qwen3_5/program/program_impl.cpp
-index ddd6cb476416bd85a565fe462c2aec62e845a2bb..9ce5eec77269840e832be0ee050e15887422a7e1 100644
+index ddd6cb476416bd85a565fe462c2aec62e845a2bb..dc17714c19c4280e7c4388642df57e65ca2ef005 100644
 --- a/src/models/qwen3_5/program/program_impl.cpp
 +++ b/src/models/qwen3_5/program/program_impl.cpp
 @@ -1,3 +1,4 @@
@@ -5185,7 +5185,7 @@ index ddd6cb476416bd85a565fe462c2aec62e845a2bb..9ce5eec77269840e832be0ee050e1588
          graph_phase.complete();
      }
      work.reset();
-@@ -856,6 +945,60 @@ runtime::ContextTransferObservation ProgramImpl::context_transfer_observation(
+@@ -856,6 +945,63 @@ runtime::ContextTransferObservation ProgramImpl::context_transfer_observation(
  
  MemorySummary ProgramImpl::memory_summary() const noexcept {
      MemorySummary out;
@@ -5194,6 +5194,9 @@ index ddd6cb476416bd85a565fe462c2aec62e845a2bb..9ce5eec77269840e832be0ee050e1588
 +        memory.enabled = true;
 +        memory.selected_tokens = kvmem_options.selected_tokens;
 +        memory.reserve_tokens = kvmem_options.reserve_tokens;
++        memory.retained_sessions_limit = kvmem_options.retained_sessions;
++        for (const auto& request : requests)
++            if (request.lifecycle != Lifecycle::Empty) ++memory.active_sessions;
 +        memory.host_payload_budget_bytes = kvmem_options.host_bytes;
 +        memory.transfer_staging_bytes = (memory_kv_staging ? memory_kv_staging->size() : 0) +
 +            memory_transfer_storage.charged_bytes() + memory_state_staging.charged_bytes();
@@ -9104,7 +9107,7 @@ index b2544e2537f973e5ed8fb8e899659fa141fd7f99..64336c8c3966c471dde1e234505bc343
      ninfer::ResolvedSamplingParameters sampling;
      double prepare_seconds     = 0.0;
 diff --git a/src/serve/http_server.cpp b/src/serve/http_server.cpp
-index f078f6b21321baa69015e3b235c2df30a7befcde..932dbaa965235692438def5dd8b87054ad95c826 100644
+index f078f6b21321baa69015e3b235c2df30a7befcde..292cb15468f0ba39608fc96fa33441bf61cedb6a 100644
 --- a/src/serve/http_server.cpp
 +++ b/src/serve/http_server.cpp
 @@ -1,9 +1,12 @@
@@ -9266,7 +9269,7 @@ index f078f6b21321baa69015e3b235c2df30a7befcde..932dbaa965235692438def5dd8b87054
 +            {"ngram_drafts", options.speculative.ngram_draft_tokens},
 +            {"ngram_min_match", options.speculative.ngram_min_match},
 +            {"max_active_requests", options.max_concurrency},
-+            {"retained_sessions", options.kvmem.retained_sessions},
++            {"retained_sessions_limit", options.kvmem.retained_sessions},
 +            {"multi_gpu_mode", execution.devices.size() > 1 ? "layer" : "single"},
 +            {"shared_host_history", true},
 +            {"disk_budget_bytes", options.kvmem.disk_bytes},
@@ -9340,10 +9343,10 @@ index 1b940d6a2eb1e3f23730b089c0a5d8bf7bda4979..4e3d92100fda9771cedc2c0afe33a80c
      httplib::Server server_;
 diff --git a/src/serve/kvmem_status_json.h b/src/serve/kvmem_status_json.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d48cc929dbad6949b8ff3e31693ef70138b02f01
+index 0000000000000000000000000000000000000000..e317a8a2b36e2aaa80cc18ee973d7ace94c17979
 --- /dev/null
 +++ b/src/serve/kvmem_status_json.h
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,26 @@
 +#pragma once
 +#include "ninfer/types.h"
 +#include <nlohmann/json.hpp>
@@ -9360,7 +9363,8 @@ index 0000000000000000000000000000000000000000..d48cc929dbad6949b8ff3e31693ef701
 +        {"transfer_staging_bytes", m.transfer_staging_bytes},
 +        {"statistics_staging_bytes", m.statistics_staging_bytes},
 +        {"mtp_resident_pages", m.mtp_resident_pages},
-+        {"retained_sessions", m.retained_sessions}, {"history_hits", m.history_hits},
++        {"retained_sessions", m.retained_sessions}, {"active_sessions", m.active_sessions},
++        {"retained_sessions_limit", m.retained_sessions_limit}, {"history_hits", m.history_hits},
 +        {"history_misses", m.history_misses}, {"history_evictions", m.history_evictions},
 +        {"disk_hits", m.disk_hits}, {"disk_writes", m.disk_writes}, {"disk_errors", m.disk_errors},
 +        {"active_payload_reservation_bytes", m.active_payload_reservation_bytes},
@@ -9932,35 +9936,36 @@ index 44457ed0408b4bf33d81a75656b50d832e8bfe8b..a7aac55d77cbfad1d7d2184e37bfc941
  
  // An optional `post_thinking` object: temperature (up to `max_temperature`), top_p, top_k, min_p,
 diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
-index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54fc56486ec 100644
+index 64933ec105665b52e01c83f29acd1216e043c693..5a034353502b04dd64b349ca7f6839b946e1e933 100644
 --- a/src/serve/serve_options.cpp
 +++ b/src/serve/serve_options.cpp
 @@ -1,4 +1,7 @@
  #include "serve/serve_options.h"
-+#include "kvmem/retrieval_options.hpp"
++#include "kvmem/cli_options.h"
 +#include "runtime/speculative_limits.h"
 +#include "product/cuda_memory_options.h"
  #include "product/post_thinking_options.h"
  #include "product/rope_yarn_options.h"
  #include "product/speculative_options.h"
-@@ -85,6 +88,30 @@ std::string serve_usage_text(const char* argv0) {
+@@ -85,6 +88,31 @@ std::string serve_usage_text(const char* argv0) {
             "  --help, -h                    show this help and exit\n"
             "\n"
             "MODEL & CONTEXT\n"
-+           "  --kvmem-budget N              selected history B, tokens aligned to 64\n"
-+            "  --kvmem-lrfu               rank by decayed retrieval history\n"
++           "  --kvmem / --no-kvmem          enable/disable KVMem (default off; positive B enables)\n"
++           "  --kvmem-budget N              positive selected history B (default 32768), aligned to 64\n"
++            "  --kvmem-lrfu / --no-kvmem-lrfu enable/disable retrieval history ranking (default off)\n"
 +            "  --kvmem-lrfu-lambda X      history decay [0,1] (default 0.5)\n"
 +            "  --kvmem-lrfu-top-frac X    hit fraction (0,1] (default 0.9)\n"
 +            "  --kvmem-score-agg MODE     mean | max across GQA heads (default mean)\n"
-+           "  --kvmem-gen-reserve N         append workspace R, tokens aligned to 64\n"
-+           "  --kvmem-host-mib N            Host native KV payload budget H, MiB\n"
++           "  --kvmem-gen-reserve N         positive append workspace R (default 1024), aligned to 64\n"
++           "  --kvmem-host-mib N            positive Host native KV payload budget H, MiB (default 16384)\n"
 +           "  --kvmem-sink-tokens N         always-kept prefix; default 0 = one 64-token\n"
 +           "                                page; positive values round down, minimum one page\n"
 +           "  --kvmem-recent-tokens N       always-kept newest suffix; default 64 (one page);\n"
 +           "                                minimum 64; values round down to whole pages\n"
-+           "  --kvmem-sessions N            retained Host histories, 1..16 (default 4)\n"
++           "  --kvmem-sessions N            inactive histories, 1..16 (default 4); active requests excluded\n"
 +           "  --kvmem-disk-path PATH        Ephemeral active/idle KV spill directory\n"
-+           "  --kvmem-disk-mib N            Shared SSD payload quota D, MiB\n"
++           "  --kvmem-disk-mib N            Shared SSD payload quota D, MiB; 0 = off (default)\n"
 +           "                                KVMem uses B+R device tokens and its own\n"
 +           "                                verified history reuse; BF16/INT8/FP8/NVFP4/K8V4,\n"
 +           "                                RK8V4/RK4V4/RK4V4-E8/RK2V4-E8,\n"
@@ -9974,7 +9979,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
             "  --max-context N               logical context ceiling of each request (default\n"
             "                                8192)\n"
             "  --max-concurrency N           requests decoded together, 1..8 (default 1)\n"
-@@ -99,7 +126,7 @@ std::string serve_usage_text(const char* argv0) {
+@@ -99,7 +127,7 @@ std::string serve_usage_text(const char* argv0) {
             "  --chat-template FILE          replace the artifact's chat template at startup\n"
             "  --device N                    CUDA device index (default 0)\n"
             "  --devices A,B,...             one pipeline stage per listed device, 2..8\n"
@@ -9983,7 +9988,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
             "  --stage-layers A,B,...        layers per stage in --devices order (default:\n"
             "                                split by free memory)\n"
             "  --expert-residency device|host|disk  Qwen3.8-Flash-Next: expert banks in GPU\n"
-@@ -167,6 +194,26 @@ std::string serve_usage_text(const char* argv0) {
+@@ -167,6 +195,26 @@ std::string serve_usage_text(const char* argv0) {
             "  --rope-scaling-original-context N\n"
             "                                the interpolation threshold (default: the\n"
             "                                model's native window)\n"
@@ -10010,7 +10015,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
             "  --wddm-evictable-budget       Windows D3D12 builds: budget against dedicated\n"
             "                                memory, holding arenas resident\n"
             "\n"
-@@ -201,9 +248,8 @@ std::string serve_usage_text(const char* argv0) {
+@@ -201,9 +249,8 @@ std::string serve_usage_text(const char* argv0) {
             "KV CACHE\n"
             "  --kv-capacity N|auto          shared KV capacity in tokens (default\n"
             "                                --max-context, or auto with\n"
@@ -10022,7 +10027,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
             "                                " +
             std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
             "); alias --vram-headroom-mib\n"
-@@ -329,8 +375,8 @@ std::string serve_usage_text(const char* argv0) {
+@@ -329,8 +376,8 @@ std::string serve_usage_text(const char* argv0) {
             "  --ngram-draft-tokens N        copy up to N tokens (1..63) per round from\n"
             "                                earlier prompt, tool-result or output text,\n"
             "                                verified alongside --spec; on with 15 whenever\n"
@@ -10033,7 +10038,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
             "  --ngram-min-match N           shortest match a copy is drawn from, 4..64\n"
             "                                (default 12)\n"
             "  --ngram-archive-mib N         keep finished requests' copy sources in RAM for\n"
-@@ -342,7 +388,7 @@ std::string serve_usage_text(const char* argv0) {
+@@ -342,7 +389,7 @@ std::string serve_usage_text(const char* argv0) {
             "  --lookup-ngram N              context-lookup drafting alongside --spec: the\n"
             "                                last N tokens are matched against the sequence\n"
             "                                so far and what followed is proposed (default 0:\n"
@@ -10042,7 +10047,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
             "\n"
             "VISION (off by default)\n"
             "  --vision                      accept images and video and load the Vision GPU\n"
-@@ -405,8 +451,7 @@ std::string serve_usage_text(const char* argv0) {
+@@ -405,8 +452,7 @@ std::string serve_usage_text(const char* argv0) {
             "\n"
             "API BEHAVIOR\n"
             "  --structured-output           accept JSON and JSON Schema response formats;\n"
@@ -10052,89 +10057,28 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
             "  --unconstrained-response-format\n"
             "                                without --structured-output, generate such a\n"
             "                                request unconstrained instead of refusing it\n"
-@@ -536,6 +581,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
-     bool long_anchor_spacing_explicit = false;
-     bool ngram_width_explicit         = false;
-     bool vision_max_merged_explicit   = false;
-+    bool sink_tokens_explicit         = false;
-+    bool recent_tokens_explicit       = false;
-     std::optional<std::size_t> kv_headroom_mib;
-     // Last flag seen that belongs to only one prefix-cache mode, for the cross-mode error.
-     const char* legacy_cache_flag  = nullptr;
-@@ -603,6 +650,72 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -516,6 +562,7 @@ std::vector<std::uint32_t> parse_stage_layers(std::string_view text) {
+ 
+ ServeOptions parse_serve_options(int argc, char** argv) {
+     ServeOptions options;
++    kvmem::CliOptions memory;
+     options.startup_argv.reserve(static_cast<std::size_t>(argc));
+     bool redact_next = false;
+     for (int i = 0; i < argc; ++i) {
+@@ -603,6 +650,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              options.kv_capacity  = parse_kv_capacity(require_value("--kv-capacity"));
              kv_capacity_explicit = true;
              continue;
 +            continue;
 +        }
-+        if (arg == "--kvmem-budget") {
-+            options.kvmem.selected_tokens = static_cast<std::uint32_t>(
-+                parse_nonnegative_int(require_value("--kvmem-budget"), "kvmem-budget"));
-+            continue;
-+        }
-+        if (arg == "--kvmem-lrfu") { options.kvmem.lrfu = true; continue; }
-+        if (arg == "--kvmem-lrfu-lambda") {
-+            options.kvmem.lrfu_lambda = kvmem::parse_lrfu_real(require_value("--kvmem-lrfu-lambda"), true);
-+            continue;
-+        }
-+        if (arg == "--kvmem-lrfu-top-frac") {
-+            options.kvmem.lrfu_top_fraction = kvmem::parse_lrfu_real(require_value("--kvmem-lrfu-top-frac"), false);
-+            continue;
-+        }
-+        if (arg == "--kvmem-score-agg") {
-+            options.kvmem.score_agg_max = kvmem::parse_score_aggregation(require_value("--kvmem-score-agg")) == 1;
-+            continue;
-+        }
-+        if (arg == "--kvmem-gen-reserve") {
-+            options.kvmem.reserve_tokens = static_cast<std::uint32_t>(
-+                parse_nonnegative_int(require_value("--kvmem-gen-reserve"), "kvmem-gen-reserve"));
-+            continue;
-+        }
-+        if (arg == "--kvmem-sink-tokens") {
-+            options.kvmem.sink_tokens = static_cast<std::uint32_t>(
-+                parse_nonnegative_int(require_value("--kvmem-sink-tokens"), "kvmem-sink-tokens"));
-+            sink_tokens_explicit = true;
-+            continue;
-+        }
-+        if (arg == "--kvmem-recent-tokens") {
-+            options.kvmem.recent_tokens = static_cast<std::uint32_t>(
-+                parse_nonnegative_int(require_value("--kvmem-recent-tokens"), "kvmem-recent-tokens"));
-+            recent_tokens_explicit = true;
-+            continue;
-+        }
-+        if (arg == "--kvmem-sessions") {
-+            options.kvmem.retained_sessions = static_cast<std::uint32_t>(
-+                parse_nonnegative_int(require_value("--kvmem-sessions"), "kvmem-sessions"));
-+            continue;
-+        }
-+        if (arg == "--kvmem-disk-path") {
-+            options.kvmem.disk_path = std::filesystem::u8path(require_value("--kvmem-disk-path"));
-+            if (options.kvmem.disk_path.empty())
-+                throw std::invalid_argument("--kvmem-disk-path must not be empty");
-+            continue;
-+        }
-+        if (arg == "--kvmem-disk-mib") {
-+            const auto mib = parse_u64(require_value("--kvmem-disk-mib"), "kvmem-disk-mib");
-+            if (!mib || mib > std::uint64_t(INT64_MAX) / (1ULL << 20))
-+                throw std::invalid_argument("--kvmem-disk-mib is out of range");
-+            options.kvmem.disk_bytes = mib * (1ULL << 20);
-+            continue;
-+        }
-+        if (arg == "--kvmem-host-mib") {
-+            const auto mib = parse_u64(require_value("--kvmem-host-mib"), "kvmem-host-mib");
-+            if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
-+                throw std::invalid_argument("--kvmem-host-mib is out of range");
-+            }
-+            options.kvmem.host_bytes = static_cast<std::size_t>(mib * (1ULL << 20));
-+            continue;
-+        }
++        if (memory.parse(arg, require_value)) continue;
 +        if (arg == "--kvmem-verify-transfers") {
 +            options.kvmem.verify_transfers = true;
 +            continue;
          }
          if (arg == "--kv-headroom-mib" || arg == "--vram-headroom-mib") {
              // --vram-headroom-mib is the Wallawalla47 fork's name for the same headroom.
-@@ -1147,7 +1260,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1147,7 +1200,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              continue;
          }
          if (arg == "--derive-session-keys") {
@@ -10143,7 +10087,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
              options.derive_session_keys = true;
              continue;
          }
-@@ -1227,6 +1340,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1227,6 +1280,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                  require_value("--rope-scaling-original-context"));
              continue;
          }
@@ -10157,10 +10101,23 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
          if (arg == "--wddm-evictable-budget") {
              options.wddm_evictable_budget = true;
              continue;
-@@ -1445,6 +1565,32 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1445,6 +1505,45 @@ ServeOptions parse_serve_options(int argc, char** argv) {
          throw std::invalid_argument("--default-graft '" + options.default_graft +
                                      "' does not name a --graft");
      }
++    memory.resolve();
++    options.kvmem.selected_tokens = memory.budget;
++    options.kvmem.reserve_tokens = memory.gen_reserve;
++    options.kvmem.host_bytes = static_cast<std::size_t>(memory.payload_host_bytes);
++    options.kvmem.disk_bytes = memory.payload_disk_bytes;
++    options.kvmem.disk_path = std::filesystem::u8path(memory.payload_disk_dir);
++    options.kvmem.sink_tokens = memory.sink_tokens;
++    options.kvmem.recent_tokens = memory.recent_tokens;
++    options.kvmem.retained_sessions = memory.sessions;
++    options.kvmem.lrfu = memory.lrfu;
++    options.kvmem.lrfu_lambda = memory.lrfu_lambda;
++    options.kvmem.lrfu_top_fraction = memory.lrfu_top_fraction;
++    options.kvmem.score_agg_max = memory.score_agg == 1;
 +    if (options.kvmem.selected_tokens != 0 &&
 +        (options.suspend.enabled || !options.grafts.empty() || options.router())) {
 +        throw std::invalid_argument("KVMem does not support model suspend, prompt grafts or model router mode");
@@ -10190,7 +10147,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
      if (!kv_capacity_explicit) {
          // The hybrid cache turns every Device page no active request holds into block cache, so
          // it sizes the KV pool to free VRAM unless a capacity is given.
-@@ -1458,8 +1604,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1458,8 +1557,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              "caching systems");
      }
      if (options.context_cache.mode == ContextCacheMode::Hybrid) {
@@ -10201,7 +10158,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
                                          " configures the default prefix cache and cannot be "
                                          "combined with --use-alt-prefix-caching");
          }
-@@ -1497,10 +1643,16 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1497,10 +1596,16 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                                      " requires --use-alt-prefix-caching");
      }
      if (kv_headroom_mib.has_value()) {
@@ -10218,7 +10175,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
      }
      if (long_anchor_spacing_explicit && !options.context_cache.automatic_long_anchors) {
          throw std::invalid_argument("--long-anchor-spacing requires --auto-long-anchors");
-@@ -1565,7 +1717,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1565,7 +1670,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
          throw std::invalid_argument("--stats-port must be in [1,65535] and differ from --port");
      }
      if (options.max_context == 0) { throw std::invalid_argument("--max-context must be positive"); }
@@ -10227,7 +10184,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
          options.kv_capacity.explicit_tokens < options.max_context) {
          throw std::invalid_argument("--kv-capacity must be at least --max-context");
      }
-@@ -1606,10 +1758,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1606,10 +1711,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
          throw std::invalid_argument(
              "--cuda-graph-allowance-mib requires CUDA graphs (omit --no-cuda-graph)");
      }
@@ -10243,7 +10200,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
      }
      if (options.ngram_native_sessions && options.speculative.ngram_archive_bytes == 0) {
          throw std::invalid_argument("--ngram-native-sessions requires --ngram-archive-mib");
-@@ -1629,6 +1782,85 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1629,6 +1735,84 @@ ServeOptions parse_serve_options(int argc, char** argv) {
      if (options.sleep_idle_seconds != 0 && !options.suspend.enabled && !options.router()) {
          throw std::invalid_argument("--sleep-idle-seconds requires --model-suspend");
      }
@@ -10319,8 +10276,7 @@ index 64933ec105665b52e01c83f29acd1216e043c693..41bf0341122733946d9134de7439a54f
 +        // is disabled here; KVMem owns the current session's trusted checkpoint.
 +        options.context_cache.enabled = false;
 +    } else if (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers ||
-+         !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes ||
-+         sink_tokens_explicit || recent_tokens_explicit) {
++         !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes) {
 +        throw std::invalid_argument("KVMem auxiliary options require --kvmem-budget");
 +    }
 +    if (options.kvmem.disk_path.empty() != (options.kvmem.disk_bytes == 0) ||
@@ -16710,7 +16666,7 @@ index e31cb8bd58d242ffea785352d374d513ca1205dc..3b8720dfadc7ba108ad773ed14468b90
      run_test("admission waits for Program boundary", test_admission_waits_for_program_boundary);
      run_test("session publication order", test_session_publication_order_controls_tied_source);
 diff --git a/tests/test_serve_options.cpp b/tests/test_serve_options.cpp
-index 095812ac8e02f7e504ea0da29be21288c7d3bab7..869c63710ec2933422affac3f6c62f2fc7f53fa2 100644
+index 095812ac8e02f7e504ea0da29be21288c7d3bab7..792313f233c42f0c566d61ceb184307483f5cf9f 100644
 --- a/tests/test_serve_options.cpp
 +++ b/tests/test_serve_options.cpp
 @@ -2,9 +2,12 @@
@@ -16726,7 +16682,7 @@ index 095812ac8e02f7e504ea0da29be21288c7d3bab7..869c63710ec2933422affac3f6c62f2f
  #include <string>
  #include <string_view>
  #include <utility>
-@@ -24,13 +27,496 @@ ServeOptions parse(std::vector<std::string> arguments) {
+@@ -24,13 +27,517 @@ ServeOptions parse(std::vector<std::string> arguments) {
      std::vector<char*> argv;
      argv.reserve(arguments.size());
      for (std::string& argument : arguments) { argv.push_back(argument.data()); }
@@ -16744,6 +16700,27 @@ index 095812ac8e02f7e504ea0da29be21288c7d3bab7..869c63710ec2933422affac3f6c62f2f
 -int main() {
 +int run_serve_option_tests() {
      int failures = 0;
++    {
++        const auto off = parse({"ninfer-serve", "model.ninfer", "--no-kvmem",
++                                "--no-kvmem-lrfu", "--kvmem-disk-mib", "0"});
++        failures += check(!off.kvmem.selected_tokens && off.context_cache.enabled,
++                          "disabled KVMem changed native cache defaults");
++        const auto on = parse({"ninfer-serve", "model.ninfer", "--kvmem", "--max-context", "65536",
++                               "--kvmem-lrfu", "--no-kvmem-lrfu", "--kvmem-disk-mib", "0"});
++        failures += check(on.kvmem.selected_tokens == 32768 && on.kvmem.reserve_tokens == 1024 &&
++                          on.kvmem.host_bytes == (16384ULL << 20) && on.kvmem.retained_sessions == 4 &&
++                          !on.kvmem.lrfu && !on.kvmem.disk_bytes,
++                          "shared KVMem defaults or explicit off switches were lost");
++        for (const auto& args : std::vector<std::vector<std::string>>{
++                {"--no-kvmem", "--kvmem-budget", "128"}, {"--kvmem-budget", "0"},
++                {"--kvmem", "--kvmem-gen-reserve", "0"}, {"--kvmem", "--kvmem-sessions", "0"}}) {
++            std::vector<std::string> command{"ninfer-serve", "model.ninfer"};
++            command.insert(command.end(), args.begin(), args.end());
++            bool rejected = false;
++            try { (void)parse(command); } catch (const std::invalid_argument&) { rejected = true; }
++            failures += check(rejected, "invalid shared KVMem configuration accepted");
++        }
++    }
 +    for (const std::vector<std::string> feature : {
 +            std::vector<std::string>{"--model-suspend"},
 +            std::vector<std::string>{"--graft", "g=graft.bin"},
@@ -16860,7 +16837,7 @@ index 095812ac8e02f7e504ea0da29be21288c7d3bab7..869c63710ec2933422affac3f6c62f2f
 +    for (const bool memory_enabled : {false, true}) {
 +        for (const auto& extra : std::vector<std::vector<std::string>>{
 +                 {"--kvmem-disk-path", "cache"}, {"--kvmem-disk-path", ""},
-+                 {"--kvmem-disk-mib", "1024"}, {"--kvmem-disk-mib", "0"},
++                 {"--kvmem-disk-mib", "1024"},
 +                 {"--kvmem-disk-path", "cache", "--kvmem-disk-mib", "18446744073709551615"}}) {
 +            auto args = memory_enabled ? memory_args : std::vector<std::string>{"ninfer-serve", "model.ninfer"};
 +            args.insert(args.end(), extra.begin(), extra.end());
@@ -17225,7 +17202,7 @@ index 095812ac8e02f7e504ea0da29be21288c7d3bab7..869c63710ec2933422affac3f6c62f2f
      const auto archive = parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens",
                                  "5", "--ngram-draft-tokens", "63", "--ngram-archive-mib", "512",
                                  "--ngram-session-mib", "128", "--ngram-native-sessions"});
-@@ -67,7 +553,6 @@ int main() {
+@@ -67,7 +574,6 @@ int main() {
      for (const auto& tail : std::vector<std::vector<std::string>>{
               {"--ngram-draft-tokens", "64"},
               {"--ngram-min-match", "3"},
@@ -17233,7 +17210,7 @@ index 095812ac8e02f7e504ea0da29be21288c7d3bab7..869c63710ec2933422affac3f6c62f2f
               {"--spec", "none"}}) {
          std::vector<std::string> arguments{"ninfer-serve",
                                             "model.ninfer",
-@@ -103,15 +588,11 @@ int main() {
+@@ -103,15 +609,11 @@ int main() {
      }
      failures += check(parse({"ninfer-serve", "model.ninfer"}).speculative.ngram_draft_tokens == 0,
                        "ngram default needs a neural backend");
@@ -17254,7 +17231,7 @@ index 095812ac8e02f7e504ea0da29be21288c7d3bab7..869c63710ec2933422affac3f6c62f2f
  
      const auto mtp_ngram = parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens",
                                    "3", "--ngram-draft-tokens", "15"});
-@@ -150,14 +631,12 @@ int main() {
+@@ -150,14 +652,12 @@ int main() {
              } catch (const std::invalid_argument&) { rejected = true; }
              failures += check(rejected, "unsupported neural/ngram pair admitted");
          }
@@ -17275,7 +17252,7 @@ index 095812ac8e02f7e504ea0da29be21288c7d3bab7..869c63710ec2933422affac3f6c62f2f
          const auto wide_single =
              parse({"ninfer-serve", "model.ninfer", "--spec", backend, "--draft-tokens", "3",
                     "--ngram-draft-tokens", "63", "--max-concurrency", "1"});
-@@ -1560,3 +2039,11 @@ int main() {
+@@ -1560,3 +2060,11 @@ int main() {
  
      return failures == 0 ? 0 : 1;
  }

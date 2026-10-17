@@ -378,7 +378,7 @@ if (KVMEM_BUILD_SERVER_TESTS)
     add_test(NAME kvmem-chat-id-test COMMAND kvmem-chat-id-test)
 
     add_executable(kvmem-server-options-test tests/server-options-test.cpp)
-    target_include_directories(kvmem-server-options-test PRIVATE tools backends/llamacpp/include backends/llamacpp/ggml/include)
+    target_include_directories(kvmem-server-options-test PRIVATE tools kvmem/include backends/llamacpp/include backends/llamacpp/ggml/include)
     add_test(NAME kvmem-server-options-test COMMAND kvmem-server-options-test)
 
     find_package(Threads REQUIRED)

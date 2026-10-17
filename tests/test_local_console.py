@@ -44,6 +44,61 @@ class ConsoleTests(unittest.TestCase):
         second = console.Controller(console.ROOT, self.tmp.name, 18199)
         self.assertEqual(second.draft(), self.config)
 
+    def test_credentials_are_never_saved_or_returned_in_runtime_status(self):
+        key = 'test-only-credential-123456'
+        self.config['parameters']['ApiKey'] = key
+        saved = self.controller.save(self.config)
+        self.assertNotIn('ApiKey', saved['parameters'])
+        self.assertNotIn(key, self.controller.draft_path.read_text(encoding='utf-8'))
+        self.controller.active = self.config
+        status = self.controller.status()
+        self.assertTrue(status['api_key_configured'])
+        self.assertNotIn(key, json.dumps(status))
+        self.assertEqual(self.controller.monitor_authorization(), 'Bearer ' + key)
+        self.controller.redactions.add(key)
+        self.controller.log_path.write_text('worker error: ' + key, encoding='utf-8')
+        self.assertEqual(self.controller.log_tail(), 'worker error: <redacted>')
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows canonical launcher')
+    def test_native_service_mapping_and_private_launch_plan(self):
+        key = 'test-only-credential-123456'
+        worker = Path(self.tmp.name) / 'worker.exe'; worker.touch()
+        template = Path(self.tmp.name) / "chat & ' $literal.jinja"; template.write_text('template', encoding='utf-8')
+        for backend, suffix, alias_flag, template_flag, log_flag, log_value, off_flag in (
+            ('llamacpp', '.gguf', '--alias', '--chat-template-file', '--verbosity', '5', '--no-think'),
+            ('ninfer', '.ninfer', '--model-id', '--chat-template', '--log-level', 'debug', '--no-thinking')
+        ):
+            model = Path(self.tmp.name) / ('model' + suffix); model.touch()
+            self.config['parameters'].update(Backend=backend, Model=str(model), Worker=str(worker),
+                Gpu='GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29', ApiKey=key,
+                ModelAlias="friendly & ' $literal", ChatTemplateFile=str(template), LogLevel='debug',
+                ThinkingMode='off', Concurrency=2)
+            plan = self.controller.plan(self.config)
+            args = plan['argv']
+            for flag, value in ((alias_flag, "friendly & ' $literal"), (template_flag, str(template)),
+                                (log_flag, log_value), ('--api-key', '<redacted>'),
+                                ('--parallel' if backend == 'llamacpp' else '--max-concurrency', '2')):
+                self.assertEqual(args[args.index(flag)+1], value)
+            self.assertIn(off_flag, args)
+            self.assertNotIn(key, json.dumps(plan))
+            private = self.controller.plan(self.config, reveal_secrets=True)['argv']
+            self.assertEqual(private[private.index('--api-key')+1], key)
+            self.assertNotIn('ApiKey', self.controller.draft()['parameters'])
+            self.assertEqual(list(Path(self.tmp.name).glob('*.json')), [])
+
+    def test_new_fields_validate_native_capabilities_and_single_key(self):
+        for key, value in [('ApiKey', 'key,second'), ('ApiKey', 'key with space'), ('ApiKey', 'key\nheader'),
+                           ('LogLevel', 'verbose'), ('ThinkingMode', 'on'), ('Concurrency', 9),
+                           ('ChatTemplateFile', str(Path(self.tmp.name) / 'missing.jinja'))]:
+            bad = json.loads(json.dumps(self.config)); bad['parameters'][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                console.normalize(bad, self.controller.backends)
+        self.config['parameters'].update(Backend='llamacpp', ThinkingMode='on', Concurrency=4)
+        self.assertEqual(console.normalize(self.config, self.controller.backends), self.config)
+        self.config['parameters']['Concurrency'] = 5
+        with self.assertRaises(ValueError):
+            console.normalize(self.config, self.controller.backends)
+
     @unittest.skipUnless(os.name == 'nt', 'Windows canonical launcher')
     def test_registered_worker_default_and_explicit_override(self):
         model = Path(self.tmp.name) / 'test.ninfer'; model.touch()
@@ -105,6 +160,20 @@ class ConsoleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.controller.browse_model({'backend': 'powershell'})
         self.assertEqual(self.controller.status()['state'], 'stopped')
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows native picker')
+    def test_template_picker_returns_literal_file_and_allows_cancel(self):
+        template = Path(self.tmp.name) / "chat & ' $literal.jinja"; template.touch()
+        request = {'backend': 'llamacpp', 'current_path': str(template)}
+        with patch.object(console.subprocess, 'run', return_value=SimpleNamespace(returncode=0,
+                stdout=json.dumps({'path': str(template)}), stderr='')) as run:
+            self.assertEqual(self.controller.browse_model(request, template=True)['path'], str(template))
+            self.assertIn('-Template', run.call_args.args[0])
+            self.assertNotIn('shell', run.call_args.kwargs)
+        with patch.object(console.subprocess, 'run', return_value=SimpleNamespace(returncode=0,
+                stdout='{"path":null}', stderr='')):
+            self.assertEqual(self.controller.browse_model(request, template=True), {'path': None})
+        self.assertFalse(self.controller.picker_lock.locked())
 
     def test_scan_filters_backend_auxiliary_and_split_files_without_loading(self):
         folder = Path(self.tmp.name)

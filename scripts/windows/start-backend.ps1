@@ -8,6 +8,11 @@ param(
     [uint32[]]$StageLayers = @(),
     [ValidateRange(1, 65535)][int]$Port = 18200,
     [string]$ListenHost = '127.0.0.1',
+    [ValidateLength(1, 512)][ValidatePattern('^[A-Za-z0-9._~+/-]+=*$')][string]$ApiKey,
+    [string]$ModelAlias,
+    [ValidateSet('off', 'error', 'warning', 'info', 'trace', 'debug')][string]$LogLevel,
+    [string]$ChatTemplateFile,
+    [ValidateSet('default', 'on', 'off')][string]$ThinkingMode = 'default',
     [ValidateRange(256, 2147483647)][int]$Context = 262144,
     [ValidateRange(128, 2147483647)][int]$Budget = 32768,
     [ValidateRange(64, 2147483647)][int]$Reserve = 1024,
@@ -34,7 +39,7 @@ param(
     [ValidateScript({ $_ -gt 0 -and $_ -le 1 })][double]$LrfuTopFraction = 0.9,
     [ValidateSet('mean', 'max')][string]$ScoreAggregation = 'max',
     [string]$DiskPath,
-    [ValidateRange(1, 1048576)][int]$DiskMiB = 4096,
+    [ValidateRange(0, 1048576)][int]$DiskMiB = 4096,
     [string[]]$WorkerArgs = @(),
     [switch]$Describe,
     [switch]$DryRun
@@ -74,9 +79,32 @@ if ($Describe) { $capabilities | ConvertTo-Json -Depth 4; return }
 if (@($WorkerArgs | Where-Object { $_ -match '^--kvmem-disk-(path|mib)(=|$)' }).Count) {
     throw 'Use -DiskPath and -DiskMiB to configure shared active/idle SSD storage'
 }
-if (($PSBoundParameters.ContainsKey('DiskPath') -or $PSBoundParameters.ContainsKey('DiskMiB')) -and
+if (($PSBoundParameters.ContainsKey('DiskPath') -or ($PSBoundParameters.ContainsKey('DiskMiB') -and $DiskMiB -gt 0)) -and
     [string]::IsNullOrWhiteSpace($DiskPath)) {
     throw 'SSD storage requires a nonempty -DiskPath'
+}
+if ($DiskPath -and $DiskMiB -eq 0) { throw 'Omit -DiskPath when -DiskMiB is 0 (SSD disabled)' }
+foreach ($setting in @(
+    @('ApiKey', '^--api-key(-file)?(=|$)'),
+    @('ModelAlias', '^(-a|--alias|--model-id)(=|$)'),
+    @('LogLevel', '^(-lv|--verbosity|--log-verbosity|--log-level)(=|$)'),
+    @('ChatTemplateFile', '^--chat-template(-file)?(=|$)'),
+    @('ThinkingMode', '^--(enable-thinking|no-think(ing)?)(=|$)'),
+    @('Concurrency', '^(-np|--parallel|--max-concurrency)(=|$)')
+)) {
+    if ($PSBoundParameters.ContainsKey($setting[0]) -and @($WorkerArgs | Where-Object { $_ -match $setting[1] }).Count) {
+        throw "Use -$($setting[0]) without a conflicting native option in WorkerArgs"
+    }
+}
+if ($ChatTemplateFile) {
+    if (!(Test-Path -LiteralPath $ChatTemplateFile -PathType Leaf)) { throw 'ChatTemplateFile must be an existing template file' }
+    $ChatTemplateFile = (Resolve-Path -LiteralPath $ChatTemplateFile).Path
+}
+if ($Backend -eq 'ninfer' -and $ThinkingMode -eq 'on') {
+    throw 'NInfer has no native thinking-on startup override; use default or off (requests can select thinking)'
+}
+if (@($WorkerArgs | Where-Object { $_ -match '^--(no-)?kvmem($|-(budget|gen-reserve|host-mib|sessions|sink-tokens|recent-tokens|lrfu|lrfu-lambda|lrfu-top-frac|score-agg)(=|$))' }).Count) {
+    throw 'KVMem common options are owned by the launcher; use its named parameters instead of WorkerArgs'
 }
 if (!$Worker) {
     $file = if ($Backend -eq 'ninfer') { 'ninfer-kvmem-server.exe' } else { 'llama-kvmem-server.exe' }
@@ -109,9 +137,6 @@ if ($Backend -eq 'ninfer') {
     }
     if (@($WorkerArgs | Where-Object { $_ -match '^--default-thinking-budget(=|$)' }).Count) {
         throw 'Use -ThinkingBudget to configure the ninfer thinking budget'
-    }
-    if (@($WorkerArgs | Where-Object { $_ -match '^--kvmem-(sink|recent)-tokens(=|$)' }).Count) {
-        throw 'Use -SinkTokens and -RecentTokens to configure the ninfer keep windows'
     }
 }
 if (!$KvType) { $KvType = if ($Backend -eq 'ninfer') { 'int8' } else { 'q8_0' } }
@@ -157,15 +182,28 @@ if ($Backend -eq 'ninfer') {
     if ($Vision) { $nativeArgs += @('--vision', '--vision-residency', $VisionResidency, '--vision-max-merged', "$VisionTokens") }
     if ($ThinkingBudget -gt 0) { $nativeArgs += @('--default-thinking-budget', "$ThinkingBudget") }
 } else {
-    foreach ($name in @('StageLayers', 'MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'ThinkingBudget')) {
+    if ($Concurrency -gt 4) { throw 'llama.cpp Concurrency must be 1..4' }
+    if ($Concurrency -gt 1 -and $DiskPath) { throw 'llama.cpp concurrent requests currently require SSD cache disabled' }
+    foreach ($name in @('StageLayers', 'MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'ThinkingBudget')) {
         if ($PSBoundParameters.ContainsKey($name)) { throw "-$name configures ninfer; use llama native options in -WorkerArgs" }
     }
     $nativeArgs = @('-m', $Model, '--host', $ListenHost, '--port', "$Port", '-c', "$Context",
         '-n', "$MaxTokens", '--kvmem-budget', "$Budget", '--kvmem-gen-reserve', "$Reserve",
         '--kv-dtype', $KvType, '-b', "$Prefill", '-ub', "$Prefill",
         '--kvmem-sink-tokens', "$SinkTokens", '--kvmem-recent-tokens', "$RecentTokens")
-    if ($PSBoundParameters.ContainsKey('HostMiB') -or $DiskPath) { $nativeArgs += @('--kvmem-host-mib', "$HostMiB") }
+    $nativeArgs += @('--kvmem-host-mib', "$HostMiB", '--kvmem-sessions', "$RetainedSessions")
+    if ($PSBoundParameters.ContainsKey('Concurrency')) { $nativeArgs += @('--parallel', "$Concurrency") }
 }
+if ($ApiKey) { $nativeArgs += @('--api-key', $ApiKey) }
+if ($ModelAlias) { $nativeArgs += @($(if ($Backend -eq 'ninfer') { '--model-id' } else { '--alias' }), $ModelAlias) }
+if ($ChatTemplateFile) { $nativeArgs += @($(if ($Backend -eq 'ninfer') { '--chat-template' } else { '--chat-template-file' }), $ChatTemplateFile) }
+if ($LogLevel) {
+    if ($Backend -eq 'ninfer') { $nativeArgs += @('--log-level', $LogLevel) }
+    else { $nativeArgs += @('--verbosity', "$(@{off=0; error=1; warning=2; info=3; trace=4; debug=5}[$LogLevel])") }
+}
+if ($ThinkingMode -eq 'off') { $nativeArgs += $(if ($Backend -eq 'ninfer') { '--no-thinking' } else { '--no-think' }) }
+if ($ThinkingMode -eq 'on') { $nativeArgs += '--enable-thinking' }
+$nativeArgs += '--kvmem'
 if ($DiskPath) { $nativeArgs += @('--kvmem-disk-path', $DiskPath, '--kvmem-disk-mib', "$DiskMiB") }
 # Use invariant decimals because both native parsers expect a dot.
 if (!$NoLrfu) {
@@ -173,10 +211,17 @@ if (!$NoLrfu) {
         '--kvmem-lrfu-lambda', $LrfuLambda.ToString('R', [Globalization.CultureInfo]::InvariantCulture),
         '--kvmem-lrfu-top-frac', $LrfuTopFraction.ToString('R', [Globalization.CultureInfo]::InvariantCulture))
 }
+if ($NoLrfu) { $nativeArgs += '--no-kvmem-lrfu' }
 $nativeArgs += @('--kvmem-score-agg', $ScoreAggregation)
 $nativeArgs += $WorkerArgs
 if ($DryRun) {
-    @{ backend = $Backend; argv = @($Worker) + $nativeArgs; capabilities = $capabilities
+    $displayArgs = @($nativeArgs)
+    for ($i = 0; $i -lt $displayArgs.Count; $i++) {
+        if ($displayArgs[$i] -eq '--api-key' -and $i + 1 -lt $displayArgs.Count) {
+            $i++; $displayArgs[$i] = '<redacted>'
+        } elseif ($displayArgs[$i] -match '^--api-key=') { $displayArgs[$i] = '--api-key=<redacted>' }
+    }
+    @{ backend = $Backend; argv = @($Worker) + $displayArgs; capabilities = $capabilities
        environment = @{ CUDA_VISIBLE_DEVICES = $Gpu; CUDA_DEVICE_ORDER = 'PCI_BUS_ID' } } |
         ConvertTo-Json -Depth 6
     return

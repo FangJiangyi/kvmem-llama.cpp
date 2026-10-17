@@ -44,8 +44,9 @@ public:
         int id_ = -1;
         bool registered_ = false;
     };
-    kvmem_lane_conversations(const std::vector<ServerState *> & lanes, int count, uint64_t bytes)
-        : lanes_(lanes), resident_(lanes.size()), max_(count), bytes_max_(bytes) {
+    kvmem_lane_conversations(const std::vector<ServerState *> & lanes, int count, uint64_t bytes,
+                            bool inactive_limit = false)
+        : lanes_(lanes), resident_(lanes.size()), max_(count), inactive_limit_(inactive_limit), bytes_max_(bytes) {
         for (size_t lane = 0; lane < lanes.size(); ++lane) {
             const int id = next_id_++;
             auto & held = entries_.emplace(id, entry{}).first->second;
@@ -98,7 +99,7 @@ public:
                 }
             }
         }
-        if (id < 0 && entries_.size() >= (size_t)max_) {
+        if (id < 0 && !inactive_limit_ && entries_.size() >= (size_t)max_) {
             for (const auto & item : entries_) {
                 if (!eligible(item.second, busy) || protected_entry(item.second)) continue;
                 if (id < 0 || item.second.used < entries_.at(id).used) id = item.first;
@@ -263,6 +264,7 @@ public:
             auto committed = op.attached && !op.ready ? snapshot{} : describe(st, llama_kvmem_store_n_tokens());
             const uint64_t bytes = payload_bytes(st) + llama_kvmem_store_active_bytes();
             const uint64_t native = disk_ ? llama_kvmem_store_payload_bytes(llama_kvmem_store_current(), false) : 0;
+            st.active_prompt.reset();
             std::lock_guard<std::mutex> lock(mu_);
             const int active = op.attached ? op.id : op.outgoing;
             auto & held = entries_.at(active);
@@ -280,6 +282,7 @@ public:
                 if (op.attached && op.outgoing != op.id) entries_.at(op.outgoing).committed = snapshot{};
             }
             entries_.at(op.outgoing).switching = false;
+            enforce_sessions(op.lane);
             enforce_bytes();
         } catch (const std::exception & e) {
             LOG_ERR("srv    KVMEM lane commit failed: %s\n", e.what());
@@ -296,7 +299,15 @@ public:
     }
     json status(int lane = -1) const {
         std::lock_guard<std::mutex> lock(mu_);
+        size_t active = 0, retained = 0;
+        for (const auto & item : entries_) {
+            active += item.second.busy ? 1 : 0;
+            retained += !item.second.busy && item.second.committed.match.rows > 0 ? 1 : 0;
+        }
         json result = {{"count", entries_.size()}, {"max", max_}, {"bytes", bytes_locked()},
+            {"active_sessions", active}, {"retained_sessions", retained},
+            {"retained_sessions_limit", inactive_limit_ ? json(max_) : json(nullptr)},
+            {"session_limit_kind", inactive_limit_ ? "inactive" : "legacy_total"},
             {"bytes_max", bytes_max_}, {"switches", switches_}, {"evictions", evictions_},
             {"extends", extends_}, {"forks", forks_}};
         if (lane >= 0) {
@@ -316,6 +327,7 @@ private:
     std::filesystem::path disk_path_;
     uint64_t payload_budget_ = 0, snapshot_generation_ = 0;
     int max_, next_id_ = 0;
+    bool inactive_limit_ = false;
     bool warned_bytes_ = false, has_recurrent_ = false;
     uint64_t bytes_max_, clock_ = 0, switches_ = 0, evictions_ = 0, extends_ = 0, forks_ = 0;
     uint64_t retained_bytes_locked(int exclude = -1) const {
@@ -438,6 +450,54 @@ private:
         uint64_t bytes = 0;
         for (const auto & item : entries_) bytes += item.second.bytes;
         return bytes;
+    }
+    void enforce_sessions(int finishing_lane) {
+        if (!inactive_limit_) return;
+        // Queued previews are hints, not retained-history reservations: select()
+        // replans under mu_ and asks for media preparation again after eviction.
+        // Never evict an active or switching owner. Resident idle lanes can be
+        // cleared only while owning their execution lock. try_lock avoids the
+        // inverse lock order of another lane concurrently entering finish().
+        for (;;) {
+            size_t retained = 0;
+            for (const auto & item : entries_)
+                retained += !item.second.busy && item.second.committed.match.rows > 0 ? 1 : 0;
+            if (retained <= size_t(max_)) break;
+            auto victim = entries_.end();
+            std::unique_lock<std::mutex> lane_lock;
+            for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+                const auto & held = it->second;
+                if (held.busy || held.switching || held.committed.match.rows == 0) continue;
+                if (victim != entries_.end() && held.used >= victim->second.used) continue;
+                std::unique_lock<std::mutex> candidate_lock;
+                if (held.lane >= 0 && held.lane != finishing_lane) {
+                    candidate_lock = std::unique_lock<std::mutex>(lanes_[held.lane]->mu, std::try_to_lock);
+                    if (!candidate_lock.owns_lock()) continue;
+                }
+                victim = it;
+                lane_lock = std::move(candidate_lock);
+            }
+            if (victim == entries_.end()) throw std::logic_error("inactive history quota has no idle victim");
+            auto & held = victim->second;
+            if (held.lane >= 0) {
+                auto & state = *lanes_[held.lane];
+                kvmem_execution_scope execution(state.execution.get());
+                llama_driver_clear(state);
+                held.committed = snapshot{};
+                held.client_id.clear();
+                held.bytes = payload_bytes(state) + llama_kvmem_store_active_bytes();
+                held.native_bytes = disk_ ? llama_kvmem_store_payload_bytes(llama_kvmem_store_current(), false) : 0;
+            } else {
+                entries_.erase(victim);
+            }
+            ++evictions_;
+        }
+        for (auto it = entries_.begin(); it != entries_.end();) {
+            const auto & held = it->second;
+            if (held.lane < 0 && !held.busy && !held.switching && !held.committed.match.rows)
+                it = entries_.erase(it);
+            else ++it;
+        }
     }
     void enforce_bytes() {
         while (bytes_max_ && bytes_locked() > bytes_max_) {
