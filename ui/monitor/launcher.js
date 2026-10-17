@@ -26,6 +26,12 @@
     {id:'ninfer-v018', title:['NInfer · 0.18.0 默认','NInfer · 0.18.0 default'], note:['200K 上下文 · 36K 历史 KV · 12 GiB RAM · 图像 / MTP','200K context · 36K history KV · 12 GiB RAM · Vision / MTP'], parameters:{Backend:'ninfer',Context:204800,Budget:36864,Reserve:16384,HostMiB:12288,Prefill:256,MaxTokens:16384,SinkTokens:12288,RecentTokens:1024,KvType:'int8',Concurrency:1,RetainedSessions:1,MtpDrafts:4,AdaptiveMtp:true,NgramDrafts:31,NgramMinMatch:12,Vision:true,VisionResidency:'cpu',VisionTokens:1024,ThinkingBudget:8192,NoLrfu:false,LrfuLambda:0.5,LrfuTopFraction:0.9,ScoreAggregation:'max',DeviceProfile:'off',FastPrefill:false}},
   ];
   const defaults={Backend:'ninfer',Model:'',Worker:'',Gpu:'',Context:262144,Budget:32768,HostMiB:16384,Reserve:1024,Prefill:128,MaxTokens:1024,Port:18200,ListenHost:'127.0.0.1',SinkTokens:12288,RecentTokens:1024};
+  // Switching engines keeps the current common settings. Model assets, native
+  // formats, feature overrides and raw arguments retain each backend's draft.
+  const sharedSettings=['Gpu','Context','Budget','Reserve','HostMiB','Prefill','MaxTokens',
+    'Port','ListenHost','SinkTokens','RecentTokens','RetainedSessions','Concurrency',
+    'DiskEnabled','DiskPath','DiskMiB','NoLrfu','LrfuLambda','LrfuTopFraction','ScoreAggregation',
+    'ModelAlias','LogLevel'];
   const names={llamacpp:'llama.cpp',ninfer:'NInfer'};
   const groups=[['缓存与历史','Cache & history'],['硬件与加速','Hardware & acceleration'],['生成与思考','Generation & thinking'],['模板与图像','Templates & vision'],['服务与并发','Service & concurrency']];
   const make=(tag,attrs={},text)=>{const el=document.createElement(tag);Object.entries(attrs).forEach(([k,v])=>el.setAttribute(k,v));if(text!==undefined)el.textContent=text;return el;};
@@ -146,6 +152,7 @@
   }
   function launchData(){
     const data=collect(),p=data.parameters;
+    if(p.Backend==='llamacpp'&&info.kv_cache_version!==1)throw Error(tr('K/V 独立格式设置已更新，请先关闭原启动窗口并重新启动控制台，然后刷新页面。','Independent K/V settings have been updated. Close the original startup window, restart the console, then refresh this page.'));
     const disk=root.querySelector('[data-param=DiskEnabled]');
     if(disk?.checked&&!disk.disabled){
       if(!p.DiskPath?.trim())throw Error(tr('启用 SSD 缓存后，请填写 SSD 缓存目录。','Enter an SSD cache directory when SSD cache is enabled.'));
@@ -164,8 +171,12 @@
       row(tr('推理引擎','Backend'),names[p.Backend]||p.Backend,'Backend');
       row(tr('模型文件','Model file'),p.Model||tr('请选择模型','Choose a model'),'Model',!!p.Model);
       const ids=(p.Gpu||'').split(',').filter(Boolean),missing=ids.filter(id=>!info.gpus.some(g=>g.uuid===id));
-      row(tr('显卡顺序','GPU order'),ids.length?ids.map((id,i)=>`${i+1}. ${info.gpus.find(g=>g.uuid===id)?.name||id}${p.StageLayers?.[i]?tr(` · ${p.StageLayers[i]} 层`,` · ${p.StageLayers[i]} layers`):''}`).join('\n'):tr('请选择显卡','Choose a GPU'),'Gpu',ids.length>0&&!missing.length);
+      const gpuIssue=root.querySelector('[data-gpu-choice]')?.validationMessage||'';
+      const gpuSummary=ids.length?ids.map((id,i)=>`${i+1}. ${info.gpus.find(g=>g.uuid===id)?.name||id}${p.StageLayers?.[i]?tr(` · ${p.StageLayers[i]} 层`,` · ${p.StageLayers[i]} layers`):''}`).join('\n'):tr('请选择显卡','Choose a GPU');
+      row(tr('显卡顺序','GPU order'),gpuSummary+(gpuIssue?'\n'+gpuIssue:''),'Gpu',ids.length>0&&!missing.length&&!gpuIssue);
       row(tr('上下文 / GPU 历史 / RAM 缓存','Context / GPU history / RAM cache'),`${p.Context??'—'} tokens / ${p.Budget??'—'} tokens / ${p.HostMiB??'—'} MiB`,'Context');
+      row(tr('KV 缓存格式','KV cache format'),p.Backend==='llamacpp'?`K: ${p.KvTypeK||'—'} / V: ${p.KvTypeV||'—'}`:p.KvType||'—',p.Backend==='llamacpp'?'KvTypeK':'KvType');
+      for(const input of root.querySelectorAll('form [data-param]'))if(input.dataset.param!=='Gpu'&&input.willValidate&&!input.checkValidity())row(input.getAttribute('aria-label')||input.dataset.param,input.validationMessage,input.dataset.param,false);
       if(errors.length){summary.textContent=tr('需要补全或修改配置','Some settings need attention');return;}
       const result=await api('preview',data);if(!el.isConnected)return;
       row(tr('后端程序','Backend executable'),result.argv[0],'Worker');
@@ -230,12 +241,22 @@
     for(const key of ['LrfuLambda','LrfuTopFraction'])dependency(key,lrfu,tr('先开启 LRFU。','Enable LRFU first.'));
     for(const key of ['VisionTokens','VisionResidency'])dependency(key,vision,tr('先开启图像输入。','Enable vision input first.'));
     dependency('ThinkingBudget',get('ThinkingMode')?.value!=='off',tr('默认思考模式已关闭；重新开启或选择默认后可设置预算。','Default thinking is off. Select on or default to set a budget.'));
-    const mtp=Number(get('MtpDrafts')?.value)>0;
-    for(const key of ['AdaptiveMtp','NgramDrafts'])dependency(key,mtp,tr('先将 MTP 推测长度设为大于 0。','Set an MTP draft length greater than 0 first.'));
+    const mtpEnabled=!!get('MtpEnabled')?.checked&&!get('MtpEnabled').disabled;
+    dependency('MtpDrafts',mtpEnabled,tr('先开启 MTP。','Enable MTP first.'));
+    if(get('MtpDrafts'))get('MtpDrafts').required=mtpEnabled;
+    const mtp=mtpEnabled&&Number(get('MtpDrafts')?.value)>0;
+    for(const key of ['AdaptiveMtp','NgramDrafts'])dependency(key,mtp,tr('先开启 MTP，并设置有效的推测长度。','Enable MTP and set a valid draft length first.'));
     dependency('NgramMinMatch',mtp&&Number(get('NgramDrafts')?.value)>0,tr('先启用 MTP，并将 N-gram 推测 token 数设为大于 0。','Enable MTP and set N-gram draft tokens greater than 0 first.'));
     dependency('FastPrefill',['int8','rk8v4','rk4v4','rk4v4-e8','rk2v4-e8'].includes(get('KvType')?.value),tr('当前 KV 格式不支持快速预填充。','The current KV format does not support fast prefill.'));
     const gpu=get('Gpu'),gpuCount=gpu?.multiple?gpu.selectedOptions.length:(gpu?.value||'').split(',').filter(Boolean).length;
     dependency('StageLayers',gpuCount>1,tr('至少选择两张显卡后才能设置层数分配。','Select at least two GPUs to assign layers.'));
+    const keyType=get('KvTypeK'),valueType=get('KvTypeV'),pairStatus=root.querySelector('[data-kv-pair-status]');
+    if(keyType&&valueType){
+      const quantized=['q8_0','q5_0','q4_0'],mixed=keyType.value&&valueType.value&&quantized.includes(keyType.value)!==quantized.includes(valueType.value);
+      const reason=mixed?tr('当前后端不能混用浮点与量化 K/V。请两边都选 q8_0、q5_0 或 q4_0，或两边都选 f16、f32。','This backend cannot mix floating-point and quantized K/V. Use q8_0, q5_0 or q4_0 for both sides, or f16/f32 for both.'):'';
+      keyType.setCustomValidity(reason);valueType.setCustomValidity(reason);
+      if(pairStatus){pairStatus.textContent=reason;pairStatus.hidden=!mixed;}
+    }
     if(openHelp)showHelp(openHelp);
   }
 
@@ -281,51 +302,113 @@
     refreshRecent();
     recent.onchange = () => { if(recent.value){input.value=recent.value;input.dispatchEvent(new Event('input',{bubbles:true}));recent.value='';} };
     box.append(recent);
-    const scan = make('button',{type:'button',class:'s-button l-scan-trigger','data-scan-models':''},tr('快速扫描','Quick scan'));
+    const scan = make('button',{type:'button',class:'s-button l-scan-trigger','data-scan-models':''},tr('查找模型…','Find models…'));
     const modelTools=make('div',{class:'l-model-tools'});
     modelTools.append(make('small',{},(p.Backend==='ninfer'?'.ninfer':'.gguf')+tr(' · 本机文件',' · Local file')),scan);
     const dialog = make('dialog',{class:'l-model-dialog','aria-labelledby':'model-scan-title'});
     const head = make('div',{class:'l-heading'});
     const close = make('button',{type:'button',class:'s-button'},tr('关闭','Close'));
-    head.append(make('h2',{id:'model-scan-title',class:'s-title'},tr('候选模型','Candidate models')),close);
+    head.append(make('h2',{id:'model-scan-title',class:'s-title'},tr('查找模型','Find models')+' · '+(p.Backend==='ninfer'?'.ninfer':'.gguf')),close);
+    const folderLabel=make('label',{class:'l-field'},tr('模型所在文件夹','Model folder'));
+    const directory=make('input',{type:'text','data-scan-directory':'',placeholder:tr('粘贴文件夹路径，或点击浏览文件夹','Paste a folder path, or browse for a folder')});
+    folderLabel.append(directory);
+    const folderActions=make('div',{class:'l-actions l-scan-actions'});
+    const other=make('button',{type:'button',class:'s-button','data-scan-folder':''},tr('浏览文件夹…','Browse folder…'));
+    const submit=make('button',{type:'button',class:'s-button l-primary','data-scan-submit':''},tr('扫描此目录并记住','Scan and remember folder'));
+    const rescan=make('button',{type:'button',class:'s-button','data-scan-all':'','aria-describedby':'model-scan-locations-help'},tr('扫描常用位置','Scan known locations'));
+    folderActions.append(other,submit,rescan);
+    const locationHelp=make('p',{id:'model-scan-locations-help',class:'l-muted l-scan-help'},tr('常用位置：已记住的模型目录、当前模型所在文件夹、程序所在文件夹，以及附近名为 models 或 model 的文件夹。不会扫描整个硬盘；其他位置请在上方选择或粘贴目录。本次具体位置见“扫描范围”。','Known locations include remembered model folders, the current model’s folder, the program folders, and nearby folders named models or model. This does not scan entire drives. For other locations, choose or paste a folder above. Expand Search locations to see the actual folders searched.'));
+    const savedRow=make('div',{class:'l-scan-saved-row'});
+    const saved=make('select',{'data-scan-saved':'','aria-label':tr('已记住的模型目录','Remembered model folders')});
+    const forget=make('button',{type:'button',class:'s-button','data-scan-forget':'',disabled:'',title:tr('只移除目录记录，不删除模型文件','Remove the folder record; keep all model files')},tr('移除目录记录','Forget folder'));
+    savedRow.append(saved,forget);
+    const folderError=make('p',{class:'l-error',role:'alert','data-scan-folder-error':'',hidden:''});
     const progress = make('p',{class:'l-muted','aria-live':'polite','data-scan-status':''});
     const scope = make('details',{class:'l-scan-scope'});scope.append(make('summary',{},tr('扫描范围','Search locations')));
     const paths = make('div',{class:'l-muted'});scope.append(paths);
+    const filter=make('input',{type:'search','data-scan-filter':'','aria-label':tr('筛选模型','Filter models'),placeholder:tr('按模型名称或路径筛选结果','Filter results by name or path')});
+    const formatHint=make('p',{class:'l-muted','data-scan-format-hint':'',hidden:''});
     const results = make('div',{class:'l-scan-results','data-scan-results':''});
-    const other = make('button',{type:'button',class:'s-button','data-scan-folder':''},tr('选择其他目录扫描…','Scan another folder…'));
-    dialog.append(head,progress,scope,results,other,make('p',{class:'l-muted'},tr('候选列表按文件名筛选；模型能否运行，仍需启动校验。','Candidates are filtered by filename; launch validation still determines compatibility.')));
+    dialog.append(head,folderLabel,folderActions,locationHelp,savedRow,folderError,
+      make('p',{class:'l-muted'},tr('扫描指定目录后会记住位置，下次可直接选择。模型文件保留在本机。','Scanned folders are remembered for next time. Model files stay on this computer.')),
+      progress,scope,filter,formatHint,results,make('p',{class:'l-muted'},tr('选择结果只填入启动配置。文件名和大小不能证明模型兼容，启动时还会检查。','Selecting a result only fills the launch settings. File names and sizes do not prove compatibility; startup checks still apply.')));
     box.append(modelTools,dialog);
     close.onclick=()=>dialog.close();
-    let scanning=false;
-    async function runScan(directory='') {
-      if(scanning)return;
-      scanning=true;other.disabled=true;results.replaceChildren();
-      progress.textContent=tr('正在扫描模型目录…','Scanning model folders…');
-      try {
-        const result=await api('scan-models',{backend:p.Backend,current_path:input.value,...(directory?{directory}:{})});
-        paths.textContent=result.roots.join('\n')||tr('未找到默认模型目录','No default model directories found');
-        progress.textContent=tr(`找到 ${result.models.length} 个候选模型`,`Found ${result.models.length} candidate models`)
-          +(result.limited?tr(' · 已达到快速扫描限制，可选择更具体的目录',' · Quick scan limit reached; choose a more specific folder'):'')
-          +(result.skipped?tr(' · 部分文件或目录无法读取',' · Some files or folders could not be read'):'');
-        if(!result.models.length)results.append(make('p',{class:'l-muted'},tr('可以选择模型所在文件夹再扫描，或直接使用“选择模型”。','Choose the model folder to scan, or use Choose model.')));
-        for(const model of result.models){
-          const pick=make('button',{type:'button',class:'l-model-candidate','data-model-candidate':model.path});
-          pick.append(make('span',{},model.name),make('small',{},`${(model.bytes/1024**3).toLocaleString(window.monitorI18n.language,{maximumFractionDigits:2})} GiB · ${model.format}`),make('small',{class:'l-candidate-path'},model.path));
-          pick.onclick=()=>{input.value=model.path;rememberModel(p.Backend,model.path);refreshRecent();input.dispatchEvent(new Event('input',{bubbles:true}));dialog.close();input.focus();message(tr('已选用候选模型；下次启动生效。','Candidate selected; applies on next launch.'));};
-          results.append(pick);
-        }
-      }catch(error){progress.textContent=error.message;}
-      finally{scanning=false;other.disabled=false;}
+    let scanning=false, scanTask=null, scanGeneration=0, latest=null;
+    function folderMessage(text='',error=true){folderError.textContent=text;folderError.hidden=!text;folderError.classList.toggle('l-error',error);folderError.classList.toggle('l-muted',!error);folderError.setAttribute('role',error?'alert':'status');}
+    async function refreshLocations(selected='',generation=scanGeneration){
+      const data=await api('model-directories');
+      if(!dialog.isConnected||!dialog.open||generation!==scanGeneration)return;
+      saved.replaceChildren(make('option',{value:''},tr('已记住的目录（选择后扫描）','Remembered folders (select to scan)')));
+      for(const item of data.directories||[])saved.append(make('option',{value:item.path},item.path+(item.available?'':tr(' · 当前不可访问',' · Unavailable'))));
+      saved.value=selected;forget.disabled=!saved.value;
     }
-    scan.onclick=()=>{if(busy)return;dialog.showModal();runScan();};
+    function showLocations(result){
+      paths.replaceChildren();
+      const labels={scanned:['已扫描','Scanned'],covered:['已包含','Included'],partial:['部分扫描','Partly scanned'],unavailable:['不存在或无法访问','Missing or inaccessible'],pending:['尚未扫描','Not scanned']};
+      for(const item of result.locations||result.roots.map(path=>({path,status:'scanned'}))){
+        const row=make('div',{class:'l-scan-location'});
+        row.append(make('span',{},item.path),make('small',{},tr(...(labels[item.status]||labels.pending))));paths.append(row);
+      }
+      if(!paths.childElementCount)paths.textContent=tr('尚未找到常用模型目录，请在上方选择模型文件夹。','No known model folder was found. Choose a model folder above.');
+      scope.open=!result.models.length||result.limited||!!result.skipped;
+    }
+    function renderResults(){
+      if(!latest)return;
+      const query=filter.value.trim().toLocaleLowerCase(),models=latest.models.filter(model=>(model.name+' '+model.path).toLocaleLowerCase().includes(query));
+      results.replaceChildren();
+      progress.textContent=query?tr(`显示 ${models.length} / ${latest.models.length} 个候选模型`,`Showing ${models.length} of ${latest.models.length} candidate models`):tr(`找到 ${latest.models.length} 个候选模型`,`Found ${latest.models.length} candidate models`);
+      const reasons={time:['扫描时间已达上限','Time limit reached'],entries:['检查的文件数量已达上限','Entry limit reached'],results:['候选数量已达上限','Result limit reached'],depth:['部分目录层级较深','Some folders are too deeply nested']};
+      if(latest.limited)progress.textContent+=tr(' · 仅显示部分结果：',' · Partial results: ')+(latest.limit_reasons?.length?latest.limit_reasons.map(key=>tr(...(reasons[key]||['已达扫描限制','Scan limit reached']))).join('；'):tr('已达扫描限制','Scan limit reached'))+tr('，可选择更具体的文件夹。','; choose a more specific folder.');
+      if(latest.skipped)progress.textContent+=tr(' · 部分文件或目录无法读取。',' · Some files or folders could not be read.');
+      if(!models.length)results.append(make('p',{class:'l-scan-empty'},query?tr('没有符合筛选条件的模型。','No models match this filter.'):tr(`扫描范围内未找到 ${p.Backend==='ninfer'?'.ninfer':'.gguf'} 模型。请在上方添加实际存放模型的文件夹，或直接使用“选择模型”。`,`No ${p.Backend==='ninfer'?'.ninfer':'.gguf'} models were found in these locations. Add the folder containing your models above, or use Choose model.`)));
+      for(const model of models){
+        const pick=make('button',{type:'button',class:'l-model-candidate','data-model-candidate':model.path});
+        const empty=model.bytes===0||model.warnings?.includes('empty');
+        pick.disabled=!!empty;
+        const unit=model.bytes>=1024**3?['GiB',1024**3]:model.bytes>=1024**2?['MiB',1024**2]:model.bytes>=1024?['KiB',1024]:['B',1];
+        pick.append(make('span',{},model.name),make('small',{},`${(model.bytes/unit[1]).toLocaleString(window.monitorI18n.language,{maximumFractionDigits:2})} ${unit[0]} · ${model.format}`),make('small',{class:'l-candidate-path'},model.path));
+        if(empty)pick.append(make('small',{class:'l-error'},tr('文件为空，可能尚未下载完成。','This file is empty; its download may be incomplete.')));
+        pick.onclick=()=>{if(!input.isConnected||!dialog.open)return;input.value=model.path;rememberModel(p.Backend,model.path);refreshRecent();input.dispatchEvent(new Event('input',{bubbles:true}));dialog.close();input.focus();message(tr('已选用候选模型；下次启动生效。','Candidate selected; applies on next launch.'));};
+        results.append(pick);
+      }
+      const different=p.Backend==='ninfer'?'gguf':'ninfer',count=latest.other_formats?.[different]||0;
+      formatHint.hidden=!count;formatHint.textContent=count?tr(`扫描范围还发现 ${count} 个 .${different} 文件；当前后端需要 ${p.Backend==='ninfer'?'.ninfer':'.gguf'} 模型。`,`The scanned locations also contain ${count} .${different} files; this backend needs ${p.Backend==='ninfer'?'.ninfer':'.gguf'} models.`):'';
+    }
+    dialog.addEventListener('close',()=>{scanGeneration++;scanTask?.abort();scanning=false;});
+    filter.oninput=renderResults;
+    async function runScan(searchDirectory='') {
+      if(scanning||!dialog.open)return;
+      const generation=++scanGeneration,controller=new AbortController();scanTask=controller;
+      const timer=setTimeout(()=>controller.abort(),12000);
+      scanning=true;other.disabled=true;submit.disabled=true;rescan.disabled=true;saved.disabled=true;forget.disabled=true;filter.disabled=true;results.replaceChildren();formatHint.hidden=true;folderMessage();
+      progress.textContent=tr('正在扫描模型目录…','Scanning model folders…');paths.textContent=tr('正在确定扫描范围…','Determining search locations…');
+      try {
+        const response=await fetch('/api/launcher/scan-models',{method:'POST',headers:{'Content-Type':'application/json','X-KVMem-Token':info.token},body:JSON.stringify({backend:p.Backend,current_path:input.value,worker_path:root.querySelector('[data-param=Worker]')?.value||'',...(searchDirectory?{directory:searchDirectory}:{})}),signal:controller.signal});
+        const result=await response.json();if(!response.ok)throw Error(result.error||'HTTP '+response.status);
+        if(generation!==scanGeneration||!dialog.open||!input.isConnected)return;
+        latest=result;showLocations(result);
+        if(searchDirectory&&result.roots[0])directory.value=result.roots[0];
+        try{await refreshLocations(searchDirectory?directory.value:'',generation);}catch(error){if(generation===scanGeneration&&dialog.open)folderMessage(error.message);}
+        if(generation===scanGeneration&&dialog.open&&input.isConnected)renderResults();
+      }catch(error){if(generation===scanGeneration&&dialog.open){latest=null;progress.textContent=tr('本次扫描未完成，可以修改目录后重试。','This scan did not complete. Adjust the folder and try again.');folderMessage(error.name==='AbortError'?tr('扫描超时，请选择更具体的模型文件夹，或直接选择模型文件。','The scan timed out. Choose a more specific folder or select the model file directly.'):error.message);}}
+      finally{clearTimeout(timer);if(generation===scanGeneration){scanning=false;other.disabled=false;submit.disabled=false;rescan.disabled=false;saved.disabled=false;forget.disabled=!saved.value;filter.disabled=false;scanTask=null;}}
+    }
+    scan.onclick=()=>{if(busy)return;if(info.model_library_version!==1){showError(Error(tr('模型查找功能已更新，请先关闭原启动窗口并重新启动控制台，然后刷新页面。','Model discovery has been updated. Close the original startup window, restart the console, then refresh this page.')));return;}dialog.showModal();other.disabled=false;submit.disabled=false;rescan.disabled=false;filter.disabled=false;filter.value='';runScan();};
+    submit.onclick=()=>{const value=directory.value.trim();if(!value){folderMessage(tr('请先填写模型文件夹路径，或点击“浏览文件夹”。','Enter a model folder path or click Browse folder first.'));directory.focus();return;}filter.value='';runScan(value);};
+    directory.onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();submit.click();}};
+    rescan.onclick=()=>{directory.value='';filter.value='';runScan();};
+    saved.onchange=()=>{forget.disabled=!saved.value;if(saved.value){directory.value=saved.value;filter.value='';runScan(saved.value);}};
+    forget.onclick=async()=>{if(!saved.value||scanning)return;try{await api('model-directories',{action:'remove',path:saved.value});directory.value='';await refreshLocations();runScan();}catch(error){folderMessage(error.message);}};
     other.onclick=async()=>{
       if(pickingModel||scanning)return;
       pickingModel=true;other.disabled=true;
       try {
-        const response=await fetch('/api/launcher/browse-model-folder',{method:'POST',headers:{'Content-Type':'application/json','X-KVMem-Token':info.token},body:JSON.stringify({backend:p.Backend,current_path:input.value}),signal:AbortSignal.timeout(315000)});
-        const result=await response.json();if(!response.ok)throw Error(result.error||'HTTP '+response.status);
-        if(result.path)await runScan(result.path);
-      }catch(error){progress.textContent=error.message;}
+        folderMessage(tr('请在系统窗口中选择模型文件夹；也可取消后直接粘贴路径。','Choose the model folder in the system dialog, or cancel and paste its path.'),false);
+        const result=await api('browse-model-folder',{backend:p.Backend,current_path:directory.value||input.value},315000);
+        if(!dialog.open||!input.isConnected)return;
+        if(result.path){directory.value=result.path;filter.value='';await runScan(result.path);}else folderMessage(tr('已取消选择，当前扫描结果保持不变。','Folder selection cancelled; current results are unchanged.'),false);
+      }catch(error){if(dialog.open)folderMessage(error.message);}
       finally{pickingModel=false;other.disabled=false;}
     };
     browse.onclick = async () => {
@@ -354,8 +437,8 @@
     try {
       const before = captureDraft().parameters;
       presetUndo = {draft: captureDraft(), selected: selectedPreset, tab: activeTab};
-      perBackend[before.Backend] = structuredClone(before);
-      const assets = perBackend[preset.parameters.Backend] || {};
+      perBackend[before.Backend] = captureDraft();
+      const assets = perBackend[preset.parameters.Backend]?.parameters || {};
       const next = {...defaults, ...structuredClone(preset.parameters)};
       for (const key of ['Model','Worker']) {
         if (assets[key]) next[key] = assets[key];
@@ -428,13 +511,12 @@
     const core=make('section',{class:'s-card l-essential'});core.append(make('h2',{class:'s-title'},tr('模型与资源','Model & resources')));const fields=make('div',{class:'l-fields l-core'});core.append(fields);form.append(core);
     const backend=field(fields,p,'Backend','推理引擎','Backend','text',Object.entries(names).map(([v,t])=>[v,t]));Array.from(backend.options).forEach(o=>{o.disabled=!info.backends.includes(o.value);if(o.disabled)o.textContent+=' · '+tr('未安装','not installed');});
     modelPicker(fields,p);
-    const gpu=field(fields,p,'Gpu','推理显卡','Inference GPUs','text',info.gpus.map(g=>[g.uuid,g.name+' · '+g.uuid.slice(-8)]),[n?'按勾选顺序加入，可前移／后移；层数分配随显卡一起移动。':'当前控制台对此后端使用单卡',n?'GPUs join in selection order. Reorder below; assigned layers move with each GPU.':'This console currently uses one GPU for this backend']);
+    const gpu=field(fields,p,'Gpu','推理显卡','Inference GPUs','text',info.gpus.map(g=>[g.uuid,g.name+' · '+g.uuid.slice(-8)]),['选择要使用的显卡。多卡按勾选顺序排列，可前移／后移；切换引擎保留当前选择。','Choose the GPUs to use. Multiple GPUs follow selection order and can be reordered. Switching engines retains your selection.']);
     gpu.closest('label').classList.add('l-gpu-field');
-    if(n){gpu.multiple=true;gpu.size=2;Array.from(gpu.options).forEach(o=>o.selected=(p.Gpu||'').split(',').includes(o.value));}
-    else if(!p.Gpu){gpu.prepend(make('option',{value:''},tr('选择显卡','Select a GPU')));gpu.value='';}
+    gpu.multiple=true;gpu.size=2;Array.from(gpu.options).forEach(o=>o.selected=(p.Gpu||'').split(',').includes(o.value));
     gpu.required=true;
     if(!info.gpus.length){gpu.replaceChildren(make('option',{value:''},tr('未检测到 NVIDIA 显卡','No NVIDIA GPU detected')));}
-    if(n&&info.gpus.length){
+    if(info.gpus.length){
       const old=gpu.closest('label'),box=make('div',{class:old.className});
       box.append(...old.childNodes);old.replaceWith(box);
       gpu.hidden=true;gpu.required=false;gpu.setAttribute('aria-hidden','true');
@@ -442,6 +524,7 @@
       const checks=[],options=new Map(Array.from(gpu.options).map(option=>[option.value,option]));
       let order=[...new Set((p.Gpu||'').split(',').filter(id=>options.has(id)))];
       const ordered=make('div',{class:'l-gpu-order','data-gpu-order':'','aria-label':tr('显卡执行顺序','GPU execution order')});
+      const gpuLimit=make('p',{class:'l-muted l-gpu-limit','data-gpu-limit':'',hidden:''});
       function clearLayers(){
         const input=root.querySelector('[data-param=StageLayers]');
         if(input?.value.trim()){input.value='';message(tr('显卡数量已改变，原层数分配已清空，请重新设置。','GPU count changed. Previous layer allocation cleared; configure it again.'));}
@@ -455,8 +538,8 @@
         check.onchange=()=>{clearLayers();order=check.checked?[...order.filter(id=>id!==device.uuid),device.uuid]:order.filter(id=>id!==device.uuid);sync();gpu.dispatchEvent(new Event('input',{bubbles:true}));};
       }
       function drawOrder(){
-        ordered.replaceChildren();ordered.hidden=!order.length;
-        if(!order.length)return;
+        ordered.replaceChildren();ordered.hidden=order.length<2;
+        if(order.length<2)return;
         ordered.append(make('span',{class:'l-muted'},tr('执行顺序 · 从前到后','Execution order · first to last')));
         const input=root.querySelector('[data-param=StageLayers]'),layers=(input?.value||'').split(',').map(x=>x.trim());
         const valid=layers.length===order.length&&layers.every(x=>/^[1-9]\d*$/.test(x));
@@ -483,9 +566,12 @@
       function sync(){
         for(const id of [...order,...info.gpus.map(g=>g.uuid).filter(id=>!order.includes(id))]){const option=options.get(id);gpu.append(option);option.selected=order.includes(id);}
         checks.forEach(check=>{check.checked=order.includes(check.dataset.gpuChoice);check.closest('label').classList.toggle('is-selected',check.checked);});
-        checks[0].setCustomValidity(order.length?'':tr('请至少选择一张显卡','Select at least one GPU'));drawOrder();
+        const singleOnly=l&&order.length>1;
+        const reason=singleOnly?tr('当前启动器对 llama.cpp 仅接入单卡。已保留原选择，请只勾选一张显卡后再启动。','This launcher currently exposes one GPU for llama.cpp. Your selection is retained; select just one GPU before starting.'):!order.length?tr('请至少选择一张显卡','Select at least one GPU'):'';
+        gpuLimit.textContent=reason;gpuLimit.hidden=!reason;gpuLimit.classList.toggle('l-error',singleOnly);
+        checks[0].setCustomValidity(reason);choices.setAttribute('aria-invalid',String(!!reason));drawOrder();
       }
-      gpu.addEventListener('change',()=>{order=Array.from(gpu.selectedOptions).map(option=>option.value);sync();});sync();gpu.after(choices);box.append(ordered);
+      gpu.addEventListener('change',()=>{order=Array.from(gpu.selectedOptions).map(option=>option.value);sync();});sync();gpu.after(choices);box.append(ordered,gpuLimit);
       refreshGpuOrder=drawOrder;
     }
     field(fields,p,'Context','最大上下文 · tokens','Context limit · tokens','number');
@@ -495,8 +581,22 @@
     const section=make('section',{class:'s-card'}),tabs=make('div',{class:'l-tabs',role:'tablist','aria-label':tr('共性参数分组','Common settings groups')});section.append(tabs);form.append(section);const panels=[];
     groups.forEach((g,i)=>{const tab=make('button',{type:'button',class:'l-tab',role:'tab',id:'launch-tab-'+i,'aria-selected':String(activeTab===i),'aria-controls':'launch-panel-'+i},tr(...g));tabs.append(tab);const panel=make('div',{class:'l-panel',id:'launch-panel-'+i,role:'tabpanel','aria-labelledby':tab.id});panel.hidden=activeTab!==i;const grid=make('div',{class:'l-fields'});panel.append(grid);panels.push(grid);section.append(panel);tab.onclick=()=>{activeTab=i;tabs.querySelectorAll('button').forEach((x,j)=>x.setAttribute('aria-selected',String(i===j)));section.querySelectorAll('.l-panel').forEach((x,j)=>x.hidden=i!==j);};});
     field(panels[0],p,'HostMiB','RAM 历史缓存 · MiB','RAM history cache · MiB','number',null,['活动与空闲历史共享的原生 KV 数据硬预算；不含模型、统计索引等其他内存；1024 MiB = 1 GiB','Shared hard budget for active and idle native KV data; excludes model weights, statistics and other memory; 1024 MiB = 1 GiB']);
-    const kv=n?['int8','bf16','fp8','nvfp4','k8v4','rk8v4','rk4v4','rk4v4-e8','rk2v4-e8']:[ 'q8_0','f16','f32','q5_0','q4_0'];
-    field(panels[0],{...p,KvType:p.KvType||kv[0]},'KvType','KV 格式','KV format','text',kv.map(v=>[v,v]));
+    if(l){
+      const kv=['q8_0','q5_0','q4_0','f16','f32'],aliases={fp16:'f16',fp32:'f32',q8:'q8_0',q5:'q5_0',q4:'q4_0'};
+      const canonical=value=>aliases[value]||value;
+      const types={KvTypeK:canonical(p.KvTypeK||p.KvType||'q8_0'),KvTypeV:canonical(p.KvTypeV||p.KvType||'q8_0')};
+      const kvField=make('div',{class:'l-field l-row l-kv-field',role:'group','aria-label':tr('KV 格式','KV format')});
+      const kvTitle=make('span',{},tr('KV 格式','KV format')),pair=make('div',{class:'l-kv-pair'});
+      const keyType=field(pair,types,'KvTypeK','K 缓存格式','K cache format','text',kv.map(v=>[v,v]));
+      const valueType=field(pair,types,'KvTypeV','V 缓存格式','V cache format','text',kv.map(v=>[v,v]));
+      for(const [input,side] of [[keyType,'K'],[valueType,'V']]){const label=input.closest('label');label.className='l-kv-side';label.firstChild.textContent=side;}
+      keyType.required=true;valueType.required=true;
+      help(kvTitle,tr('KV 格式','KV format'),tr('K 和 V 可分别选择：q8_0、q5_0、q4_0 可互配；f16、f32 可互配。浮点与量化不能混搭。','Choose K and V independently: q8_0, q5_0 and q4_0 can be combined; f16 and f32 can be combined. Floating-point and quantized types cannot be mixed.'));
+      kvField.append(kvTitle,pair,make('p',{class:'l-muted l-error l-kv-status','data-kv-pair-status':'','aria-live':'polite',hidden:''}));panels[0].append(kvField);
+    }else{
+      const kv=['int8','bf16','fp8','nvfp4','k8v4','rk8v4','rk4v4','rk4v4-e8','rk2v4-e8'];
+      field(panels[0],{...p,KvType:p.KvType||kv[0]},'KvType','KV 格式','KV format','text',kv.map(v=>[v,v]));
+    }
     // UI state only: the worker still receives the existing path/budget pair.
     const diskEnabled=field(panels[0],{DiskEnabled:typeof p.DiskEnabled==='boolean'?p.DiskEnabled:!!p.DiskPath?.trim()&&p.DiskMiB!==0},'DiskEnabled','启用 SSD 缓存','Enable SSD cache','checkbox',null,['关闭后不传 SSD 参数；目录与预算仍保存在草稿和模板中，重新开启时可继续使用。','When off, no SSD arguments are passed. The directory and budget stay in drafts and templates for later reuse.']);
     diskEnabled.dataset.uiOnly='true';diskEnabled.closest('label').classList.add('l-wide');
@@ -518,7 +618,10 @@
     field(panels[1],p,'Prefill','预填充块大小 · tokens','Prefill chunk · tokens','number');
     const layerSplit=field(panels[1],{...p,StageLayers:(p.StageLayers||[]).join(',')},'StageLayers','多卡层数分配（可选）','Layer split (optional)','text',null,[n?'依次对应上方第 1、2…张显卡，用逗号分隔；留空由后端分配':'当前接入暂不支持设置多卡层数',n?'Comma-separated counts for GPU 1, 2, … above; empty uses backend allocation':'Layer assignment is unavailable in this integration'],!n);
     layerSplit.addEventListener('input',refreshGpuOrder);refreshGpuOrder();
-    const mtpDrafts=field(panels[1],p,'MtpDrafts','MTP 推测长度 · tokens','MTP draft length · tokens','number',null,['需要模型支持；1–15 启用，0 或留空关闭。关闭后自适应 MTP 与 N-gram 设置保留但不生效。','Requires model support; 1–15 enables MTP, while 0 or empty disables it. Adaptive MTP and N-gram settings are retained while inactive.'],l);mtpDrafts.max='15';
+    const mtpEnabled=field(panels[1],{MtpEnabled:typeof p.MtpEnabled==='boolean'?p.MtpEnabled:Number(p.MtpDrafts)>0},'MtpEnabled','启用 MTP','Enable MTP','checkbox',null,['需要模型支持。关闭后保留推测长度、自适应 MTP 和 N-gram 设置，但不启用它们；重新开启时恢复。','Requires model support. Turning this off retains draft length, adaptive MTP and N-gram settings while keeping them inactive. Turn it on to restore them.'],l);
+    mtpEnabled.dataset.uiOnly='true';
+    const mtpDrafts=field(panels[1],{...p,MtpDrafts:p.MtpDrafts??4},'MtpDrafts','MTP 推测长度 · tokens','MTP draft length · tokens','number',null,['开启 MTP 时生效，范围 1–15。首次开启默认 4；已有填写值会保留。','Applies when MTP is enabled, range 1–15. The initial default is 4; existing values are retained.'],l);mtpDrafts.min='1';mtpDrafts.max='15';
+    mtpEnabled.addEventListener('change',()=>{if(mtpEnabled.checked&&(!mtpDrafts.value.trim()||Number(mtpDrafts.value)<=0))mtpDrafts.value='4';});
     field(panels[1],p,'AdaptiveMtp','启用自适应 MTP','Enable adaptive MTP','checkbox',null,['需要先启用 MTP；关闭自适应后仍可使用固定长度 MTP。','Requires MTP. Turning adaptive mode off still allows fixed-length MTP.'],!n);field(panels[1],p,'FastPrefill','启用快速预填充','Enable fast prefill','checkbox',null,['支持 int8、rk8v4、rk4v4、rk4v4-e8、rk2v4-e8；还需模型支持。与 MTP、普通预填充块大小分别设置。','Supports int8, rk8v4, rk4v4, rk4v4-e8 and rk2v4-e8; model support is also required. Independent of MTP and the standard prefill chunk size.'],!n);
     field(panels[2],p,'MaxTokens','默认最大输出 · tokens','Default output limit · tokens','number',null,['聊天请求可以覆盖默认输出预算。温度、top-p 等采样参数由聊天请求设置。','Chat requests can override the default output budget. Temperature, top-p and other sampling controls are set by chat requests.']);
     const thinking=field(panels[2],{ThinkingMode:'default',...p},'ThinkingMode','默认思考模式','Default thinking mode','text',[['default',tr('沿用引擎 / 模型默认','Use engine / model default')],['on',tr('开启','On')],['off',tr('关闭','Off')]],n?['NInfer 启动参数支持默认与关闭；显式开启由聊天请求选择，仍需模型支持。','NInfer supports default/off at startup; explicit thinking-on belongs to chat requests and requires model support.']:['llama.cpp 当前默认关闭；开启仍需模型与模板支持。聊天请求可以覆盖此默认值。','llama.cpp currently defaults to off. Enabling requires model/template support; chat requests can override this default.']);
@@ -537,9 +640,9 @@
     if(n||l){
       const detected=info.workers?.[b];
       const worker=field(ng,p,'Worker','后端程序（可选）','Backend executable (optional)','text',null,
-        detected?.available?['留空自动使用已登记的后端程序：'+detected.path,'Leave empty to use the registered backend executable: '+detected.path]:['尚未找到可用程序，请填写已安装程序的路径','No executable found; enter its installed path']);
+        detected?.available?['留空自动使用已检测到的后端程序：'+detected.path,'Leave empty to use the detected backend executable: '+detected.path]:['可将后端程序放在启动器同目录或 bin 目录，再重新打开控制台；也可直接填写程序路径','Place the backend executable beside the launcher or in bin, then reopen the console; or enter its path here']);
       worker.placeholder=detected?.available?detected.path:tr('请选择已安装的后端程序','Enter the installed backend executable');
-      if(!detected?.available&&!p.Worker)worker.parentElement.append(make('small',{class:'l-unavailable'},tr('未登记默认程序','No default executable registered')));
+      if(!detected?.available&&!p.Worker)worker.parentElement.append(make('small',{class:'l-unavailable'},tr('未检测到默认程序','No default executable detected')));
     }
     if(n){
       const ngram=field(ng,p,'NgramDrafts','N-gram 推测 token 数','N-gram draft tokens','number',null,['依赖 MTP；0 或留空关闭 N-gram，1–63 启用。并发时后端可能缩小实际推测宽度。','Requires MTP. 0 or empty disables N-gram; 1–63 enables it. The backend may reduce its width under concurrency.']);ngram.max='63';
@@ -553,7 +656,27 @@
     presetPanel(side);
     const log=make('details',{class:'s-card l-log'});log.append(make('summary',{},tr('启动日志','Startup log')));const refresh=make('button',{type:'button',class:'s-button l-secondary'},tr('刷新日志','Refresh log'));log.append(refresh,make('pre',{class:'l-result','data-log':''}));side.append(log);refresh.onclick=async()=>{try{log.querySelector('[data-log]').textContent=(await api('log')).text||tr('暂无日志','No log yet');}catch(e){message(e.message,true);}};
     const origin=make('div',{class:'l-environment'});origin.append(make('span',{class:'l-muted'},tr('后端安装目录','Backend checkout')),make('p',{class:'l-muted',style:'overflow-wrap:anywhere'},info.backend_root));log.append(origin);
-    backend.onchange=()=>{try{const old=captureDraft().parameters;old.Backend=b;perBackend[b]=old;selectedPreset='';render(perBackend[backend.value]||{...defaults,Backend:backend.value});scheduleSave();}catch(e){backend.value=b;message(e.message,true);}};
+    backend.onchange=()=>{
+      try{
+        const target=backend.value,previous=captureDraft();previous.parameters.Backend=b;perBackend[b]=previous;
+        const draft=structuredClone(perBackend[target]||{version:2,parameters:{...defaults,Backend:target}});
+        const oldOrder=(draft.parameters.Gpu||'').split(',').filter(Boolean);
+        for(const key of sharedSettings)if(Object.hasOwn(previous.parameters,key))draft.parameters[key]=previous.parameters[key];
+        const newOrder=(draft.parameters.Gpu||'').split(',').filter(Boolean),layers=draft.parameters.StageLayers||[];
+        let layersCleared=false;
+        if(oldOrder.join(',')!==newOrder.join(',')){
+          if(layers.length===oldOrder.length&&layers.every(x=>Number.isInteger(x)&&x>0)&&oldOrder.length===newOrder.length&&newOrder.every(id=>oldOrder.includes(id))){
+            draft.parameters.StageLayers=newOrder.map(id=>layers[oldOrder.indexOf(id)]);
+            if(draft.raw)draft.raw.StageLayers=draft.parameters.StageLayers.join(',');
+          }else{
+            layersCleared=!!(draft.raw?.StageLayers?.trim()||layers.length);
+            draft.parameters.StageLayers=[];if(draft.raw)draft.raw.StageLayers='';
+          }
+        }
+        selectedPreset='';restoreDraft(draft);scheduleSave();
+        if(layersCleared)message(tr('显卡选择已改变，原层数分配已清空，请重新设置。','GPU selection changed. Previous layer allocation cleared; configure it again.'));
+      }catch(e){backend.value=b;message(e.message,true);}
+    };
     [save,preview,start,stop].forEach(button=>button.onclick=()=>act(button.dataset.action));
     syncDependencies();
     updateStatus(runtime);

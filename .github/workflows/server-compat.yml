@@ -50,6 +50,7 @@ jobs:
       - name: Test local console and monitor packaging
         run: |
           python3 tests/test_local_console.py
+          python3 tests/test_one_click.py
           python3 tests/test_webui_builder.py
       - name: Prepare pinned llama.cpp integration
         run: |
@@ -80,6 +81,7 @@ jobs:
       - name: Test local console and monitor packaging
         run: |
           python tests/test_local_console.py
+          python tests/test_one_click.py
           python tests/test_webui_builder.py
       - name: Prepare pinned llama.cpp integration
         run: |

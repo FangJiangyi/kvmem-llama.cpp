@@ -20,6 +20,8 @@ param(
     [ValidateRange(128, 2147483647)][int]$Prefill = 128,
     [ValidateRange(1, 2147483647)][int]$MaxTokens = 1024,
     [string]$KvType,
+    [string]$KvTypeK,
+    [string]$KvTypeV,
     [ValidateRange(0, 15)][int]$MtpDrafts = 0,
     [switch]$AdaptiveMtp,
     [switch]$FastPrefill,
@@ -84,6 +86,11 @@ if (($PSBoundParameters.ContainsKey('DiskPath') -or ($PSBoundParameters.Contains
     throw 'SSD storage requires a nonempty -DiskPath'
 }
 if ($DiskPath -and $DiskMiB -eq 0) { throw 'Omit -DiskPath when -DiskMiB is 0 (SSD disabled)' }
+if (@('KvType', 'KvTypeK', 'KvTypeV') | Where-Object { $PSBoundParameters.ContainsKey($_) }) {
+    if (@($WorkerArgs | Where-Object { $_ -match '^(--kv-dtype|--cache-type-[kv]|-ct[kv])(=|$)' }).Count) {
+        throw 'Use -KvType/-KvTypeK/-KvTypeV without conflicting KV options in WorkerArgs'
+    }
+}
 foreach ($setting in @(
     @('ApiKey', '^--api-key(-file)?(=|$)'),
     @('ModelAlias', '^(-a|--alias|--model-id)(=|$)'),
@@ -141,6 +148,9 @@ if ($Backend -eq 'ninfer') {
 }
 if (!$KvType) { $KvType = if ($Backend -eq 'ninfer') { 'int8' } else { 'q8_0' } }
 if ($Backend -eq 'ninfer') {
+    if ($PSBoundParameters.ContainsKey('KvTypeK') -or $PSBoundParameters.ContainsKey('KvTypeV')) {
+        throw 'KvTypeK and KvTypeV configure llama.cpp only; use KvType for ninfer'
+    }
     $requestedNgramDrafts = $NgramDrafts
     if ($Concurrency -gt 1 -and $NgramDrafts -gt 15) { $NgramDrafts = 15 }
     if ($Budget % 64 -or $Reserve % 64 -or $Prefill % 128 -or $Prefill -gt $Reserve -or
@@ -182,6 +192,22 @@ if ($Backend -eq 'ninfer') {
     if ($Vision) { $nativeArgs += @('--vision', '--vision-residency', $VisionResidency, '--vision-max-merged', "$VisionTokens") }
     if ($ThinkingBudget -gt 0) { $nativeArgs += @('--default-thinking-budget', "$ThinkingBudget") }
 } else {
+    # Legacy KvType still sets both sides. Explicit K/V values override that base;
+    # emit separate native flags when either independent value was requested.
+    $separateKv = $PSBoundParameters.ContainsKey('KvTypeK') -or $PSBoundParameters.ContainsKey('KvTypeV')
+    $effectiveK = if ($KvTypeK) { $KvTypeK } else { $KvType }
+    $effectiveV = if ($KvTypeV) { $KvTypeV } else { $KvType }
+    $aliases = @{ fp16='f16'; fp32='f32'; q8='q8_0'; q5='q5_0'; q4='q4_0' }
+    if ($aliases.ContainsKey($effectiveK)) { $effectiveK = $aliases[$effectiveK] }
+    if ($aliases.ContainsKey($effectiveV)) { $effectiveV = $aliases[$effectiveV] }
+    $quantized = @('q8_0', 'q5_0', 'q4_0')
+    $supported = $quantized + @('f16', 'f32')
+    if ($effectiveK -cnotin $supported -or $effectiveV -cnotin $supported) {
+        throw 'llama.cpp K/V types must use q8_0, q5_0, q4_0, f16 or f32'
+    }
+    if (($effectiveK -in $quantized) -ne ($effectiveV -in $quantized)) {
+        throw 'llama.cpp cannot mix floating-point and quantized K/V; choose q8_0/q5_0/q4_0 for both, or f16/f32 for both'
+    }
     if ($Concurrency -gt 4) { throw 'llama.cpp Concurrency must be 1..4' }
     if ($Concurrency -gt 1 -and $DiskPath) { throw 'llama.cpp concurrent requests currently require SSD cache disabled' }
     foreach ($name in @('StageLayers', 'MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'ThinkingBudget')) {
@@ -189,8 +215,10 @@ if ($Backend -eq 'ninfer') {
     }
     $nativeArgs = @('-m', $Model, '--host', $ListenHost, '--port', "$Port", '-c', "$Context",
         '-n', "$MaxTokens", '--kvmem-budget', "$Budget", '--kvmem-gen-reserve', "$Reserve",
-        '--kv-dtype', $KvType, '-b', "$Prefill", '-ub', "$Prefill",
+        '-b', "$Prefill", '-ub', "$Prefill",
         '--kvmem-sink-tokens', "$SinkTokens", '--kvmem-recent-tokens', "$RecentTokens")
+    if ($separateKv) { $nativeArgs += @('--cache-type-k', $effectiveK, '--cache-type-v', $effectiveV) }
+    else { $nativeArgs += @('--kv-dtype', $KvType) }
     $nativeArgs += @('--kvmem-host-mib', "$HostMiB", '--kvmem-sessions', "$RetainedSessions")
     if ($PSBoundParameters.ContainsKey('Concurrency')) { $nativeArgs += @('--parallel', "$Concurrency") }
 }

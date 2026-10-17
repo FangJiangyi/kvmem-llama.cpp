@@ -21,6 +21,7 @@ import time
 import threading
 import urllib.error
 import urllib.request
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -29,7 +30,7 @@ DEFAULTS = dict(Backend='ninfer', Model='', Worker='', Gpu='', Context=262144,
                 Budget=32768, Reserve=1024, HostMiB=16384, Prefill=128,
                 MaxTokens=1024, Port=18200, ListenHost='127.0.0.1',
                 SinkTokens=12288, RecentTokens=1024)
-STRINGS = {'Backend', 'Model', 'Worker', 'Gpu', 'ListenHost', 'KvType', 'DiskPath',
+STRINGS = {'Backend', 'Model', 'Worker', 'Gpu', 'ListenHost', 'KvType', 'KvTypeK', 'KvTypeV', 'DiskPath',
            'VisionResidency',
            'DeviceProfile', 'ScoreAggregation', 'ApiKey', 'ModelAlias', 'LogLevel',
            'ChatTemplateFile', 'ThinkingMode'}
@@ -83,6 +84,8 @@ def normalize(data, backends):
         raise ValueError('ThinkingMode must be default, on or off')
     if p['Backend'] == 'ninfer' and p.get('ThinkingMode') == 'on':
         raise ValueError('NInfer supports default/off at startup; thinking-on is selected by requests')
+    if p['Backend'] != 'llamacpp' and {'KvTypeK', 'KvTypeV'} & p.keys():
+        raise ValueError('K/V 独立格式仅适用于 llama.cpp；NInfer 请使用 KV 格式选项。')
     if p.get('Concurrency') is not None and not 1 <= p['Concurrency'] <= (8 if p['Backend'] == 'ninfer' else 4):
         raise ValueError('Concurrency must be 1..8 for NInfer or 1..4 for llama.cpp')
     if p.get('ChatTemplateFile') and not Path(p['ChatTemplateFile']).is_file():
@@ -172,17 +175,29 @@ class Controller:
 
     def worker_defaults(self):
         # A source checkout and a runnable installation need not share a directory.
-        # Local registrations are explicit; never guess between unrelated builds.
+        # Explicit registrations remain authoritative, including missing paths.
         registration = self.state_dir / 'worker-paths.json'
         paths = json.loads(registration.read_text(encoding='utf-8-sig')) if registration.exists() else {}
         if (not isinstance(paths, dict) or set(paths) - set(self.backends)
                 or any(not isinstance(p, str) or not Path(p).is_absolute() or '\x00' in p
                        for p in paths.values())):
             raise ValueError('Invalid worker-paths.json: map backend names to absolute executable paths')
-        names = {'ninfer': 'ninfer-kvmem-server.exe', 'llamacpp': 'llama-kvmem-server.exe'}
+        names = {'ninfer': ('ninfer-kvmem-server.exe', 'ninfer-serve.exe'),
+                 'llamacpp': ('llama-kvmem-server.exe',)}
         result = {}
         for backend in self.backends:
-            path = Path(paths.get(backend, self.backend_root / 'workers' / backend / names[backend]))
+            if backend in paths:
+                path = Path(paths[backend])
+            else:
+                # Search only known names in bounded installation locations; never
+                # execute discovered files, search PATH, or recurse into other builds.
+                roots = dict.fromkeys((self.backend_root, ROOT.resolve()))
+                candidates = [directory / name
+                              for root in roots
+                              for directory in (root, root / 'bin', root / 'workers' / backend)
+                              for name in names[backend]]
+                fallback = self.backend_root / 'workers' / backend / names[backend][0]
+                path = next((candidate for candidate in candidates if candidate.is_file()), fallback)
             result[backend] = {'path': str(path), 'available': path.is_file()}
         return result
 
@@ -257,21 +272,36 @@ class Controller:
             raise ValueError('Invalid model picker request')
         if os.name != 'nt':
             raise ValueError('The native model picker currently requires Windows')
+        picker = ROOT / 'scripts/windows/select-model.ps1'
+        if not picker.is_file():
+            raise ValueError('选择窗口组件缺失，请更新完整的控制台包；也可以直接粘贴模型文件或目录的完整路径。')
         if not self.picker_lock.acquire(blocking=False):
-            raise ValueError('A model selection window is already open')
+            raise ValueError('已有一个系统选择窗口，请先完成或关闭它。')
         try:
-            initial = Path(current).expanduser() if current else self.backend_root / 'models'
+            try:
+                remembered = self._model_directory_paths() if not current else []
+            except ValueError:
+                remembered = []
+            initial = (Path(current.strip().strip('"')).expanduser() if current else
+                       next((path for path in remembered if path.is_dir()), self.backend_root / 'models'))
             if not initial.is_dir():
+                initial = initial.parent
+            while not initial.is_dir() and initial.parent != initial:
                 initial = initial.parent
             powershell = str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe')
             result = subprocess.run([powershell, '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
-                                     '-File', str(ROOT / 'scripts/windows/select-model.ps1'),
+                                     '-File', str(picker),
                                      '-Backend', backend, '-InitialDirectory', str(initial.resolve())] + (['-Folder'] if folder else ['-Template'] if template else []),
                                     capture_output=True, encoding='utf-8', errors='replace', timeout=300,
                                     creationflags=subprocess.CREATE_NO_WINDOW)
             if result.returncode:
-                raise ValueError(result.stderr.strip()[-2000:] or 'Cannot open model selection window')
-            selected = json.loads(result.stdout).get('path')
+                # Startup errors occur before the helper can set UTF-8. Raw PowerShell
+                # diagnostics may use a different encoding and do not belong in the UI.
+                raise ValueError('无法打开系统选择窗口。请重试，或直接粘贴模型文件或目录的完整路径。')
+            try:
+                selected = json.loads(result.stdout).get('path')
+            except (ValueError, AttributeError):
+                raise ValueError('选择窗口返回异常，请重试或直接粘贴完整路径。') from None
             if selected is None:
                 return {'path': None}
             if not isinstance(selected, str):
@@ -286,58 +316,156 @@ class Controller:
                 raise ValueError(f'{backend} requires a {suffix} model file')
             return {'path': str(path), 'name': path.name}
         except subprocess.TimeoutExpired:
-            raise ValueError('Model selection timed out; open the file picker again') from None
+            raise ValueError('选择窗口已超时，请重新打开，或直接粘贴完整路径。') from None
+        except OSError:
+            raise ValueError('无法打开系统选择窗口，请直接粘贴完整路径。') from None
         finally:
             self.picker_lock.release()
 
+    @staticmethod
+    def model_directory(value, must_exist=True):
+        if not isinstance(value, str) or '\x00' in value or not 0 < len(value) <= 8192:
+            raise ValueError('请输入模型文件夹的完整路径。')
+        value = value.strip()
+        if len(value) > 1 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            raise ValueError('请输入完整的文件夹路径，例如 D:\\Models。')
+        try:
+            path = path.resolve() if must_exist else Path(os.path.abspath(path))
+            if path == Path(path.anchor) or str(path).startswith('\\\\'):
+                raise ValueError('请选择本地的模型文件夹，例如 D:\\Models；暂不扫描整个盘符或网络目录。')
+            if must_exist and not path.is_dir():
+                raise ValueError('文件夹不存在或无法访问，请检查路径：' + str(path))
+        except OSError:
+            raise ValueError('无法访问该文件夹，请检查路径和访问权限。') from None
+        return path
+
+    def _model_directory_paths(self):
+        path = self.state_dir / 'model-directories.json'
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding='utf-8-sig'))
+            if (not isinstance(data, dict) or data.get('schema_version') != 1
+                    or not isinstance(data.get('directories'), list) or len(data['directories']) > 16):
+                raise ValueError()
+            return list(dict.fromkeys(self.model_directory(item, must_exist=False)
+                                      for item in data['directories']))
+        except (OSError, ValueError, TypeError):
+            raise ValueError('保存的模型目录记录无法读取；仍可直接选择模型文件。') from None
+
+    def model_directories(self):
+        with self.lock:
+            paths = self._model_directory_paths()
+        # Filesystem availability checks must not block owned-process status/control.
+        directories = []
+        for path in paths:
+            try:
+                available = path.is_dir()
+            except OSError:
+                available = False
+            directories.append({'path': str(path), 'available': available})
+        return {'directories': directories}
+
+    def update_model_directories(self, data):
+        if (not isinstance(data, dict) or set(data) != {'action', 'path'}
+                or data['action'] not in ('add', 'remove')):
+            raise ValueError('Invalid model directory request')
+        path = self.model_directory(data['path'], must_exist=data['action'] == 'add')
+        with self.lock:
+            paths = [item for item in self._model_directory_paths() if item != path]
+            if data['action'] == 'add':
+                if len(paths) >= 16:
+                    raise ValueError('最多记住 16 个模型目录，请先移除不再使用的目录记录。')
+                paths.insert(0, path)
+            target = self.state_dir / 'model-directories.json'
+            temp = target.with_suffix('.tmp')
+            try:
+                temp.write_text(json.dumps({'schema_version': 1, 'directories': list(map(str, paths))},
+                                           ensure_ascii=False, indent=2), encoding='utf-8')
+                temp.replace(target)
+            except OSError:
+                raise ValueError('无法保存模型目录，请检查控制台状态目录的写入权限。') from None
+        return self.model_directories()
+
     def scan_models(self, data):
-        if not isinstance(data, dict) or set(data) - {'backend', 'current_path', 'directory'}:
+        if not isinstance(data, dict) or set(data) - {'backend', 'current_path', 'directory', 'worker_path'}:
             raise ValueError('Invalid model scan request')
         backend = data.get('backend')
         if backend not in self.backends:
             raise ValueError('Unknown backend')
-        for key in ('current_path', 'directory'):
+        for key in ('current_path', 'directory', 'worker_path'):
             value = data.get(key, '')
             if not isinstance(value, str) or '\x00' in value or len(value) > 8192:
                 raise ValueError('Invalid search path')
         requested = []
         if data.get('directory'):
-            folder = Path(data['directory']).expanduser().resolve(strict=True)
-            if not folder.is_dir() or folder == Path(folder.anchor) or str(folder).startswith('\\\\'):
-                raise ValueError('Select a local model folder, not a drive root or network share')
-            requested.append(folder)
+            folder = self.model_directory(data['directory'])
+            self.update_model_directories({'action': 'add', 'path': str(folder)})
+            requested.append((folder, True))
         else:
             if data.get('current_path'):
-                current = Path(data['current_path']).expanduser()
-                requested.append(current if current.is_dir() else current.parent)
-            # Conventional model folders only, not whole workspaces or whole drives.
-            for base in (self.backend_root, ROOT):
-                requested.extend(parent / 'models' for parent in (base, *list(base.parents)[:2]))
-        roots = []
-        for folder in requested:
+                current = Path(data['current_path'].strip().strip('"')).expanduser()
+                if current.is_absolute():
+                    requested.append((current if current.is_dir() else current.parent, True))
+            requested.extend((folder, True) for folder in self._model_directory_paths())
+            bases = list(dict.fromkeys((self.backend_root, ROOT.resolve())))
+            worker = data.get('worker_path')
+            if not worker:
+                try:
+                    worker = self.worker_defaults()[backend]['path']
+                except ValueError:
+                    worker = ''  # Model discovery remains usable before worker configuration is valid.
+            if worker and Path(worker).is_absolute() and Path(worker).is_file():
+                bases.append(Path(worker).parent)
+            for base in dict.fromkeys(bases):
+                # Models often sit beside the EXE. Inspect only that directory's files;
+                # recurse into named model libraries, never entire build/workspace trees.
+                requested.append((base, False))
+                for parent in (base, *list(base.parents)[:4]):
+                    for name in ('models', 'model'):
+                        candidate = parent / name
+                        if candidate.is_dir():
+                            requested.append((candidate, True))
+        roots = {}
+        for folder, recursive in requested:
             folder = folder.resolve()
             if (folder == Path(folder.anchor) or str(folder).startswith('\\\\')
-                    or not folder.is_dir() or folder in roots):
+                    or not folder.is_absolute()):
                 continue
-            roots.append(folder)
+            roots[folder] = roots.get(folder, False) or recursive
+        locations = [{'path': str(folder), 'recursive': recursive, 'status': 'pending'}
+                     for folder, recursive in roots.items()]
         suffix = '.ninfer' if backend == 'ninfer' else '.gguf'
-        found, visited, candidates = {}, set(), 0
+        found, visited, candidates = {}, {}, 0
+        other = {'.ninfer': set(), '.gguf': set()}
+        reasons = set()
         skipped, limited = 0, False
         deadline = time.monotonic() + 3
-        stack = [(folder, 0) for folder in reversed(roots)]
+        stack = [(folder, 6 if recursive else 0, index)
+                 for index, (folder, recursive) in reversed(list(enumerate(roots.items())))]
         while stack:
             if time.monotonic() >= deadline or candidates >= 10000 or len(found) >= 200:
+                reasons.add('time' if time.monotonic() >= deadline else 'entries' if candidates >= 10000 else 'results')
                 limited = True; break
-            folder, depth = stack.pop()
+            folder, remaining, location = stack.pop()
             identity = os.path.normcase(str(folder))
-            if identity in visited:
+            if visited.get(identity, -1) >= remaining:
+                if locations[location]['status'] == 'pending':
+                    locations[location]['status'] = 'covered'
                 continue
-            visited.add(identity)
+            visited[identity] = remaining
             try:
                 with os.scandir(folder) as entries:
+                    if locations[location]['status'] == 'pending':
+                        locations[location]['status'] = 'scanned'
                     for entry in entries:
                         candidates += 1
                         if candidates > 10000 or time.monotonic() >= deadline or len(found) >= 200:
+                            reasons.add('time' if time.monotonic() >= deadline else 'entries' if candidates > 10000 else 'results')
+                            locations[location]['status'] = 'partial'
                             limited = True; break
                         try:
                             stat = entry.stat(follow_symlinks=False)
@@ -347,11 +475,12 @@ class Controller:
                             if entry.is_dir(follow_symlinks=False):
                                 if entry.name.startswith('.') or entry.name.lower() in ('node_modules', '__pycache__'):
                                     continue
-                                if depth < 4:
-                                    stack.append((Path(entry.path), depth + 1))
-                                else:
-                                    limited = True
-                            elif entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() == suffix:
+                                if remaining:
+                                    stack.append((Path(entry.path), remaining - 1, location))
+                                elif locations[location]['recursive']:
+                                    limited = True; reasons.add('depth')
+                                    locations[location]['status'] = 'partial'
+                            elif entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in other:
                                 # Auxiliary vision projectors and non-first GGUF shards aren't standalone models.
                                 if re.search(r'(?:mmproj|projector)', entry.name, re.I):
                                     continue
@@ -363,8 +492,13 @@ class Controller:
                                 file_stat = os.stat(entry.path, follow_symlinks=False)
                                 key = ((file_stat.st_dev, file_stat.st_ino) if file_stat.st_ino
                                        else os.path.normcase(entry.path))
+                                actual_suffix = Path(entry.name).suffix.lower()
+                                if actual_suffix != suffix:
+                                    other[actual_suffix].add(key)
+                                    continue
                                 candidate = {'path': entry.path, 'name': entry.name,
-                                             'bytes': file_stat.st_size, 'format': suffix[1:]}
+                                             'bytes': file_stat.st_size, 'format': suffix[1:],
+                                             'warnings': ['empty'] if file_stat.st_size == 0 else []}
                                 def preference(item):
                                     path = Path(item['path'])
                                     canonical = (path.parent.name.casefold() == path.stem.casefold()
@@ -374,10 +508,14 @@ class Controller:
                                     found[key] = candidate
                         except OSError:
                             skipped += 1
+                            locations[location]['status'] = 'partial'
             except OSError:
                 skipped += 1
-        return {'models': sorted(found.values(), key=lambda x: (x['name'].casefold(), x['path'])),
-                'roots': [str(folder) for folder in roots], 'limited': limited, 'skipped': skipped}
+                locations[location]['status'] = 'unavailable' if folder in roots else 'partial'
+        return {'models': sorted(found.values(), key=lambda x: (bool(x['warnings']), x['name'].casefold(), x['path'])),
+                'roots': [str(folder) for folder in roots], 'locations': locations,
+                'limited': limited, 'limit_reasons': sorted(reasons), 'skipped': skipped,
+                'other_formats': {key[1:]: len(value) for key, value in other.items()}}
 
     def status(self):
         with self.lock:
@@ -483,6 +621,14 @@ def gpu_inventory():
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    allow_reuse_address = os.name != 'nt'
+
+    def server_bind(self):
+        # Windows SO_REUSEADDR permits a second process to bind the same address.
+        # Exclusive ownership is required for reliable repeated-click detection.
+        if os.name == 'nt':
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -527,10 +673,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == '/api/launcher/info':
                 self.reply(200, {'token': self.control.token, 'backends': self.control.backends,
+                                'console_protocol': 1, 'console_root': str(ROOT.resolve()),
+                                'model_library_version': 1,
+                                'kv_cache_version': 1,
+                                'state_dir': str(self.control.state_dir),
                                 'backend_root': str(self.control.backend_root), 'gpus': self.server.gpus,
                                 'draft': self.control.draft(), 'status': self.control.status(),
                                 'workers': self.control.worker_defaults(),
                                 'native_options': {k: sorted(v) for k, v in NATIVE.items()}})
+            elif path == '/api/launcher/model-directories':
+                self.reply(200, self.control.model_directories())
             elif path == '/api/launcher/status':
                 self.reply(200, self.control.status())
             elif path == '/api/launcher/log':
@@ -590,6 +742,7 @@ class Handler(BaseHTTPRequestHandler):
                        '/api/launcher/browse-template': lambda data: self.control.browse_model(data, template=True),
                        '/api/launcher/browse-model-folder': lambda data: self.control.browse_model(data, folder=True),
                        '/api/launcher/scan-models': self.control.scan_models,
+                       '/api/launcher/model-directories': self.control.update_model_directories,
                        '/api/launcher/start': self.control.start, '/api/launcher/stop': lambda _: self.control.stop()}
             action = actions.get(self.path)
             if action is None:
@@ -599,16 +752,115 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(400, {'error': self.control.redact(str(error))})
 
 
+def open_console_browser(url):
+    try:
+        if webbrowser.open(url, new=2):
+            return
+    except (OSError, webbrowser.Error):
+        pass
+    print(f'Open this address in your browser: {url}', flush=True)
+
+
+def matching_console(port, backend_root, state_dir):
+    """Only reuse a controller from this installation and the same state directory."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f'http://127.0.0.1:{port}/api/launcher/info', timeout=2) as response:
+            body = response.read(262145)
+            if len(body) > 262144:
+                return False
+            data = json.loads(body)
+        if not isinstance(data, dict):
+            return False
+        return (data.get('console_protocol') == 1
+                and Path(data['console_root']).resolve() == ROOT.resolve()
+                and Path(data['backend_root']).resolve() == Path(backend_root).resolve()
+                and Path(data['state_dir']).resolve() == Path(state_dir).resolve())
+    except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError):
+        return False
+
+
+def choose_console_port(current_port, language='zh-CN'):
+    english = language == 'en'
+    if english:
+        label = 'Default port' if current_port == 18199 else 'Port'
+        print(f'{label} {current_port} is unavailable. It may be in use or reserved by Windows.', flush=True)
+    else:
+        label = '默认端口' if current_port == 18199 else '端口'
+        print(f'{label} {current_port} 不可用，可能已被占用或被系统保留。', flush=True)
+    prompt = ('Enter another port (1-65535, e.g. 18198; press Enter or type q to cancel): '
+              if english else '请输入其他端口（1–65535，例如 18198；直接回车或输入 q 退出）：')
+    cancelled = 'Startup cancelled.' if english else '已取消启动。'
+    while True:
+        try:
+            value = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print('\n' + cancelled, flush=True)
+            return None
+        if not value or value.lower() in ('q', 'quit', 'exit'):
+            print(cancelled, flush=True)
+            return None
+        try:
+            port = int(value)
+        except ValueError:
+            port = 0
+        if not 1 <= port <= 65535:
+            print('Port must be an integer from 1 to 65535.' if english else '端口必须是 1 到 65535 之间的整数。', flush=True)
+        elif port == current_port:
+            print(f'Choose a port other than {current_port}.' if english else f'请选择与 {current_port} 不同的端口。', flush=True)
+        else:
+            return port
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=18199)
     parser.add_argument('--backend-root', type=Path, default=ROOT)
     parser.add_argument('--state-dir', type=Path, default=ROOT / 'build/local-console')
+    parser.add_argument('--open-browser', action='store_true', help='open the UI; reuse an identical running console')
+    parser.add_argument('--prompt-port', action='store_true', help='ask for another console port when unavailable')
+    parser.add_argument('--language', choices=('zh-CN', 'en'), default='zh-CN',
+                        help='startup message language; en also opens the UI in English')
     args = parser.parse_args()
     control = Controller(args.backend_root, args.state_dir, args.port)
-    server = Server(('127.0.0.1', args.port), Handler)
+    while True:
+        url = f'http://127.0.0.1:{args.port}/monitor/' + ('?lang=en' if args.language == 'en' else '')
+        try:
+            server = Server(('127.0.0.1', args.port), Handler)
+            break
+        except OSError as error:
+            if (args.open_browser or args.prompt_port) and matching_console(args.port, args.backend_root, args.state_dir):
+                print(f'KVMem console is already running: {url}', flush=True)
+                if args.open_browser:
+                    open_console_browser(url)
+                return
+            if not args.prompt_port:
+                parser.exit(1, f'Cannot open console port {args.port}: {error}. '
+                            'Close the other application or choose --port with a free port.\n')
+            port = choose_console_port(args.port, args.language)
+            if port is None:
+                return
+            args.port = port
+    control.port = server.server_port
     server.control, server.gpus = control, gpu_inventory()
-    print(f'KVMem console: http://127.0.0.1:{server.server_port}/monitor/', flush=True)
+    url = f'http://127.0.0.1:{server.server_port}/monitor/' + ('?lang=en' if args.language == 'en' else '')
+    print(f'KVMem console: {url}', flush=True)
+    if args.language == 'en':
+        print('\nHow to stop:\n'
+              '  Keep this window open while using the console.\n'
+              '  Close this window or press Ctrl+C to stop the console and its inference services, and unload their models.\n'
+              '  Click "Stop service" in the UI to stop inference while keeping the console open.\n'
+              '  Closing only the browser leaves services running.\n'
+              '  Backends started separately are unaffected.\n', flush=True)
+    else:
+        print('\n使用说明：\n'
+              '  保持此窗口开启，控制台才能持续运行。\n'
+              '  关闭此窗口或按 Ctrl+C：结束控制台，并停止由它启动的推理服务、卸载模型。\n'
+              '  页面点击“停止服务”：只停止推理，控制台继续保留。\n'
+              '  只关闭浏览器：服务继续运行。\n'
+              '  另外单独启动的后端服务不受影响。\n', flush=True)
+    if args.open_browser:
+        threading.Thread(target=open_console_browser, args=(url,), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

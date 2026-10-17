@@ -178,7 +178,11 @@ The daily test uses one warm-up and three measured rounds with roughly 12K text,
 
 ## API and Web UI
 
-**Windows desktop console (source checkout):** run `python scripts/local-console.py` and open
+**Windows desktop console:** double-click `START-HERE-EN.bat` for English startup instructions
+and an English UI, or `START-HERE-CN.bat` for Chinese startup instructions.
+Offline console packages include a private Python runtime; a source checkout uses installed
+64-bit Python 3.9+. See [one-click startup and packaging](docs/windows-one-click.md).
+Alternatively, run `python scripts/local-console.py` and open
 `http://127.0.0.1:18199/monitor/` to configure, start and stop NInfer or llama.cpp, select local
 models, save templates and monitor the service. Python is required; workers and models are
 supplied separately. See the [console setup and limitations](ui/README.md#independent-local-console-windows).

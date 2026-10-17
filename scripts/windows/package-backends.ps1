@@ -7,13 +7,24 @@ param(
     [Parameter(Mandatory)][string]$OutputDir,
     [string]$CudaPath = $env:CUDA_PATH,
     [string]$VcpkgInstalled,
-    [string]$ValidationReport
+    [string]$ValidationReport,
+    [string]$PythonArchive,
+    [string]$PythonSha256,
+    [string]$LlamaUiDir
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'native-process.ps1')
 $null = Get-Command dumpbin -ErrorAction Stop
 $source = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
+if ([bool]$PythonArchive -ne [bool]$PythonSha256) { throw 'Supply both PythonArchive and PythonSha256 for the offline console' }
+if ($PythonArchive -and !$LlamaUiDir) {
+    $LlamaUiDir = Join-Path (Split-Path (Split-Path ([IO.Path]::GetFullPath($LlamaWorker)))) 'share/kvmem/ui'
+}
+if ($LlamaUiDir) {
+    if (!(Test-Path -LiteralPath (Join-Path $LlamaUiDir 'index.html') -PathType Leaf)) { throw 'Supply LlamaUiDir with built chat assets for the llama.cpp worker' }
+    $LlamaUiDir = (Resolve-Path -LiteralPath $LlamaUiDir).Path
+}
 $NinferSource = (Resolve-Path -LiteralPath $NinferSource).Path
 $OutputDir = [IO.Path]::GetFullPath($OutputDir)
 if (Test-Path -LiteralPath $OutputDir) { throw 'OutputDir must be new' }
@@ -125,7 +136,17 @@ if ($VcpkgInstalled) {
     }
 }
 if ($ValidationReport) { Copy-Item -LiteralPath $ValidationReport -Destination (Join-Path $OutputDir 'provenance/validation.json') }
+if ($LlamaUiDir) {
+    # llama.cpp resolves share/kvmem/ui relative to the worker's grandparent directory.
+    $null = New-Item -ItemType Directory -Path (Join-Path $OutputDir 'workers/share/kvmem') -Force
+    Copy-Item -LiteralPath $LlamaUiDir -Destination (Join-Path $OutputDir 'workers/share/kvmem/ui') -Recurse
+}
+if ($PythonArchive) {
+    & (Join-Path $PSScriptRoot 'package-console.ps1') -OutputDir $OutputDir -PythonArchive $PythonArchive -PythonSha256 $PythonSha256
+    [IO.File]::AppendAllText((Join-Path $OutputDir 'README.md'), "`n## Desktop console`n`nDouble-click START-HERE-EN.bat for English, or START-HERE-CN.bat for Chinese startup instructions. Python is bundled. See START-HERE.txt for details.`n", [Text.UTF8Encoding]::new($false))
+}
 $manifest = @{ workers=$workerInfo; models_included=$false; kv_cross_backend_transfer=$false;
+    offline_console_included=[bool]$PythonArchive;
     backend_sources=(Get-Content -LiteralPath (Join-Path $source 'backends/versions.json') -Raw | ConvertFrom-Json);
     runtime_validation='See attached validation report; packaging certifies dependency loading only' }
 $utf8 = [Text.UTF8Encoding]::new($false)
