@@ -300,13 +300,18 @@ if (KVMEM_BUILD_LLAMA)
     target_include_directories(llama-kvmem-server PRIVATE
         kvmem/include
         src/adapter
+        backends/llamacpp/src
         backends/llamacpp/include
         backends/llamacpp/common
         backends/llamacpp/tools/server
         backends/llamacpp/tools/mtmd
         backends/llamacpp/vendor
         backends/llamacpp/vendor/cpp-httplib)
-    target_link_libraries(llama-kvmem-server PRIVATE llama llama-common cpp-httplib mtmd kvmem)
+    target_link_libraries(llama-kvmem-server PRIVATE llama llama-common cpp-httplib mtmd kvmem ${CMAKE_DL_LIBS})
+    if (KVMEM_GPU_BACKEND STREQUAL "CUDA")
+        find_package(CUDAToolkit QUIET)
+        target_include_directories(llama-kvmem-server PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    endif()
     target_compile_features(llama-kvmem-server PRIVATE cxx_std_17)
     # std::getenv is standard C++ and portable; MSVC marks it deprecated in
     # favour of the Windows-only _dupenv_s, and warns on the POSIX-ish helpers
@@ -373,10 +378,14 @@ if (KVMEM_BUILD_SERVER_TESTS)
     add_test(NAME kvmem-chat-id-test COMMAND kvmem-chat-id-test)
 
     add_executable(kvmem-server-options-test tests/server-options-test.cpp)
-    target_include_directories(kvmem-server-options-test PRIVATE tools backends/llamacpp/include backends/llamacpp/ggml/include)
+    target_include_directories(kvmem-server-options-test PRIVATE tools kvmem/include backends/llamacpp/include backends/llamacpp/ggml/include)
     add_test(NAME kvmem-server-options-test COMMAND kvmem-server-options-test)
 
     find_package(Threads REQUIRED)
+    add_executable(kvmem-monitor-test tests/monitor-test.cpp)
+    target_include_directories(kvmem-monitor-test PRIVATE kvmem/include backends/llamacpp/vendor ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_libraries(kvmem-monitor-test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    add_test(NAME kvmem-monitor-test COMMAND kvmem-monitor-test)
     add_executable(kvmem-server-progress-test tests/server-progress-test.cpp)
     target_include_directories(kvmem-server-progress-test PRIVATE tools backends/llamacpp/vendor)
     target_link_libraries(kvmem-server-progress-test PRIVATE Threads::Threads)

@@ -47,6 +47,10 @@ jobs:
       - run: python3 tests/test_launcher_key_file.py
       - run: python3 scripts/test_start_server.py
       - run: python3 scripts/test_build_rocm.py
+      - name: Test local console and monitor packaging
+        run: |
+          python3 tests/test_local_console.py
+          python3 tests/test_webui_builder.py
       - name: Prepare pinned llama.cpp integration
         run: |
           python3 scripts/prepare-backends.py --backend llamacpp
@@ -73,6 +77,10 @@ jobs:
         with:
           python-version: '3.12'
       - run: python scripts/test_build_rocm.py
+      - name: Test local console and monitor packaging
+        run: |
+          python tests/test_local_console.py
+          python tests/test_webui_builder.py
       - name: Prepare pinned llama.cpp integration
         run: |
           python scripts/prepare-backends.py --backend llamacpp

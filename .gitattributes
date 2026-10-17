@@ -2,3 +2,6 @@ scripts/*.sh text eol=lf
 scripts/rocm/*.sh text eol=lf
 patches/cuda-graph-reactivation.patch text eol=lf
 backends/patches/*.patch -text -whitespace
+# Preserve bundled upstream licenses verbatim.
+ui/monitor/Outfit-OFL.txt -text -whitespace
+ui/monitor/Strata-LICENSE.txt -text -whitespace

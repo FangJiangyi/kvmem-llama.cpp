@@ -1,12 +1,14 @@
 # KVMem 两后端实现差异
 
-更新日期：2026 年 10 月 10 日。适用于多后端分支的活跃 KV 分层候选集成（本次工作分支 `feat/active-kv-tiering`，基线 `eb98424e7654`）。两个后端的完整集成改动在 `backends/patches/`，准备后的精确树哈希在 `backends/versions.json`。
+更新日期：2026 年 10 月 17 日（KVMem CLI v1 参数统一）。适用于多后端分支的活跃 KV 分层候选集成（本次工作分支 `feat/active-kv-tiering`，基线 `eb98424e7654`）。两个后端的完整集成改动在 `backends/patches/`，准备后的精确树哈希在 `backends/versions.json`。
 
 迁移候选的 ninfer 上游为 `iamwavecut/ninfer-all`，固定在 `8319e8f51247`。KVMem 保留 Qwen3.5/3.8 Dense 的既有边界，新增的 `qwen4_exp`、suspend、graft 和 router 尚未适配，组合会被拒绝。Q2_0/Q4_0/Q5_0 是权重量化格式，不能据此推断新的模型架构已经支持 KVMem。新基线的实际验证范围见 [迁移记录](ninfer-all-migration-validation.md)。
 
-llama.cpp 与 ninfer 共用 KVMem 策略和内存契约，但保留各自的推理、页池、请求处理和参数解析。切换后端时，需要同时核对参数名称、默认值、计量范围和执行行为。下表比较的是本项目的 `llama-kvmem-server` 与 ninfer KVMem worker，不是上游两个引擎的全部能力。
+llama.cpp 与 ninfer 共用 KVMem 策略和内存契约，并共用 KVMem 公共参数解析；各自保留原生推理、页池、请求处理和原生参数解析。切换后端时，需要同时核对参数名称、默认值、计量范围和执行行为。下表比较的是本项目的 `llama-kvmem-server` 与 ninfer KVMem worker，不是上游两个引擎的全部能力。
 
 除“统一启动入口”一节外，默认值均指直接启动 worker 且未显式覆盖的配置。旧预编译包的功能以随包说明和验收报告为准；当前源码的参数不能自动用于旧包。运行方法见 [多后端运行](multi-backend.md)，源码准备方法见 [仓库工作流](multi-backend-repository.md)。
+
+公共参数的精确定义、迁移规则与默认值见 [原生 CLI 与公共配置规范](native-cli-configuration-spec.md)。SSD 额度显式 0 在两个 EXE 中均为关闭，此时不得携带 SSD 目录；LRFU 支持正反开关。
 
 ## ninfer 保留的粒度约定
 
@@ -17,7 +19,7 @@ llama.cpp 与 ninfer 共用 KVMem 策略和内存契约，但保留各自的推�
 | 检索块 block | `--kvmem-block-tokens N` 可配置，默认 128 tokens | 当前固定 64 tokens，未开放对应启动参数 |
 | 原生物理页 page | 本项目的 KV 搬运按适配器 block 和原生布局处理，不要求与 ninfer 页大小相同 | 原生页池要求每页 64 tokens |
 | block 与 page 的关系 | 依据本后端的 block 与 KV 布局执行 | 当前一块对应一页；统计、选择、搬运和冷快照都按此关系实现 |
-| recent 保留量 | `--kvmem-recent-tokens N`，转换为 `N / block_tokens` 个完整块，默认 0 | `--kvmem-recent-tokens N`，按 64-token 页向下取整；N 必须至少 64。省略时为 64，即最新一页 |
+| recent 保留量 | `--kvmem-recent-tokens N`，转换为 `N / block_tokens` 个完整块；公共输入默认 64，block=128 时有效值为 0 | `--kvmem-recent-tokens N`，按 64-token 页向下取整；N 必须至少 64。省略时为 64，即最新一页 |
 | sink 保留量 | `--kvmem-sink-tokens N`；默认 0 表示一块，正数向下取完整块且至少一块 | `--kvmem-sink-tokens N`，规则相同。默认 0 表示首个 64-token 页；正数向下取整且至少一页 |
 
 block 是检索统计和选中历史的单位，page 是原生 KV 分配和搬运的单位，两者概念不同。保留 ninfer 的 block=64。`--kvmem-recent-tokens 1024` 在这个粒度下保留最新 16 页；不足一页的余数被舍去。ninfer 必须保留至少一页 recent，以维护尚未写满的追加页；0–63 会被启动脚本、服务参数和 Engine 校验拒绝。
@@ -28,11 +30,11 @@ block 是检索统计和选中历史的单位，page 是原生 KV 分配和搬�
 
 | 项目 | llama.cpp KVMem | ninfer KVMem |
 |---|---|---|
-| 启用 KVMem | worker 默认开启，提供 `--kvmem` / `--no-kvmem` | `--kvmem-budget B` 中 B>0 开启；默认 B=0 关闭，关闭时不能残留 R/H 等辅助配置 |
+| 启用 KVMem | 提供 `--kvmem` / `--no-kvmem`，默认关闭；正 B 兼容启用 | 相同；关闭与有效 KVMem 预算冲突时报错 |
 | 历史选择预算 B | `--kvmem-budget`，依据 block、设备容量和适配器配置计算有效值 | 同名参数；B 至少 128，必须为 64 的整数倍 |
-| 生成预留 R | `--kvmem-gen-reserve`，默认 256；服务还将 R 用作输出硬上限 | 同名参数；KVMem 下至少 64，必须为 64 的整数倍；作为可复用追加空间 |
+| 生成预留 R | `--kvmem-gen-reserve`，公共默认 1024；当前检索实现使服务输出能力受 R 限制 | 同名参数，默认 1024；KVMem 下至少 64，必须为 64 的整数倍；作为可复用追加空间 |
 | Main KV 工作空间 | 根据本后端容量规则配置 B+R 的槽池 | 每条活动请求按 B+R 配置 Main 页池；要求 B+R 不超过逻辑上下文；MTP 另有原生页池 |
-| 单次输出超过 R | KVMem 开启且 R>0 时，服务把默认和请求输出预算截到 `min(context, R)` | 允许；输出受请求预算、逻辑上下文和结束条件约束 |
+| 单次输出超过 R | KVMem 开启且 R>0 时，默认和请求输出预算均收敛到 `min(context, R)` | 允许；输出受请求预算、逻辑上下文和结束条件约束 |
 | 生成时追加空间不足 | 本服务当前用上述 R 上限限制单次输出；不能从参数名推断已支持 ninfer 的持续追加行为 | 下一步紧凑 KV 视图超过 B+R 时，归档、重选最多 B、回填并继续追加；MTP 会为下一验证批次提前检查空间 |
 | 选择方法 | `--kvmem-method recency\|retrieval`，默认 retrieval | 没有同名选项；query 完整时按 mean-K 检索，query 尚未完整时保留必选页并按最近历史补足 |
 | 检索 query | 由最后用户 span 等逻辑确定；`--kvmem-query-max-tokens` 默认从 span 尾部取最多 512 tokens，`--kvmem-query-last` 提供 64-token 回退 | 使用 Frontend 标记的最后真实用户内容 span；没有对应的可配置长度上限 |
@@ -64,7 +66,7 @@ llama 的 R 输出限制是原服务路径已有的实现约束，尚未认定�
 |---|---|---|
 | 模型文件 | `-m` / `--model PATH`，使用 `.gguf` | 第一项位置参数为 `.ninfer` 路径 |
 | 上下文 | `-c` / `--ctx-size`，默认 2048 | `--max-context`，默认 8192；两边 KVMem 预算均按每请求或每 lane 解释 |
-| 默认输出预算 | `-n` / `--n-predict`，默认 -1，随后受服务 generation limit 限制；启动参数不接受 0 | `--default-max-tokens`，默认 8192；0 表示不另设输出上限，仍受逻辑上下文限制 |
+| 默认输出预算 | `-n` / `--n-predict`，默认 -1，随后受服务 generation limit 限制；启动参数不接受 0 | `--default-max-tokens`，省略时按逻辑上下文和并发准入预算动态计算；显式值必须为正整数，不接受 0 |
 | 预填充 | `-b` / `--batch-size` 逻辑 batch 默认 512；`-ub` / `--ubatch-size` 默认继承 batch | `--prefill-chunk` 默认 1024，必须为 128 的正整数倍；KVMem 下不超过 R |
 | 主模型 KV 格式 | `--kv-dtype` 设置 K/V；当前 worker 接受 f16/f32/q8_0/q5_0/q4_0，默认 q8_0；`--cache-type-k/v` 可分别配置 | KVMem 开放 bf16/int8/fp8/nvfp4/k8v4/rk8v4/rk4v4/rk4v4-e8/rk2v4-e8；原生默认 bf16，统一脚本默认 int8；没有相同的独立 K/V 开关 |
 | MTP KV 格式 | `--spec-kv-dtype` 独立配置，默认 f16 | KVMem Main/MTP 页池使用相同 KV 格式 |
@@ -116,8 +118,8 @@ KV 格式名称代表不同字节布局和量化方法。例如 ninfer int8 与 
 
 | 配置 | llama.cpp KVMem | ninfer KVMem |
 |---|---|---|
-| Host 历史数量 | `--kvmem-conversations N`，默认 1；计活动和非活动 Host stores，并发时至少为 lane 数 | `--kvmem-sessions N`，默认 4，范围 1..16；计保留的非活动 Host 历史，活动请求另占原生资源 |
-| Host 历史预算 | `--kvmem-conversations-gb` / `--kvmem-session-ram-gb`，单位 GiB；会话 RAM 软上限，默认 0 不限，活动会话可能超过软上限 | `--kvmem-host-mib`，单位 MiB；Main/MTP 原生 KV payload 的全局硬预算，KVMem 下必须非零；不含 mean 索引、GDN checkpoint、模型及其他缓冲 |
+| Host 历史数量 | `--kvmem-sessions N`，默认 4；只计非活动历史。旧 conversations 保留显式兼容模式，不能同值换名 | `--kvmem-sessions N`，默认 4，范围 1..16；计保留的非活动 Host 历史，活动请求另占原生资源 |
+| Host 历史预算 | `--kvmem-host-mib`，MiB；共享原生 KV payload 硬预算，默认 16384；旧 GiB 软预算仅兼容模式使用 | `--kvmem-host-mib`，单位 MiB；Main/MTP 原生 KV payload 的全局硬预算，默认 16384，必须为正；不含 mean 索引、GDN checkpoint、模型及其他缓冲 |
 | 公共 RAM/SSD 层 | `--kvmem-host-mib H` 限定原生 K/V 的 RAM payload；`--kvmem-disk-path PATH --kvmem-disk-mib D` 开启 SSD，不能与旧在线 NVMe 或旧会话磁盘配置同时开启 | 相同参数和公共存储实现；Main/MTP 原生 K/V 均可下沉，mean-K 留 RAM；引擎通过异步 CPU I/O 队列接入 |
 | 非活动会话冷缓存 | 公共层保留同一份 KV 所有权，只将 checkpoint 附件另行写入共享 D；旧 `--kvmem-session-cache-dir` 路径仍可单独使用 | 公共层保留原生 KV 所有权，将非活动历史的状态 checkpoint 写入同一 D；不再序列化一份重复 KV |
 | 生命周期和身份 | 公共层只在当前进程内复用；会话恢复仍遵守 llama 的 checkpoint 规则 | 公共层只在当前进程内复用；恢复仍校验原生布局、执行配置、精确前缀及状态点；不能跨后端读取 |
