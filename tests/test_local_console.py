@@ -132,6 +132,64 @@ class ConsoleTests(unittest.TestCase):
         finally:
             self.controller.backend_root = old_root
 
+    def test_worker_discovery_in_installation_root_bin_and_workers(self):
+        installation = Path(self.tmp.name) / 'installation'
+        self.controller.backend_root = installation
+        cases = [('ninfer', 'ninfer-kvmem-server.exe', ''),
+                 ('ninfer', 'ninfer-serve.exe', ''),
+                 ('ninfer', 'ninfer-serve.exe', 'bin'),
+                 ('ninfer', 'ninfer-kvmem-server.exe', 'workers/ninfer'),
+                 ('llamacpp', 'llama-kvmem-server.exe', ''),
+                 ('llamacpp', 'llama-kvmem-server.exe', 'bin'),
+                 ('llamacpp', 'llama-kvmem-server.exe', 'workers/llamacpp')]
+        with patch.object(console, 'ROOT', installation), patch.object(console.subprocess, 'run') as run:
+            for backend, name, directory in cases:
+                with self.subTest(backend=backend, name=name, directory=directory):
+                    worker = installation / directory / name
+                    worker.parent.mkdir(parents=True, exist_ok=True); worker.touch()
+                    self.assertEqual(self.controller.worker_defaults()[backend],
+                                     {'path': str(worker), 'available': True})
+                    worker.unlink()
+            run.assert_not_called()
+
+    def test_worker_discovery_precedence_and_registration_failure(self):
+        installation = Path(self.tmp.name) / 'installation'
+        installation.mkdir()
+        self.controller.backend_root = installation
+        canonical = installation / 'ninfer-kvmem-server.exe'; canonical.touch()
+        alias = installation / 'ninfer-serve.exe'; alias.touch()
+        bin_worker = installation / 'bin/ninfer-kvmem-server.exe'
+        bin_worker.parent.mkdir(); bin_worker.touch()
+        with patch.object(console, 'ROOT', installation):
+            self.assertEqual(self.controller.worker_defaults()['ninfer']['path'], str(canonical))
+            canonical.unlink()
+            self.assertEqual(self.controller.worker_defaults()['ninfer']['path'], str(alias))
+            registered = Path(self.tmp.name) / 'registered.exe'; registered.touch()
+            (Path(self.tmp.name) / 'worker-paths.json').write_text(json.dumps({'ninfer': str(registered)}))
+            self.assertEqual(self.controller.worker_defaults()['ninfer']['path'], str(registered))
+            registered.unlink()
+            self.assertEqual(self.controller.worker_defaults()['ninfer'],
+                             {'path': str(registered), 'available': False})
+
+    def test_worker_discovery_separate_console_root_and_bounded_scope(self):
+        installation = Path(self.tmp.name) / 'console'
+        installation.mkdir()
+        self.controller.backend_root = Path(self.tmp.name) / 'backend'
+        # Plain upstream llama-server and arbitrary/nested EXEs are not KVMem workers.
+        (installation / 'llama-server.exe').touch()
+        (installation / 'other.exe').touch()
+        nested = installation / 'other-build/ninfer-serve.exe'
+        nested.parent.mkdir(); nested.touch()
+        with patch.object(console, 'ROOT', installation):
+            self.assertFalse(self.controller.worker_defaults()['ninfer']['available'])
+            self.assertFalse(self.controller.worker_defaults()['llamacpp']['available'])
+            worker = installation / 'ninfer-serve.exe'; worker.touch()
+            self.assertEqual(self.controller.worker_defaults()['ninfer'],
+                             {'path': str(worker), 'available': True})
+            selected = self.controller.backend_root / 'ninfer-kvmem-server.exe'
+            selected.parent.mkdir(); selected.touch()
+            self.assertEqual(self.controller.worker_defaults()['ninfer']['path'], str(selected))
+
     def test_rejects_command_injection_and_common_native_conflicts(self):
         for key, value in [('WorkerArgs', ['--port', '80']), ('WorkerArgs', ['--threads', '$(calc)']),
                            ('WorkerArgs', ['--threads', '8', '--threads', '4']),
@@ -213,6 +271,75 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(len(result['models']), 200)
         self.assertTrue(result['limited'])
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows native picker')
+    def test_missing_or_failed_picker_has_readable_error_and_releases_lock(self):
+        request = {'backend': 'ninfer', 'current_path': ''}
+        with patch.object(console, 'ROOT', Path(self.tmp.name)), patch.object(console.subprocess, 'run') as run:
+            with self.assertRaisesRegex(ValueError, '选择窗口组件缺失'):
+                self.controller.browse_model(request, folder=True)
+            run.assert_not_called()
+        with patch.object(console.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=1, stderr='bad encoding \ufffd\ufffd PowerShell stack', stdout='')):
+            with self.assertRaisesRegex(ValueError, '无法打开系统选择窗口') as error:
+                self.controller.browse_model(request, folder=True)
+            self.assertNotIn('\ufffd', str(error.exception))
+            self.assertNotIn('PowerShell', str(error.exception))
+        with patch.object(console.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='not json')):
+            with self.assertRaisesRegex(ValueError, '选择窗口返回异常'):
+                self.controller.browse_model(request, folder=True)
+        self.assertFalse(self.controller.picker_lock.locked())
+
+    def test_model_directories_survive_restart_and_forgetting_keeps_files(self):
+        folder = Path(self.tmp.name) / '模型 library & spaces'; folder.mkdir()
+        model = folder / 'local.ninfer'; model.write_bytes(b'model')
+        self.controller.update_model_directories({'action': 'add', 'path': '"' + str(folder) + '"'})
+        second = console.Controller(console.ROOT, self.tmp.name, 18198)
+        self.assertEqual(second.model_directories()['directories'], [{'path': str(folder), 'available': True}])
+        second.update_model_directories({'action': 'add', 'path': str(folder)})
+        self.assertEqual(len(second.model_directories()['directories']), 1)
+        second.update_model_directories({'action': 'remove', 'path': str(folder)})
+        self.assertTrue(model.is_file(), 'forgetting a folder must never remove model files')
+        self.assertEqual(second.model_directories()['directories'], [])
+        for path in ('relative-folder', str(folder / 'missing'), folder.anchor, str(model)):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                second.update_model_directories({'action': 'add', 'path': path})
+
+    def test_default_scan_finds_models_beside_exe_and_in_ancestor_library(self):
+        base = Path(self.tmp.name) / 'fixture/KVMem'
+        installation = base / 'monitor/build/bin'; installation.mkdir(parents=True)
+        library = base / 'models/ninfer/local'; library.mkdir(parents=True)
+        beside = installation / 'model.ninfer'; beside.write_bytes(b'model')
+        canonical = library / 'local.ninfer'; canonical.write_bytes(b'model')
+        unrelated = installation / 'other-build/unrelated.ninfer'
+        unrelated.parent.mkdir(); unrelated.write_bytes(b'model')
+        self.controller.backend_root = installation
+        with patch.object(console, 'ROOT', installation), patch.object(console.subprocess, 'run') as run:
+            result = self.controller.scan_models({'backend': 'ninfer'})
+            self.assertEqual({item['path'] for item in result['models']}, {str(beside), str(canonical)})
+            run.assert_not_called()
+
+    def test_scan_remembers_folder_reports_other_formats_and_missing_location(self):
+        library = Path(self.tmp.name) / 'library'; library.mkdir()
+        (library / 'empty.ninfer').touch()
+        (library / 'different.gguf').write_bytes(b'model')
+        result = self.controller.scan_models({'backend': 'ninfer', 'directory': str(library)})
+        self.assertEqual(result['models'][0]['warnings'], ['empty'])
+        self.assertEqual(result['other_formats']['gguf'], 1)
+        self.assertEqual(result['locations'][0]['status'], 'scanned')
+        self.assertEqual(self.controller.model_directories()['directories'][0]['path'], str(library))
+        # A saved library on a disconnected/removed volume must stay visible as unavailable.
+        missing = Path(self.tmp.name) / 'unavailable library'
+        missing.mkdir()
+        self.controller.update_model_directories({'action': 'add', 'path': str(missing)})
+        missing.rmdir()
+        isolated = Path(self.tmp.name) / 'fixture/a/b/c/d/install'; isolated.mkdir(parents=True)
+        self.controller.backend_root = isolated
+        with patch.object(console, 'ROOT', isolated):
+            result = self.controller.scan_models({'backend': 'ninfer'})
+        self.assertTrue(any(item['path'] == str(missing) and item['status'] == 'unavailable'
+                            for item in result['locations']))
+        self.assertEqual(self.controller.status()['state'], 'stopped')
+
     @unittest.skipUnless(os.name == 'nt', 'Windows canonical launcher')
     def test_canonical_plan_preserves_literal_paths_and_gpu_identity(self):
         model = Path(self.tmp.name) / "model space & ' $literal.ninfer"
@@ -242,6 +369,49 @@ class ConsoleTests(unittest.TestCase):
             args = plan['argv']
             self.assertEqual(args[args.index('--devices') + 1], '0,1')
             self.assertEqual(args[args.index('--stage-layers') + 1], ','.join(map(str, layers)))
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows canonical launcher')
+    def test_independent_llama_kv_types_reach_native_flags(self):
+        model = Path(self.tmp.name) / 'split kv.gguf'; model.touch()
+        worker = Path(self.tmp.name) / 'worker.exe'; worker.touch()
+        base = dict(console.DEFAULTS, Backend='llamacpp', Model=str(model), Worker=str(worker),
+                    Gpu='GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29')
+        quantized = ('q8_0', 'q5_0', 'q4_0')
+        for key_type in (*quantized, 'f16', 'f32'):
+            for value_type in (*quantized, 'f16', 'f32'):
+                with self.subTest(k=key_type, v=value_type):
+                    config = {'schema_version': 1, 'parameters': dict(base, KvTypeK=key_type, KvTypeV=value_type)}
+                    if (key_type in quantized) != (value_type in quantized):
+                        with self.assertRaisesRegex(ValueError, 'cannot mix floating-point and quantized'):
+                            self.controller.plan(config)
+                        continue
+                    self.controller.save(config)
+                    restored = console.Controller(console.ROOT, self.tmp.name, 18199).draft()
+                    self.assertEqual(restored, config)
+                    args = self.controller.plan(restored)['argv']
+                    self.assertNotIn('--kv-dtype', args)
+                    self.assertEqual(args[args.index('--cache-type-k') + 1], key_type)
+                    self.assertEqual(args[args.index('--cache-type-v') + 1], value_type)
+        for values, expected in [({'KvType': 'q5_0', 'KvTypeK': 'q8_0'}, ('q8_0', 'q5_0')),
+                                 ({'KvTypeV': 'q4_0'}, ('q8_0', 'q4_0'))]:
+            args = self.controller.plan({'schema_version': 1, 'parameters': dict(base, **values)})['argv']
+            self.assertEqual(args[args.index('--cache-type-k') + 1], expected[0])
+            self.assertEqual(args[args.index('--cache-type-v') + 1], expected[1])
+        legacy = {'schema_version': 1, 'parameters': dict(base, KvType='f16')}
+        args = self.controller.plan(legacy)['argv']
+        self.assertEqual(args[args.index('--kv-dtype') + 1], 'f16')
+        self.assertNotIn('--cache-type-k', args)
+        for values in ({'KvTypeK': 'unsupported'}, {'KvTypeV': 'q3_0'}):
+            with self.assertRaisesRegex(ValueError, 'K/V types must use'):
+                self.controller.plan({'schema_version': 1, 'parameters': dict(base, **values)})
+        self.assertIsNone(self.controller.process)
+
+    def test_independent_kv_fields_are_llama_only_and_typed(self):
+        for key in ('KvTypeK', 'KvTypeV'):
+            for backend, value in [('ninfer', 'q4_0'), ('llamacpp', 4)]:
+                with self.subTest(backend=backend, key=key, value=value):
+                    with self.assertRaises(ValueError):
+                        console.normalize({'schema_version': 1, 'parameters': {'Backend': backend, key: value}}, self.controller.backends)
 
     @unittest.skipUnless(os.name == 'nt', 'Windows canonical launcher')
     def test_preview_reports_port_occupancy_without_starting(self):
@@ -320,6 +490,129 @@ class ConsoleTests(unittest.TestCase):
             self.assertEqual(request('/monitor/launcher.js')[0], 200)
         finally:
             server.shutdown(); server.server_close(); thread.join()
+
+    def test_repeated_launch_reuses_only_same_installation_and_state(self):
+        server = console.Server(('127.0.0.1', 0), console.Handler)
+        server.control, server.gpus = self.controller, []
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        port = server.server_port
+        try:
+            self.assertTrue(console.matching_console(port, console.ROOT, self.tmp.name))
+            self.assertFalse(console.matching_console(port, console.ROOT, Path(self.tmp.name) / 'other-state'))
+            self.assertFalse(console.matching_console(port, Path(self.tmp.name) / 'other-install', self.tmp.name))
+            with patch.object(console.sys, 'argv', ['local-console.py', '--port', str(port),
+                              '--state-dir', self.tmp.name, '--open-browser']), \
+                 patch.object(console, 'open_console_browser') as browser, \
+                 patch.object(console, 'gpu_inventory') as inventory:
+                console.main()
+                browser.assert_called_once_with(f'http://127.0.0.1:{port}/monitor/')
+                inventory.assert_not_called()
+            self.assertIsNone(self.controller.process)
+            with patch.object(console.sys, 'argv', ['local-console.py', '--port', str(port),
+                              '--state-dir', str(Path(self.tmp.name) / 'other-state'), '--open-browser']), \
+                 patch.object(console, 'open_console_browser') as browser:
+                with self.assertRaises(SystemExit) as error:
+                    console.main()
+                self.assertEqual(error.exception.code, 1)
+                browser.assert_not_called()
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
+    def test_existing_non_console_is_not_reused(self):
+        opener = MagicMock()
+        for body in (b'[]', b'{}', b'not JSON', b'x' * 262145,
+                     json.dumps({'console_protocol': 1, 'console_root': str(console.ROOT),
+                                 'backend_root': str(console.ROOT), 'state_dir': None}).encode()):
+            opener.open.return_value.__enter__.return_value.read.return_value = body
+            with patch.object(console.urllib.request, 'build_opener', return_value=opener):
+                self.assertFalse(console.matching_console(18199, console.ROOT, self.tmp.name))
+
+    def test_port_prompt_validates_values_and_supports_cancel(self):
+        with patch('builtins.input', side_effect=['text', '0', '65536', '18199', '18198']), \
+             patch('builtins.print') as output:
+            self.assertEqual(console.choose_console_port(18199), 18198)
+            self.assertIn('默认端口 18199 不可用', output.call_args_list[0].args[0])
+        for value in ('', 'q', 'Q', 'exit', 'quit'):
+            with self.subTest(value=value), patch('builtins.input', return_value=value), patch('builtins.print'):
+                self.assertIsNone(console.choose_console_port(18199))
+        for error in (EOFError, KeyboardInterrupt):
+            with self.subTest(error=error), patch('builtins.input', side_effect=error), patch('builtins.print'):
+                self.assertIsNone(console.choose_console_port(18199))
+
+    def test_port_retry_uses_new_port_for_readiness_and_browser(self):
+        server = MagicMock(server_port=18197)
+        server.serve_forever.side_effect = KeyboardInterrupt
+        with patch.object(console.sys, 'argv', ['local-console.py', '--state-dir', self.tmp.name,
+                          '--open-browser', '--prompt-port']), \
+             patch.object(console, 'Server', side_effect=[OSError('occupied'), OSError('occupied'), server]) as factory, \
+             patch.object(console, 'matching_console', return_value=False), \
+             patch.object(console, 'choose_console_port', side_effect=[18198, 18197]) as prompt, \
+             patch.object(console, 'gpu_inventory', return_value=[]), \
+             patch.object(console.threading, 'Thread') as thread:
+            console.main()
+        self.assertEqual([call.args[0] for call in factory.call_args_list],
+                         [('127.0.0.1', 18199), ('127.0.0.1', 18198), ('127.0.0.1', 18197)])
+        self.assertEqual([call.args for call in prompt.call_args_list], [(18199, 'zh-CN'), (18198, 'zh-CN')])
+        self.assertEqual(server.control.port, 18197)
+        thread.assert_called_once_with(target=console.open_console_browser,
+                                       args=('http://127.0.0.1:18197/monitor/',), daemon=True)
+        server.server_close.assert_called_once()
+
+    def test_english_port_prompt_and_startup_instructions(self):
+        with patch('builtins.input', side_effect=['text', '0', '65536', '18199', '18198']) as prompt, \
+             patch('builtins.print') as output:
+            self.assertEqual(console.choose_console_port(18199, 'en'), 18198)
+        messages = '\n'.join(call.args[0] for call in output.call_args_list)
+        self.assertIn('Default port 18199 is unavailable', messages)
+        self.assertIn('Port must be an integer from 1 to 65535.', messages)
+        self.assertIn('Choose a port other than 18199.', messages)
+        self.assertTrue(messages.isascii())
+        self.assertTrue(all(call.args[0].isascii() for call in prompt.call_args_list))
+        for value in ('', 'q', EOFError(), KeyboardInterrupt()):
+            options = {'side_effect': value} if isinstance(value, BaseException) else {'return_value': value}
+            with self.subTest(value=repr(value)), patch('builtins.input', **options), patch('builtins.print') as output:
+                self.assertIsNone(console.choose_console_port(18199, 'en'))
+                self.assertIn('Startup cancelled.', output.call_args_list[-1].args[0])
+        server = MagicMock(server_port=18198)
+        server.serve_forever.side_effect = KeyboardInterrupt
+        with patch.object(console.sys, 'argv', ['local-console.py', '--state-dir', self.tmp.name,
+                          '--open-browser', '--prompt-port', '--language', 'en']), \
+             patch.object(console, 'Server', side_effect=[OSError('occupied'), server]), \
+             patch.object(console, 'matching_console', return_value=False), \
+             patch.object(console, 'choose_console_port', return_value=18198) as prompt, \
+             patch.object(console, 'gpu_inventory', return_value=[]), \
+             patch.object(console.threading, 'Thread') as thread, patch('builtins.print') as output:
+            console.main()
+        prompt.assert_called_once_with(18199, 'en')
+        thread.assert_called_once_with(target=console.open_console_browser,
+                                       args=('http://127.0.0.1:18198/monitor/?lang=en',), daemon=True)
+        messages = '\n'.join(call.args[0] for call in output.call_args_list)
+        for expected in ('How to stop:', 'Ctrl+C', 'Stop service', 'Closing only the browser', 'Backends started separately'):
+            self.assertIn(expected, messages)
+        self.assertTrue(messages.isascii())
+        server.server_close.assert_called_once()
+
+    def test_english_entry_reuses_running_console_with_english_browser_hint(self):
+        with patch.object(console.sys, 'argv', ['local-console.py', '--state-dir', self.tmp.name,
+                          '--open-browser', '--language', 'en']), \
+             patch.object(console, 'Server', side_effect=OSError('occupied')), \
+             patch.object(console, 'matching_console', return_value=True), \
+             patch.object(console, 'open_console_browser') as browser, \
+             patch.object(console, 'gpu_inventory') as inventory:
+            console.main()
+        browser.assert_called_once_with('http://127.0.0.1:18199/monitor/?lang=en')
+        inventory.assert_not_called()
+
+    def test_port_prompt_cancel_does_not_start_server_or_browser(self):
+        with patch.object(console.sys, 'argv', ['local-console.py', '--state-dir', self.tmp.name, '--prompt-port']), \
+             patch.object(console, 'Server', side_effect=OSError('occupied')), \
+             patch.object(console, 'matching_console', return_value=False), \
+             patch.object(console, 'choose_console_port', return_value=None), \
+             patch.object(console, 'gpu_inventory') as inventory, \
+             patch.object(console, 'open_console_browser') as browser:
+            console.main()
+        inventory.assert_not_called()
+        browser.assert_not_called()
 
 
 if __name__ == '__main__':

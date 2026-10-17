@@ -76,6 +76,18 @@
   Object.assign(en, {"启动配置": "Launch configuration", "推理未启动": "Inference stopped", "模型加载中": "Loading model", "推理进程已退出": "Inference process exited", "推理进程已退出，请在启动配置中查看日志。": "Inference process exited. Check logs in Launch configuration."});
   let language = "zh-CN";
   try { if (localStorage.getItem("kvmem-monitor-language") === "en") language = "en"; } catch {}
+  // A language-specific launcher overrides a saved preference for this opening.
+  // Consume the hint so a later selection survives reloads of the same tab.
+  const requestedLanguage = new URLSearchParams(location.search).get("lang");
+  if (requestedLanguage === "en" || requestedLanguage === "zh-CN") {
+    language = requestedLanguage;
+    try { localStorage.setItem("kvmem-monitor-language", language); } catch {}
+    try {
+      const url = new URL(location.href);
+      url.searchParams.delete("lang");
+      history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+    } catch {}
+  }
   function t(source, ...values) {
     return (language === "en" ? en[source] || source : source)
       .replace(/\{(\d+)\}/g, (_, i) => String(values[Number(i)] ?? ""));

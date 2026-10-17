@@ -22,6 +22,25 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
 (async()=>{
  const info=await until(async()=>{const r=await api('info');return r.code===200&&r.body;});token=info.token;
  browser=await chromium.launch({headless:true,...(process.env.CHROMIUM?{executablePath:process.env.CHROMIUM}:{})});
+ // English launch overrides an old Chinese choice, then lets the picker persist normally.
+ const languageContext=await browser.newContext(),languagePage=await languageContext.newPage();
+ await languagePage.goto(base+'/monitor/');await languagePage.locator('[data-param=Backend]').waitFor();
+ await languagePage.locator('[data-language-select]').selectOption('zh-CN');
+ await languagePage.goto(base+'/monitor/?lang=en&keep=1#config');
+ await languagePage.locator('[data-param=Backend]').waitFor();
+ assert.equal(await languagePage.locator('html').getAttribute('lang'),'en');
+ assert.equal(await languagePage.locator('[data-language-select]').inputValue(),'en');
+ assert.equal(await languagePage.getByRole('button',{name:'Start service',exact:true}).count(),1);
+ assert.equal(new URL(languagePage.url()).searchParams.has('lang'),false);
+ assert.equal(new URL(languagePage.url()).searchParams.get('keep'),'1');
+ assert.equal(new URL(languagePage.url()).hash,'#config');
+ await languagePage.reload();await languagePage.locator('[data-param=Backend]').waitFor();
+ assert.equal(await languagePage.locator('html').getAttribute('lang'),'en');
+ await languagePage.locator('[data-language-select]').selectOption('zh-CN');
+ await languagePage.reload();await languagePage.locator('[data-param=Backend]').waitFor();
+ assert.equal(await languagePage.locator('html').getAttribute('lang'),'zh-CN');
+ await languageContext.close();
+ console.log('PASS: English launch, saved-language override, picker/reload retention and URL preservation');
  const page=await browser.newPage({viewport:{width:1920,height:1080}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(base+'/monitor/');await page.locator('[data-param=Backend]').waitFor();
  assert.deepEqual(info.backends,['llamacpp','ninfer']);
@@ -103,6 +122,9 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
  assert.equal(await page.locator('.l-model-dialog').isVisible(),false);
  assert.equal((await api('status')).body.state,'stopped','scanning/selecting never starts inference');
  await page.unroute('**/api/launcher/scan-models');
+ await require('./test-model-library.cjs')({page,api,state});
+ await require('./test-backend-switch.cjs')({browser,base,info});
+ await require('./test-kv-types.cjs')({browser,base,info});
  // Applying a recipe is a local draft edit, never a save/start request.
  const mutations=[];page.on('request',request=>{if(request.method()==='POST')mutations.push(request.url());});
  await page.locator('[data-param=Model]').fill('C:/models/my-existing-model.ninfer');
@@ -123,7 +145,7 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
  }
  const expected={Context:204800,Budget:36864,Reserve:16384,HostMiB:12288,Prefill:256,MaxTokens:16384,SinkTokens:12288,RecentTokens:1024,KvType:'int8',Concurrency:1,RetainedSessions:1,MtpDrafts:4,NgramDrafts:31,NgramMinMatch:12,VisionResidency:'cpu',VisionTokens:1024,ThinkingBudget:8192,LrfuLambda:0.5,LrfuTopFraction:0.9,ScoreAggregation:'max',DeviceProfile:'off'};
  for(const [key,value] of Object.entries(expected))assert.equal(await page.locator('[data-param='+key+']').inputValue(),String(value),key);
- for(const key of ['Vision','AdaptiveMtp','NoLrfu'])assert.equal(await page.locator('[data-param='+key+']').isChecked(),true,key);
+ for(const key of ['Vision','MtpEnabled','AdaptiveMtp','NoLrfu'])assert.equal(await page.locator('[data-param='+key+']').isChecked(),true,key);
  for(const key of ['FastPrefill'])assert.equal(await page.locator('[data-param='+key+']').isChecked(),false,key);
  await page.waitForFunction(()=>document.querySelector('[data-draft-state]').textContent.includes('已自动保存'));
  const releaseDraft=await page.evaluate(()=>JSON.parse(localStorage.getItem('kvmem-launch-draft-v2')).parameters);
@@ -221,7 +243,7 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
  await page.locator('[data-dialog=check] [data-dialog-close]').click();
  if(info.gpus.length){
   await page.locator('[data-param=Model]').fill('C:/models/test.gguf');
-  await page.locator('[data-param=Gpu]').selectOption(info.gpus[0].uuid);
+  for(const check of await page.locator('[data-gpu-choice]').all())await check.setChecked(await check.getAttribute('data-gpu-choice')===info.gpus[0].uuid);
   const lrfuRequests=[];
   await page.route('**/api/launcher/preview',route=>{lrfuRequests.push(route.request().postDataJSON().parameters.NoLrfu);return route.fulfill({json:{argv:['C:/worker.exe','C:/models/test.gguf'],environment:{CUDA_VISIBLE_DEVICES:info.gpus[0].uuid},preflight:{port:18200,port_available:false}}});});
   await page.locator('[data-action=preview]').click();
@@ -249,7 +271,7 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
  let lifecycle={state:'stopped',url:null};
  await page.route('**/api/launcher/status',route=>route.fulfill({json:lifecycle}));
  await page.locator('[data-param=Model]').fill('C:/models/test.gguf');
- if(info.gpus.length)await page.locator('[data-param=Gpu]').selectOption(info.gpus[0].uuid);
+ if(info.gpus.length)for(const check of await page.locator('[data-gpu-choice]').all())await check.setChecked(await check.getAttribute('data-gpu-choice')===info.gpus[0].uuid);
  let releaseStart;
  await page.route('**/api/launcher/start',async route=>{await new Promise(resolve=>releaseStart=resolve);lifecycle={state:'starting',url:'http://127.0.0.1:18200',pid:123};await route.fulfill({json:lifecycle});});
  await page.locator('[data-action=start]').click();

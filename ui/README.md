@@ -116,12 +116,27 @@ CPU-resident vision with 1024 tokens, and thinking budget 8192. Sink/recent are
 12288/1024; LRFU uses lambda 0.5/top fraction 0.9 and max score aggregation.
 The original `v0.18.0` Git tag predates the sink/recent release update.
 The recipe requires a model with Vision/MTP support. Other built-in recipes were removed;
-personal templates are unaffected. Model/worker/tokenizer paths are retained per backend,
-as are the chosen port and GPU order; same-backend manual layer placement is retained.
+personal templates are unaffected. Model/worker paths are retained per backend;
+the current port and GPU order are preserved, as is same-backend manual layer placement.
 Applying the template only edits and autosaves the draft, with Undo available. It never
 starts or changes the running service. The template is disabled if NInfer is unavailable.
 
 Start the independent host from the repository root:
+
+On Windows, double-click `START-HERE-CN.bat`; it checks the console files, chooses the bundled
+`runtime/python/python.exe` (or installed 64-bit Python 3.9+ in a source checkout), and opens
+the browser. Repeated clicks reuse only the same installation/backend/state directory's
+running console. Other applications using that port are left running and reported as a
+conflict and the startup window asks for another port. Press Enter or type `q` to cancel;
+invalid or unavailable values can be entered again. `START-HERE-CN.bat -Port 18198` selects
+an initial console port; `-Check` only checks
+console files and Python, and `-NoBrowser` suppresses opening the browser.
+See [offline console packaging](../docs/windows-one-click.md) for release preparation.
+Use `START-HERE-EN.bat` for English startup/port/shutdown prompts and an English UI.
+It reuses the same console and services. Its language hint overrides a previously saved
+Chinese UI preference on opening; the header picker can then change and remember it normally.
+
+The manual entry remains available:
 
 ```powershell
 python scripts/local-console.py
@@ -149,16 +164,29 @@ available. The dialog opens on the controller's desktop, with one picker at a ti
 the selection is automatically saved as an edit and never starts inference. The authenticated local mutation endpoint
 validates the selected file and extension, and closes a picker left open for five minutes.
 
-**Quick scan for models** lists local candidate filenames, sizes and paths for the
-selected backend (`.ninfer`, not `.infer`; otherwise `.gguf`). It searches conventional
-`models` folders under the UI/backend checkout and their two nearest parent directories,
-plus the current model's folder. A folder picker can select another local search root.
-It never loads a model, uploads data, or starts a service. Scans are bounded to four
+**Find models** shows filenames, adaptive file sizes and full paths for the selected backend
+(`.ninfer`, not `.infer`; otherwise `.gguf`). Choose a local folder or paste its full path
+(quoted Windows paths are accepted). Explicitly scanned folders are remembered in
+`<state-dir>/model-directories.json`, independently of the browser origin/console port.
+Up to 16 folders can be remembered, selected again or forgotten; forgetting never deletes files.
+The results can be filtered by name/path. Empty files are marked and cannot be selected.
+Other-format counts explain when a folder contains GGUF while NInfer is selected, or vice versa.
+
+The default scan checks the current model folder, remembered folders, files beside the UI and
+worker executables, and named `model`/`models` folders up to four ancestors above those locations.
+Executable/workspace roots are shallow; only model libraries are traversed recursively.
+It never loads a model, uploads data, or starts a service. Scans are bounded to six
 subdirectory levels, 10,000 directory entries, 200 results and approximately three seconds
-(individual filesystem calls can still block). Partial or inaccessible results are marked.
+(individual filesystem calls can still block). The search scope shows scanned, covered,
+partial, unavailable and unvisited locations. Time/entry/result/depth limits are distinguished.
+Closing the dialog cancels its browser request; late responses cannot replace a later scan.
 Drive roots/network shares, child symlinks/junctions, hidden dependency folders, named
 `mmproj`/projector files and non-first GGUF shards are excluded. Filename matching is only
 candidate discovery, not architecture/quantization compatibility validation.
+The portable package includes `scripts/windows/select-model.ps1` for model/folder/template
+selection. Missing/failed/invalid native picker results produce readable guidance with path
+pasting as a fallback; raw PowerShell errors are not shown. After copying new UI files over
+a running older controller, restart guidance is shown instead of sending incompatible scan requests.
 
 This console supports NInfer and llama.cpp. Only these two backends can be selected,
 even when another checkout's launcher declares experimental engines. Unsupported sampling/template controls
@@ -168,15 +196,49 @@ each backend's existing native flags; NInfer's thinking-on override remains a ch
 setting. llama.cpp currently exposes concurrency 1–4 on one GPU, NInfer 1–8.
 Native options keep their original spellings, with a small
 allowlist of numeric thread/GPU-offload options; arbitrary shell text and duplicate common
-options are rejected. Multi-GPU selection is currently exposed for NInfer layer splitting.
+options are rejected. Both engines use the same GPU cards. Switching engines preserves the
+selected UUIDs and their order; it never silently chooses another card. Multi-GPU launch is
+currently exposed for NInfer layer splitting. When switching a multi-GPU selection to
+llama.cpp, the cards keep that selection and explain that this launcher currently requires
+one GPU for llama.cpp. Validation blocks preview/start until the user selects one card.
+This is a limit of the current launcher integration, not a claim that llama.cpp lacks multi-GPU support.
+
+Common resource, cache and service settings follow the current edits when switching engines,
+including GPU selection, context/B/R/H, prefill/output budgets, port/listen address, concurrency,
+SSD and LRFU settings, model alias and log level. Different supported ranges remain subject
+to validation; a switch does not clamp a value or reset it to a default. Model/worker paths,
+KV format, chat templates, feature overrides and native arguments keep separate in-page
+drafts per backend, including incomplete native edits. Returning to NInfer reorders saved
+layer counts by GPU UUID if only the order changed, or clears them with a message if the
+selected devices changed. Controls have the same grouping and labels; native formats,
+supported capabilities and explanatory limits can differ.
+
+For llama.cpp, Cache & history has separate **K cache format** and **V cache format**
+selectors. Both offer `q8_0`, `q5_0`, `q4_0`, `f16` and `f32`.
+The two selectors sit side by side in the same grid cell occupied by NInfer's combined
+KV selector. Format guidance uses the existing help popover; only invalid pairs show an inline error.
+Quantized types can be combined with each other; the two floating-point types can be combined with each other.
+The native KVMem worker rejects float/quantized mixing, so the UI explains and blocks
+that combination without changing either selection. Independent values use `KvTypeK`
+and `KvTypeV`, translated to `--cache-type-k` and `--cache-type-v`; no combined
+`--kv-dtype` flag is emitted alongside them. The preview lists both formats.
+Older drafts and templates with only `KvType` initialize both selectors with that value.
+The launcher still accepts legacy `KvType` and uses it as the base when only one side
+is overridden. NInfer keeps its native combined format selector and rejects independent
+K/V fields. After updating an already running controller, restart it and refresh the UI
+to enable the new fields; older controllers show restart guidance.
 
 The adapter checkout can differ from the executable installation. Register absolute
 executable paths by backend in `<state-dir>/worker-paths.json`, for example
 `{"ninfer":"C:\\installed\\ninfer-serve.exe","llamacpp":"C:\\installed\\llama-kvmem-server.exe"}`.
-An empty Worker field uses this registration, or the selected checkout's packaged
-`workers/<backend>/...` default when no registration exists. The UI shows the detected
-path. An explicit Worker always takes precedence; a missing explicit or registered
-file fails clearly, without silently choosing another build.
+An empty Worker field uses this registration. Without registration, the console searches
+the selected backend root, its `bin/`, then `workers/<backend>/`; if the console installation
+is different, it searches the same three locations there next. NInfer filenames are
+`ninfer-kvmem-server.exe` (preferred) and `ninfer-serve.exe`; llama.cpp uses
+`llama-kvmem-server.exe`. Placing an executable beside `START-HERE-CN.bat` therefore needs no
+manual path. Search is limited to these names/locations and does not execute candidates.
+The UI shows the detected path. An explicit Worker always takes precedence; a missing
+explicit or registered file fails clearly, without silently choosing another build.
 
 Edits are automatically saved in this browser, including incomplete inputs and GPU order.
 The heading shows saving/saved status and offers retry on storage failure. Reloading restores
@@ -230,11 +292,16 @@ Feature switches disable only dependent controls. Disabled values stay in browse
 and personal templates but are omitted from preview/start payloads. SSD controls its path
 and budget; LRFU controls decay and candidate fraction, while score aggregation stays
 independent. Vision controls image budget and encoder placement; thinking-off disables
-the thinking budget. MTP length zero disables adaptive MTP and N-gram overrides; N-gram
+the thinking budget. The MTP switch controls draft length, adaptive MTP and N-gram overrides;
+turning it off preserves all of their values while omitting them from preview/start payloads.
+It is browser state only (`MtpEnabled`), so no new worker argument is needed. Existing
+drafts/templates without the switch infer its state from a positive `MtpDrafts` value.
+The draft length is required when enabled (1–15); a first enable from zero/empty uses 4.
+Re-enabling restores a saved positive length, adaptive choice and N-gram values. N-gram
 zero disables minimum match. Fast prefill depends on KV format, and layer allocation needs
 at least two GPUs. llama.cpp concurrency above one disables SSD while keeping its saved
 values. Controls unsupported by a backend remain unavailable when other switches change.
-The SSD switch is browser state only; workers keep the existing path/budget parameters.
+The SSD and MTP switches are browser state only; workers keep their existing parameters.
 
 Checks: `python tests/test_local_console.py`, `python tests/test_webui_builder.py`,
 `node ui/test-monitor.cjs`, and `node ui/test-launcher.cjs`. The launcher browser check

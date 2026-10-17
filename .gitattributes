@@ -1,4 +1,6 @@
 scripts/*.sh text eol=lf
+START-HERE-CN.bat text eol=crlf
+START-HERE-EN.bat text eol=crlf
 scripts/rocm/*.sh text eol=lf
 patches/cuda-graph-reactivation.patch text eol=lf
 backends/patches/*.patch -text -whitespace
