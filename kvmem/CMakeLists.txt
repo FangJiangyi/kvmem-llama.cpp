@@ -19,6 +19,7 @@ add_library(kvmem
     src/host/host_kv_storage.cpp
     src/host/spill_io.cpp
     src/host/session_memory.cpp
+    src/host/prefix_checkpoint.cpp
     src/host/rope.cpp
 )
 set_target_properties(kvmem PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -58,6 +59,7 @@ kvmem_add_test(spill_io_test)
 kvmem_add_test(tiered_kv_storage_test)
 kvmem_add_test(native_residency_test)
 kvmem_add_test(kv_content_test)
+kvmem_add_test(prefix_checkpoint_test)
 kvmem_add_test(mean_key_retrieval_test)
 if (NOT WIN32 OR NOT KVMEM_ENABLE_NVME)
     # The runtime suite already guards its only NVMe case with this option.

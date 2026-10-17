@@ -21,12 +21,11 @@
 //   continuation = (rows - lcp) <= max(0, last_n_gen) + 64
 //              `suffix_slack` in run_prefill_retrieval, llama-kvmem-server.cpp
 //
-// Nothing here runs on the default path: conversation_begin_request returns
-// before the policy when --kvmem-conversations is absent, so default behavior
-// is identical by construction rather than by two expressions agreeing. What
-// the two paths do share is the first two formulas above, and
-// tests/conversation-store-test.cpp pins those two helpers against a local
-// transcription of today's expression over an exhaustive sweep.
+// The lane catalog and the legacy multi-conversation path share this policy.
+// Their callers own prompt/media equality and native restore validation;
+// observed_lcp only plans a new capture when no state can be restored.
+// tests/conversation-store-test.cpp also pins the first two formulas above
+// against an independent arithmetic sweep.
 
 #include <algorithm>
 #include <cstdint>
@@ -34,7 +33,7 @@
 #include <vector>
 
 struct kvmem_store_limits {
-    int      max_stores = 1; // live host stores; the server calls the policy only above 1
+    int      max_stores = 1; // live host stores in this selection snapshot
     uint64_t max_bytes  = 0; // accounted host bytes across stores; 0 = count cap only
     // The store the GPU working set is bound to right now, which eviction must
     // never name: it is released through the memory object and not through a
@@ -64,6 +63,9 @@ enum class kvmem_store_action {
 };
 
 struct kvmem_store_plan {
+    // Equality is only a hint for capturing a NEW checkpoint during cold
+    // reconstruction. It never authorizes restoring an old state or KV row.
+    int observed_lcp = 0;
     kvmem_store_action action = kvmem_store_action::fresh;
     int  id    = -1;
     int  lcp   = 0;
@@ -189,6 +191,7 @@ inline kvmem_store_plan kvmem_store_select(const std::vector<kvmem_store_match> 
     int  rejected_keep = 0;
     bool any_found     = false;
     for (const kvmem_store_match * store : candidates) {
+        plan.observed_lcp = std::max(plan.observed_lcp, store->lcp);
         int keep = 0;
         const bool found = kvmem_store_checkpoint(*store, kvmem_store_keep_cap(*store, eval_end, spec_ok), keep);
         if (found) {

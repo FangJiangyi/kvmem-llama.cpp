@@ -101,6 +101,7 @@ static void test_decision_table() {
         const kvmem_store_plan plan = select({}, 1000, false, "", many);
         CHECK(plan.action == kvmem_store_action::fresh);
         CHECK(plan.id == -1 && plan.lcp == 0 && plan.keep == 0);
+        CHECK(plan.observed_lcp == 0);
         CHECK(plan.evict.empty());
         CHECK(std::string(plan.reason) == "new_conversation");
     }
@@ -146,6 +147,7 @@ static void test_decision_table() {
         CHECK(plan.action == kvmem_store_action::fresh);
         CHECK(plan.id == -1 && plan.evict.empty());
         CHECK(std::string(plan.reason) == "no_recurrent_checkpoint");
+        CHECK(plan.observed_lcp == 3950);
     }
     {
         g_row = "T6 shared prefix with no usable checkpoint forks";
@@ -306,6 +308,7 @@ static void test_decision_table() {
         CHECK(plan.action == kvmem_store_action::fresh && plan.id == -1);
         CHECK(std::string(plan.reason) == "fork_zero_keep");
         // A bound id that does continue its store is the cheap path.
+        CHECK(plan.observed_lcp == 300);
         plan = select({a, b}, 9300, false, "y", many);
         CHECK(plan.action == kvmem_store_action::extend && plan.id == 2);
         CHECK(std::string(plan.reason) == "client_id");
@@ -319,7 +322,24 @@ static void test_decision_table() {
         plan = select({a, b_no_ckpt}, 9300, false, "y", many);
         CHECK(plan.action == kvmem_store_action::fresh && plan.id == -1);
         CHECK(std::string(plan.reason) == "no_recurrent_checkpoint");
+        CHECK(plan.observed_lcp == 8950);
     }
+}
+
+static void test_capture_hint_does_not_authorize_restore() {
+    g_row = "capture hint survives a cold fork without authorizing restore";
+    auto a = store_fixture(1, 9000, 100, {0, 8900}, 1 * GiB, 10);
+    auto b = store_fixture(2, 9000, 100, {}, 1 * GiB, 20);
+    a.lcp = 300;
+    b.lcp = 600;
+    const auto plan = select({a, b}, 20000, false, "", {4, 0});
+    CHECK(plan.observed_lcp == 600);
+    CHECK(plan.action == kvmem_store_action::fresh);
+    CHECK(plan.id == -1 && plan.keep == 0 && plan.lcp == 0);
+    // A matching token prefix with no state is only a future capture point.
+    // The original stores and their native checkpoint evidence are untouched.
+    CHECK(a.ckpt_rows == std::vector<int>({0, 8900}));
+    CHECK(b.ckpt_rows.empty());
 }
 
 // kvmem.conversation_id was an unrecognized key at v0.16.0-rc3, so a request
@@ -505,6 +525,7 @@ static void test_table_lru_and_bytes() {
 
 int main() {
     test_decision_table();
+    test_capture_hint_does_not_authorize_restore();
     test_client_id_never_fails_a_request();
     test_checkpoint_arithmetic();
     test_continuation_clamps_last_n_gen();

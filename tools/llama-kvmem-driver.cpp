@@ -1068,18 +1068,7 @@ static MultimodalCheckpoint multimodal_checkpoint(LlamaEngineState & st, int row
 }
 
 static void multimodal_remember(LlamaEngineState & st, MultimodalCheckpoint checkpoint) {
-    auto & entries = st.mm_checkpoints;
-    entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const auto & entry) {
-        return entry.row >= checkpoint.row;
-    }), entries.end());
-    entries.push_back(std::move(checkpoint));
-    if (entries.size() > 4) {
-        const auto media_count = std::count_if(entries.begin(), entries.end(), [](const auto & e) { return e.media_boundary; });
-        auto victim = std::find_if(entries.begin(), entries.end(), [&](const auto & e) {
-            return e.media_boundary == (media_count > 2);
-        });
-        entries.erase(victim == entries.end() ? entries.begin() : victim);
-    }
+    st.mm_checkpoints.remember(std::move(checkpoint));
 }
 
 static void multimodal_restore(LlamaEngineState & st, const MultimodalCheckpoint & checkpoint, bool truncate,
@@ -1208,7 +1197,7 @@ static int multimodal_decode_span(LlamaEngineState & st, int begin, int end, boo
             if (next > end) throw std::runtime_error("prefill boundary splits an image");
             if (!replay) {
                 auto checkpoint = multimodal_checkpoint(st, row);
-                checkpoint.media_boundary = true;
+                checkpoint.purposes = kvmem::CheckpointPurpose::MediaBoundary;
                 multimodal_remember(st, std::move(checkpoint));
             }
             const int rc = st.vision->decode(st.ctx, prompt, row, st.n_batch, dispatch);
@@ -1261,21 +1250,19 @@ static bool run_prefill_multimodal(LlamaEngineState & st, kvmem::RequestControl 
         const auto & prompt = *st.active_prompt;
         const int eval_end = (int) prompt.tokens.size() - (st.spec.ok ? 1 : 0);
         const int lcp = st.cached_prompt ? (int) prompt.common_prefix(*st.cached_prompt) : 0;
+        const int observed_lcp = std::max(lcp, std::exchange(st.mm_observed_lcp, 0));
         st.mm_lcp = lcp;
         // Sequence checkpoints do not restore logits. Ordinary decoding must evaluate
         // at least one token; MTP evaluates the pending prompt token in spec_generate.
-        const int keep = std::min({lcp, st.mm_live_row, eval_end - (st.spec.ok ? 0 : 1)});
+        const int keep = int(kvmem::prefix_restore_limit(lcp, st.mm_live_row, eval_end, !st.spec.ok));
         MultimodalCheckpoint base;
         bool found = false;
         {
             kvmem_scoped_ms timer(st.mm_perf.select_checkpoint_ms);
-            for (const auto & checkpoint : st.mm_checkpoints) {
-                if (checkpoint.row <= keep && (!found || checkpoint.row > base.row) && checkpoint.data &&
-                        llama_kvmem_tail_mean_valid(checkpoint.row, checkpoint.data->tail_mean)) {
-                    base = checkpoint;
-                    found = true;
-                }
-            }
+            const auto checkpoint = st.mm_checkpoints.select(keep, [](const auto & candidate) {
+                return llama_kvmem_tail_mean_valid(candidate.row, candidate.data->tail_mean);
+            });
+            if (checkpoint) { base = *checkpoint; found = true; }
         }
         if (!found) {
             // Shared template tokens do not identify a conversation. Like llama-server,
@@ -1380,8 +1367,23 @@ static bool run_prefill_multimodal(LlamaEngineState & st, kvmem::RequestControl 
         }
         if (all_resident) llama_kvmem_keep_selected();
         if (n_cache_hit) *n_cache_hit = base.row;
-        if (multimodal_decode_span(st, base.row, query, false, io) != 0) throw std::runtime_error("multimodal prefill failed or cancelled");
+        std::vector<kvmem::PrefixRange> input_groups;
+        for (const auto & range : ranges) input_groups.push_back({range.first, range.second});
+        const int anchor = int(kvmem::prefix_anchor(base.row, observed_lcp, query, input_groups));
+        if (multimodal_decode_span(st, base.row, anchor, false, io) != 0)
+            throw std::runtime_error("multimodal prefix prefill failed or cancelled");
+        if (anchor > 0) {
+            try {
+                auto checkpoint = multimodal_checkpoint(st, anchor);
+                checkpoint.purposes = kvmem::CheckpointPurpose::ReuseAnchor;
+                multimodal_remember(st, std::move(checkpoint));
+            } catch (const std::exception & error) {
+                kvmem_diag("KVMEM_TRACE reuse_anchor_skipped row=%d reason=%s\n", anchor, error.what());
+            }
+        }
+        if (multimodal_decode_span(st, anchor, query, false, io) != 0) throw std::runtime_error("multimodal prefill failed or cancelled");
         auto query_checkpoint = multimodal_checkpoint(st, query);
+        query_checkpoint.purposes = kvmem::CheckpointPurpose::QueryReplay;
         multimodal_remember(st, query_checkpoint);
         const auto probe_view = llama_kvmem_get_attention_view();
         if (multimodal_decode_span(st, query, eval_end, false, io) != 0) throw std::runtime_error("multimodal query prefill failed or cancelled");

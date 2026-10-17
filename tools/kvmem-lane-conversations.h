@@ -24,6 +24,7 @@ public:
         int lane = -1, id = -1, outgoing = -1;
         bool fresh = false, added = false, attached = false, ready = false, finished = false;
         size_t prepare_begin = 0;
+        int observed_lcp = 0;
     };
     class reference {
     public:
@@ -109,6 +110,7 @@ public:
         if (id >= 0 && !eligible(entries_.at(id), busy)) return -1;
         const size_t begin = fresh ? 0 : (size_t) std::max(0, plan.keep);
         op.prepare_begin = begin;
+        op.observed_lcp = reset ? 0 : plan.observed_lcp;
         if (!prompt.media_ready(begin)) return -2;
         int lane = id >= 0 ? entries_.at(id).lane : -1;
         if (lane < 0) {
@@ -180,6 +182,7 @@ public:
             if (!llama_kvmem_store_bundle_rows(outgoing->parked.get())) llama_driver_drop_conversation(outgoing->payload);
         }
         st.mm_reset_requested = false;
+        st.mm_observed_lcp = op.fresh ? op.observed_lcp : 0;
         const auto incoming_native = disk_ ? llama_kvmem_store_payload_bytes(llama_kvmem_store_current(), false) : 0;
         std::unique_lock<std::mutex> lock(mu_);
         // Publish the actual owners before any accounting allocation can fail.
