@@ -5,6 +5,8 @@
   const tr = (zh,en) => window.monitorI18n.language === 'en' ? en : zh;
   let info, busy=false, activeTab=0, runtime=null, startPending=false, launchFailure="";
   const perBackend = {};
+  // Credentials are kept in memory only, separate from drafts and templates.
+  const launchKeys = {};
   let pickingModel = false;
   function recentModels(backend) {
     try {
@@ -27,10 +29,50 @@
   const names={llamacpp:'llama.cpp',ninfer:'NInfer'};
   const groups=[['缓存与历史','Cache & history'],['硬件与加速','Hardware & acceleration'],['生成与思考','Generation & thinking'],['模板与图像','Templates & vision'],['服务与并发','Service & concurrency']];
   const make=(tag,attrs={},text)=>{const el=document.createElement(tag);Object.entries(attrs).forEach(([k,v])=>el.setAttribute(k,v));if(text!==undefined)el.textContent=text;return el;};
+  let openHelp=null,helpOpenTimer=null,helpCloseTimer=null,helpId=0;
+  function closeHelp(){
+    clearTimeout(helpOpenTimer);clearTimeout(helpCloseTimer);
+    if(!openHelp)return;
+    const current=openHelp;openHelp=null;current.pinned=false;
+    current.button.setAttribute('aria-expanded','false');
+    if(current.tip.hidePopover&&current.tip.matches(':popover-open'))current.tip.hidePopover();
+    current.tip.hidden=true;
+  }
+  function showHelp(item){
+    clearTimeout(helpOpenTimer);clearTimeout(helpCloseTimer);
+    if(!item.button.isConnected)return;
+    item.reason.textContent=item.input?.dataset.disabledReason||'';item.reason.hidden=!item.reason.textContent;
+    if(openHelp!==item){closeHelp();openHelp=item;item.tip.hidden=false;if(item.tip.showPopover)item.tip.showPopover();}
+    item.button.setAttribute('aria-expanded','true');
+    const anchor=item.button.getBoundingClientRect(),box=item.tip.getBoundingClientRect(),edge=12;
+    item.tip.style.left=Math.max(edge,Math.min(anchor.left,innerWidth-box.width-edge))+'px';
+    const below=anchor.bottom+8,top=below+box.height<=innerHeight-edge?below:anchor.top-box.height-8;
+    item.tip.style.top=Math.max(edge,Math.min(top,innerHeight-box.height-edge))+'px';
+  }
+  function help(parent,title,text,input=null){
+    const id='launch-tooltip-'+(++helpId),button=make('button',{type:'button',class:'l-help','aria-label':tr('关于：','About: ')+title,'aria-describedby':id,'aria-expanded':'false'},'i');
+    const tip=make('div',{id,class:'l-help-popover',role:'tooltip',popover:'manual',hidden:''}),reason=make('p',{class:'l-help-reason',hidden:''});tip.append(make('strong',{},title),make('p',{},text),reason);root.append(tip);parent.append(button);
+    if(input)input.setAttribute('aria-describedby',id);
+    const item={button,tip,input,reason,pinned:false,hover:false,focused:false};
+    const leave=()=>{clearTimeout(helpOpenTimer);clearTimeout(helpCloseTimer);helpCloseTimer=setTimeout(()=>{if(openHelp===item&&!item.hover&&!item.focused&&!item.pinned)closeHelp();},140);};
+    button.addEventListener('pointerenter',()=>{item.hover=true;clearTimeout(helpCloseTimer);helpOpenTimer=setTimeout(()=>showHelp(item),180);});
+    button.addEventListener('pointerleave',()=>{item.hover=false;leave();});
+    tip.addEventListener('pointerenter',()=>{item.hover=true;clearTimeout(helpCloseTimer);});
+    tip.addEventListener('pointerleave',()=>{item.hover=false;leave();});
+    button.addEventListener('focus',()=>{item.focused=true;showHelp(item);});
+    button.addEventListener('blur',()=>{item.focused=false;leave();});
+    button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();if(openHelp===item&&item.pinned)closeHelp();else{showHelp(item);item.pinned=true;}});
+    return button;
+  }
+  document.addEventListener('pointerdown',event=>{if(openHelp&&!openHelp.button.contains(event.target)&&!openHelp.tip.contains(event.target))closeHelp();},true);
+  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&openHelp){closeHelp();event.preventDefault();event.stopPropagation();}},true);
+  window.addEventListener('scroll',event=>{if(openHelp&&event.target!==openHelp.tip)closeHelp();},true);
+  window.addEventListener('resize',closeHelp);
+  document.addEventListener('change',event=>{if(event.target.matches('[data-density-select]'))closeHelp();});
   function captureDraft(){
     const parameters={};
     root.querySelectorAll('[data-param]').forEach(el=>{
-      if(el.disabled)return;
+      if((el.disabled&&el.dataset.keepDraft!=='true')||el.dataset.secret==='true')return;
       const value=el.type==='checkbox'?(el.dataset.inverted==='true'?!el.checked:el.checked):el.multiple?Array.from(el.selectedOptions).map(x=>x.value).join(','):el.type==='number'&&el.value!==''?Number(el.value):el.value;
       parameters[el.dataset.param]=value;
     });
@@ -57,23 +99,24 @@
     if(draft.raw){const layers=root.querySelector('[data-param=StageLayers]');if(layers&&typeof draft.raw.StageLayers==='string'){layers.value=draft.raw.StageLayers;layers.dispatchEvent(new Event('input'));}const native=root.querySelector('[data-native]');if(native&&typeof draft.raw.WorkerArgs==='string')native.value=draft.raw.WorkerArgs;}
     draftStatus();
   }
-  root.addEventListener('input',event=>{if(event.target.matches('[data-param], [data-native]'))scheduleSave();});
-  root.addEventListener('change',event=>{if(event.target.matches('[data-param], [data-native]'))scheduleSave();});
+  root.addEventListener('input',event=>{if(event.target.matches('[data-param], [data-native]')){syncDependencies();scheduleSave();}});
+  root.addEventListener('change',event=>{if(event.target.matches('[data-param], [data-native]')){syncDependencies();scheduleSave();}});
   window.addEventListener('pagehide',saveEditing);
   function readTemplates(){
     const values=JSON.parse(localStorage.getItem(TEMPLATE_KEY)||'[]');
     if(!Array.isArray(values))throw Error(tr('个人模板数据无法读取','Cannot read personal templates'));
-    return values.filter(x=>x&&typeof x.id==='string'&&typeof x.name==='string'&&usableDraft(x.draft)).slice(0,100);
+    return values.filter(x=>x&&typeof x.id==='string'&&typeof x.name==='string'&&usableDraft(x.draft)).slice(0,100).map(x=>{delete x.draft.parameters.ApiKey;return x;});
   }
   function writeTemplates(values){if(values.length>100)throw Error(tr('最多保存 100 个模板','Up to 100 templates can be saved'));localStorage.setItem(TEMPLATE_KEY,JSON.stringify(values));}
   function dialog(title,kind){
+    closeHelp();
     const el=make('dialog',{class:'l-dialog','data-dialog':kind,'aria-label':title});
     const head=make('div',{class:'l-heading'}),close=make('button',{type:'button',class:'s-button','data-dialog-close':''},tr('关闭','Close'));
     head.append(make('h2',{class:'s-title'},title),close);el.append(head);root.append(el);
     close.onclick=()=>el.close();el.addEventListener('close',()=>el.remove());el.showModal();return el;
   }
   function showError(error){const el=dialog(tr('操作未完成','Action could not complete'),'error');el.append(make('p',{class:'l-error',role:'alert'},error.message||String(error)));}
-  function refreshTemplates(){const current=root.querySelector('.l-presets');if(current){const side=current.parentElement;current.remove();presetPanel(side);}}
+  function refreshTemplates(){const current=root.querySelector('.l-presets');if(current){const side=current.parentElement;current.querySelectorAll('.l-help').forEach(button=>{if(openHelp?.button===button)closeHelp();document.getElementById(button.getAttribute('aria-describedby'))?.remove();});current.remove();presetPanel(side);}}
   function templateEditor(mode='create',item=null){
     const snapshot=captureDraft(),title=mode==='delete'?tr('删除模板','Delete template'):mode==='rename'?tr('重命名模板','Rename template'):mode==='update'?tr('更新模板','Update template'):tr('另存为模板','Save as template');
     const el=dialog(title,'template'),form=make('form'),error=make('p',{class:'l-error',role:'alert'});
@@ -81,7 +124,7 @@
     name.value=item?.name||'';label.append(name);
     const descLabel=make('label',{class:'l-field'},tr('说明（可选）','Description (optional)')),description=make('textarea',{maxlength:'240',rows:'2','data-template-description':''});description.value=item?.description||'';descLabel.append(description);
     if(mode==='delete')form.append(make('p',{},tr(`删除“${item.name}”？已填入编辑区的配置不受影响。`,`Delete “${item.name}”? The current draft will remain unchanged.`)));
-    else form.append(label,descLabel,make('p',{class:'l-muted'},mode==='rename'?tr('仅修改名称和说明。','Only the name and description change.'):mode==='update'?tr('将用当前编辑区的完整设置替换此模板。','Replace this template with all settings in the current draft.'):tr('保存模型路径、显卡顺序和全部参数。模板保存在当前浏览器，保存不会启动服务。','Save model paths, GPU order and all parameters in this browser. Saving does not start a service.')));
+    else form.append(label,descLabel,make('p',{class:'l-muted'},mode==='rename'?tr('仅修改名称和说明。','Only the name and description change.'):tr('保存当前模型路径、显卡顺序和参数；不保存 API 密钥。模板保存在当前浏览器，保存不会启动服务。','Save the current model path, GPU order and settings, excluding the API key. Templates stay in this browser; saving does not start a service.')));
     const submit=make('button',{type:'submit',class:'s-button l-primary','data-template-confirm':''},mode==='delete'?tr('删除模板','Delete template'):mode==='update'?tr('确认更新','Update template'):tr('保存模板','Save template'));
     form.append(error,submit);el.append(form);if(mode!=='delete')name.focus();
     form.onsubmit=event=>{event.preventDefault();try{
@@ -101,7 +144,16 @@
     const details=el?.closest('details');if(details)details.open=true;
     el?.scrollIntoView({block:'center',behavior:'smooth'});el?.focus();
   }
-  function launchData(){const data=collect();if(!data.parameters.DiskPath)delete data.parameters.DiskMiB;if(!data.parameters.Vision){delete data.parameters.VisionResidency;delete data.parameters.VisionTokens;}return data;}
+  function launchData(){
+    const data=collect(),p=data.parameters;
+    const disk=root.querySelector('[data-param=DiskEnabled]');
+    if(disk?.checked&&!disk.disabled){
+      if(!p.DiskPath?.trim())throw Error(tr('启用 SSD 缓存后，请填写 SSD 缓存目录。','Enter an SSD cache directory when SSD cache is enabled.'));
+      if(p.DiskMiB!==undefined&&p.DiskMiB<=0)throw Error(tr('启用 SSD 缓存后，SSD 缓存预算必须大于 0。','The SSD cache budget must be positive when SSD cache is enabled.'));
+    }else{delete p.DiskPath;delete p.DiskMiB;}
+    if(!p.Vision){delete p.VisionResidency;delete p.VisionTokens;}
+    return data;
+  }
   async function checkConfiguration(){
     const el=dialog(tr('检查配置','Check configuration'),'check'),summary=make('p',{'data-check-summary':'',role:'status'},tr('正在检查…','Checking…')),list=make('div',{class:'l-check-list'});el.append(summary,list);
     const errors=[];
@@ -117,6 +169,10 @@
       if(errors.length){summary.textContent=tr('需要补全或修改配置','Some settings need attention');return;}
       const result=await api('preview',data);if(!el.isConnected)return;
       row(tr('后端程序','Backend executable'),result.argv[0],'Worker');
+      row(tr('对外模型名','Served model name'),p.ModelAlias||tr('沿用模型名称','Use model name'),'ModelAlias');
+      row(tr('API 访问密钥','API access key'),p.ApiKey?tr('已设置 · 预览隐藏密钥','Configured · Hidden in preview'):tr('未设置','Not configured'),'ApiKey');
+      const reserveAt=result.argv.indexOf('--kvmem-gen-reserve'),outputAt=result.argv.indexOf(p.Backend==='ninfer'?'--default-max-tokens':'-n');
+      if(reserveAt>=0&&outputAt>=0){const reserve=Number(result.argv[reserveAt+1]),requested=Number(result.argv[outputAt+1]),effective=p.Backend==='llamacpp'?Math.min(requested,reserve):requested;row(tr('默认输出预算 / 追加空间','Default output budget / append workspace'),`${effective} / ${reserve} tokens · `+(p.Backend==='llamacpp'?tr('当前 llama.cpp 的输出预算受 R 限制','Current llama.cpp output budget is limited by R'):tr('NInfer 可复用追加空间，输出预算可超过 R','NInfer can reuse append workspace; output budget may exceed R')),'Reserve');}
       const port=result.preflight?.port??p.Port??18200,available=result.preflight?.port_available;
       row(tr('服务端口','Service port'),`${result.preflight?.listen_host||p.ListenHost||'127.0.0.1'}:${port} · `+(available===true?tr('可用','Available'):available===false?tr('已占用或无法绑定；启动前需释放或更换','In use or unavailable; release or change before starting'):tr('启动时检查','Checked on start')),'Port',available!==false);
       summary.textContent=errors.length?tr('配置需要调整','Configuration needs attention'):tr('启动前检查通过','Preflight checks passed');
@@ -125,31 +181,84 @@
       const quoted=result.argv.map(x=>"'"+x.replaceAll("'","''")+"'").join(' ');
       const command=Object.entries(result.environment||{}).map(([k,v])=>`$env:${k} = '${String(v).replaceAll("'","''")}'`).join('\n')+'\n& '+quoted;
       const code=make('pre',{class:'l-result'},command),copy=make('button',{type:'button',class:'s-button','data-copy-command':''},tr('复制启动命令','Copy launch command'));copy.onclick=async()=>{try{await navigator.clipboard.writeText(command);copy.textContent=tr('已复制','Copied');}catch{copy.textContent=tr('复制失败，请手动选择文本','Copy failed; select the text manually');}};advanced.append(code,copy);el.append(advanced);
+      if(p.ApiKey)advanced.append(make('p',{class:'l-muted'},tr('复制的命令含 <redacted> 占位符，手动运行前需替换为密钥。页面启动服务会使用当前填写的密钥。','The copied command contains a <redacted> placeholder. Replace it before running manually. Starting here uses the key entered on this page.')));
     }catch(error){if(!el.isConnected)return;summary.textContent=tr('检查未通过','Check failed');const text=error.message||String(error);const key=/JSON|原生参数|WorkerArgs/i.test(text)?'WorkerArgs':/Worker|后端程序/i.test(text)?'Worker':/Model|模型/i.test(text)?'Model':/StageLayers|层数/i.test(text)?'StageLayers':/Gpu|GPU|显卡/i.test(text)?'Gpu':/Port|端口/i.test(text)?'Port':null;row(tr('需要处理','Needs attention'),text,key,false);}
     finally{if(el.isConnected)el.append(make('p',{class:'l-muted'},tr('检查不会加载模型。兼容性和实际资源需求仍需启动验证；检查通过也不会自动启动。','This check does not load a model. Compatibility and resource needs are verified at startup; passing does not start a service.')));}
   }
   function message(text,error=false){const el=root.querySelector('[data-launch-message]');if(el){el.textContent=text;el.classList.toggle('l-error',error);el.setAttribute('role',error?'alert':'status');}}
-  async function api(path,data){const response=await fetch('/api/launcher/'+path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json','X-KVMem-Token':info.token},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(60000)});const value=await response.json();if(!response.ok)throw Error(value.error||'HTTP '+response.status);return value;}
-  function collect(){const params={};root.querySelectorAll('[data-param]').forEach(el=>{if(el.disabled)return;const k=el.dataset.param;if(el.type==='checkbox'){if(el.dataset.inverted==='true'?!el.checked:el.checked)params[k]=true;}else if(el.multiple){params[k]=Array.from(el.selectedOptions).map(x=>x.value).join(',');}else if(el.value!==''){params[k]=el.type==='number'?Number(el.value):el.value;}});const layers=params.StageLayers;if(layers)params.StageLayers=layers.split(',').map(x=>Number(x.trim()));const raw=root.querySelector('[data-native]');if(raw?.value.trim()){const args=JSON.parse(raw.value);if(!Array.isArray(args))throw Error(tr('原生参数必须为 JSON 数组','Native arguments must be a JSON array'));params.WorkerArgs=args;}return {schema_version:1,parameters:params};}
+  async function api(path,data,timeout=60000){const response=await fetch('/api/launcher/'+path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json','X-KVMem-Token':info.token},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(timeout)});const value=await response.json();if(!response.ok)throw Error(value.error||'HTTP '+response.status);return value;}
+  function collect(){const params={};root.querySelectorAll('[data-param]').forEach(el=>{if(el.disabled||el.dataset.uiOnly==='true')return;const k=el.dataset.param;if(el.type==='checkbox'){if(el.dataset.inverted==='true'?!el.checked:el.checked)params[k]=true;}else if(el.multiple){params[k]=Array.from(el.selectedOptions).map(x=>x.value).join(',');}else if(el.value!==''){params[k]=el.type==='number'?Number(el.value):el.value;}});const layers=params.StageLayers;if(layers)params.StageLayers=layers.split(',').map(x=>Number(x.trim()));const raw=root.querySelector('[data-native]');if(raw?.value.trim()){const args=JSON.parse(raw.value);if(!Array.isArray(args))throw Error(tr('原生参数必须为 JSON 数组','Native arguments must be a JSON array'));params.WorkerArgs=args;}return {schema_version:1,parameters:params};}
   function field(parent,p,key,zh,en,type='text',options=null,note=null,disabled=false){
     const label=make('label',{class:'l-field l-row'}),title=tr(zh,en);
     if(type==='checkbox'){
       label.classList.add('l-toggle');
       const copy=make('span',{class:'l-toggle-copy'});copy.append(make('span',{},title));
       const input=make('input',{type:'checkbox',role:'switch','aria-label':title,'data-param':key});
-      input.checked=!!p[key];input.disabled=disabled;
-      let description;
-      if(note||disabled){description=make('small',{class:'l-toggle-help',id:'launch-help-'+key},note?tr(...note):tr('当前接入暂不可用','Unavailable in this integration'));input.setAttribute('aria-describedby',description.id);}
+      input.checked=!!p[key];input.disabled=disabled;input.dataset.backendSupported=String(!disabled);
+      if(note||disabled)help(copy.firstChild,title,(disabled?tr('当前启动器对此后端暂未开放此设置。','This launcher does not expose this setting for this backend yet. '):'')+(note?tr(...note):''),input);
       const control=make('span',{class:'l-toggle-control'}),state=make('span',{class:'l-toggle-state','aria-hidden':'true'});
       state.append(make('span',{'data-toggle-on':''},tr('已开启','On')),make('span',{'data-toggle-off':''},tr('已关闭','Off')),make('span',{'data-toggle-unavailable':''},tr('不可用','Unavailable')));
-      control.append(input,state);label.append(copy,control);if(description)label.append(description);parent.append(label);return input;
+      control.append(input,state);label.append(copy,control);parent.append(label);return input;
     }
     label.append(make('span',{},title));let input;
     if(options){input=make('select');options.forEach(([value,text])=>input.append(make('option',{value},text)));}else input=make('input',{type});
-    input.dataset.param=key;input.disabled=disabled;
+    input.dataset.param=key;input.disabled=disabled;input.dataset.backendSupported=String(!disabled);input.setAttribute('aria-label',title);
     if(type==='number'){input.min='0';input.step='1';}input.value=p[key]??'';label.append(input);
-    if(note){const help=make('details',{class:'l-field-help'});help.dataset.essential=String(disabled);help.open=disabled||document.querySelector('#app').dataset.density!=='compact';help.append(make('summary',{},tr('说明','Help')),make('small',{},tr(...note)));label.append(help);}
+    if(note||disabled)help(label.firstChild,title,(disabled?tr('当前启动器对此后端暂未开放此设置。','This launcher does not expose this setting for this backend yet. '):'')+(note?tr(...note):''),input);
+    if(disabled)label.append(make('small',{class:'l-unavailable'},tr('此后端暂不可用','Unavailable for this backend')));
     parent.append(label);return input;
+  }
+
+  function dependency(key,enabled,reason){
+    const input=root.querySelector(`[data-param=${key}]`);
+    if(!input||input.dataset.backendSupported==='false')return;
+    // Disabled by a feature dependency, not unsupported by this backend.
+    // Preserve values for drafts/templates while collect() omits the override.
+    input.dataset.keepDraft='true';input.disabled=!enabled;input.dataset.disabledReason=enabled?'':reason;
+    const state=input.closest('label')?.querySelector('[data-toggle-unavailable]');
+    if(state)state.textContent=tr('未生效','Inactive');
+  }
+  function syncDependencies(){
+    const get=key=>root.querySelector(`[data-param=${key}]`);
+    if(!get('Backend'))return;
+    const diskAllowed=get('Backend').value!=='llamacpp'||Number(get('Concurrency')?.value||1)<=1;
+    const diskConflict=tr('当前 llama.cpp 并发大于 1，暂不支持 SSD 缓存。','SSD cache is unavailable with llama.cpp concurrency above 1.');
+    dependency('DiskEnabled',diskAllowed,diskConflict);
+    const disk=!!get('DiskEnabled')?.checked&&!get('DiskEnabled').disabled,lrfu=!!get('NoLrfu')?.checked,vision=!!get('Vision')?.checked;
+    for(const key of ['DiskPath','DiskMiB'])dependency(key,disk,diskAllowed?tr('先开启 SSD 缓存。','Enable SSD cache first.'):diskConflict);
+    if(get('DiskPath'))get('DiskPath').required=disk;
+    for(const key of ['LrfuLambda','LrfuTopFraction'])dependency(key,lrfu,tr('先开启 LRFU。','Enable LRFU first.'));
+    for(const key of ['VisionTokens','VisionResidency'])dependency(key,vision,tr('先开启图像输入。','Enable vision input first.'));
+    dependency('ThinkingBudget',get('ThinkingMode')?.value!=='off',tr('默认思考模式已关闭；重新开启或选择默认后可设置预算。','Default thinking is off. Select on or default to set a budget.'));
+    const mtp=Number(get('MtpDrafts')?.value)>0;
+    for(const key of ['AdaptiveMtp','NgramDrafts'])dependency(key,mtp,tr('先将 MTP 推测长度设为大于 0。','Set an MTP draft length greater than 0 first.'));
+    dependency('NgramMinMatch',mtp&&Number(get('NgramDrafts')?.value)>0,tr('先启用 MTP，并将 N-gram 推测 token 数设为大于 0。','Enable MTP and set N-gram draft tokens greater than 0 first.'));
+    dependency('FastPrefill',['int8','rk8v4','rk4v4','rk4v4-e8','rk2v4-e8'].includes(get('KvType')?.value),tr('当前 KV 格式不支持快速预填充。','The current KV format does not support fast prefill.'));
+    const gpu=get('Gpu'),gpuCount=gpu?.multiple?gpu.selectedOptions.length:(gpu?.value||'').split(',').filter(Boolean).length;
+    dependency('StageLayers',gpuCount>1,tr('至少选择两张显卡后才能设置层数分配。','Select at least two GPUs to assign layers.'));
+    if(openHelp)showHelp(openHelp);
+  }
+
+  function inputActions(input){
+    const row=make('div',{class:'l-input-actions'});input.replaceWith(row);row.append(input);return row;
+  }
+
+  function credentialField(parent,p){
+    const input=field(parent,{ApiKey:launchKeys[p.Backend]||''},'ApiKey','API 访问密钥（可选）','API access key (optional)','password',null,['仅在当前页面保留，不写入草稿或模板；刷新后如需重启服务，请重新填写。监控自动连接当前服务；外部聊天客户端需填写此密钥。','Kept only on this page, excluded from drafts and templates. Re-enter after refreshing to restart. Monitoring connects automatically; external chat clients need this key.']);
+    input.closest('label').classList.add('l-wide');input.dataset.secret='true';input.autocomplete='off';input.spellcheck=false;input.maxLength=512;input.pattern='[A-Za-z0-9._~+\\x2f\\x2d]+=*';
+    input.addEventListener('input',()=>{launchKeys[p.Backend]=input.value;});
+    const row=inputActions(input),show=make('button',{type:'button',class:'s-button','aria-pressed':'false'},tr('显示','Show')),generate=make('button',{type:'button',class:'s-button','data-generate-key':''},tr('生成','Generate'));
+    show.onclick=()=>{const visible=input.type==='password';input.type=visible?'text':'password';show.setAttribute('aria-pressed',String(visible));show.textContent=visible?tr('隐藏','Hide'):tr('显示','Show');};
+    generate.onclick=()=>{const bytes=crypto.getRandomValues(new Uint8Array(32));input.value=Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');input.dispatchEvent(new Event('input',{bubbles:true}));};
+    row.append(show,generate);
+  }
+
+  function templateFileField(parent,p){
+    const advanced=make('details',{class:'l-advanced l-wide'});advanced.append(make('summary',{},tr('高级 · 自定义聊天模板','Advanced · Custom chat template')));const grid=make('div',{class:'l-fields l-template-fields'});advanced.append(grid);parent.append(advanced);
+    const input=field(grid,p,'ChatTemplateFile','模板文件（可选）','Template file (optional)','text',null,['留空使用模型与引擎默认模板。只选择模板文件，不在页面中编辑模板。','Leave empty to use the model and engine default. Choose a template file; template editing is not provided here.']);input.closest('label').classList.add('l-wide');
+    const row=inputActions(input),browse=make('button',{type:'button',class:'s-button','data-browse-template':''},tr('选择…','Choose…')),reset=make('button',{type:'button',class:'s-button','data-reset-template':''},tr('恢复默认','Use default'));
+    browse.onclick=async()=>{if(pickingModel)return;pickingModel=true;browse.disabled=true;try{const result=await api('browse-template',{backend:p.Backend,current_path:input.value||p.Model||''},315000);if(result.path&&input.isConnected){input.value=result.path;input.dispatchEvent(new Event('input',{bubbles:true}));}}catch(error){showError(error);}finally{pickingModel=false;browse.disabled=false;}};
+    reset.onclick=()=>{input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));};row.append(browse,reset);
   }
 
   function modelPicker(parent, p) {
@@ -264,8 +373,8 @@
   }
   function presetPanel(side) {
     const panel = make('section', {class:'s-card l-presets'});
-    panel.append(make('h2', {class:'s-title'}, tr('启动模板','Launch templates')),
-      make('p', {class:'l-muted'}, tr('一键套用参数，再点击启动。模型路径按引擎保留。','Apply a recipe, then start. Model paths are retained per backend.')));
+    const title=make('h2',{class:'s-title'},tr('启动模板','Launch templates'));panel.append(title);
+    help(title,tr('启动模板','Launch templates'),tr('套用参数后再点击启动，模型路径按引擎保留。草稿与个人模板保存在当前浏览器，不包含 API 密钥；清除网站数据会删除这些设置。','Apply a recipe, then start. Model paths are retained per backend. Drafts and templates stay in this browser without API keys; clearing site data removes them.'));
     const list = make('div', {class:'l-preset-list'});
     const switcher=make('div',{class:'l-template-tabs'});
     for(const [id,zh,en] of [['builtin','内置模板','Built-in'],['mine','我的模板','My templates']]){const tab=make('button',{type:'button',class:'s-button','data-template-tab':id,'aria-pressed':String(templateTab===id)},tr(zh,en));tab.onclick=()=>{templateTab=id;refreshTemplates();};switcher.append(tab);}panel.append(switcher);
@@ -307,20 +416,19 @@
       };
       panel.append(undo);
     }
-    panel.append(make('p', {class:'l-muted l-preset-footnote'}, tr('草稿与个人模板保存在当前浏览器。清除网站数据会删除这些设置。','Drafts and personal templates are saved in this browser. Clearing site data removes them.')));
     const log=side.querySelector('.l-log');if(log)side.insertBefore(panel,log);else side.append(panel);
   }
   function render(p){
     let refreshGpuOrder=()=>{};
     const b=p.Backend,n=b==='ninfer',l=b==='llamacpp';
-    root.replaceChildren();
+    closeHelp();root.replaceChildren();
     const heading=make('div',{class:'l-heading l-page-heading'}),intro=make('div',{class:'l-intro'}),savedState=make('button',{type:'button',class:'l-save-state l-muted','data-draft-state':'','aria-live':'polite'});savedState.onclick=saveEditing;intro.append(make('h1',{},tr('启动配置','Launch configuration')),savedState);heading.append(intro);root.append(heading);
     const layout=make('div',{class:'l-layout'}),main=make('div',{class:'l-main'}),side=make('aside',{class:'l-side'});layout.append(main,side);root.append(layout);
     const form=make('form',{'aria-label':tr('启动配置','Launch configuration')});form.style.display='contents';main.append(form);form.addEventListener('submit',e=>e.preventDefault());
     const core=make('section',{class:'s-card l-essential'});core.append(make('h2',{class:'s-title'},tr('模型与资源','Model & resources')));const fields=make('div',{class:'l-fields l-core'});core.append(fields);form.append(core);
     const backend=field(fields,p,'Backend','推理引擎','Backend','text',Object.entries(names).map(([v,t])=>[v,t]));Array.from(backend.options).forEach(o=>{o.disabled=!info.backends.includes(o.value);if(o.disabled)o.textContent+=' · '+tr('未安装','not installed');});
     modelPicker(fields,p);
-    const gpu=field(fields,p,'Gpu','推理显卡','Inference GPUs','text',info.gpus.map(g=>[g.uuid,g.name+' · '+g.uuid.slice(-8)]),[n?'按 Ctrl 多选，按列表顺序切分':'当前控制台对此后端使用单卡',n?'Ctrl-click for multiple GPUs; ordered below':'This console currently uses one GPU for this backend']);
+    const gpu=field(fields,p,'Gpu','推理显卡','Inference GPUs','text',info.gpus.map(g=>[g.uuid,g.name+' · '+g.uuid.slice(-8)]),[n?'按勾选顺序加入，可前移／后移；层数分配随显卡一起移动。':'当前控制台对此后端使用单卡',n?'GPUs join in selection order. Reorder below; assigned layers move with each GPU.':'This console currently uses one GPU for this backend']);
     gpu.closest('label').classList.add('l-gpu-field');
     if(n){gpu.multiple=true;gpu.size=2;Array.from(gpu.options).forEach(o=>o.selected=(p.Gpu||'').split(',').includes(o.value));}
     else if(!p.Gpu){gpu.prepend(make('option',{value:''},tr('选择显卡','Select a GPU')));gpu.value='';}
@@ -379,21 +487,24 @@
       }
       gpu.addEventListener('change',()=>{order=Array.from(gpu.selectedOptions).map(option=>option.value);sync();});sync();gpu.after(choices);box.append(ordered);
       refreshGpuOrder=drawOrder;
-      const gpuHelp=box.querySelector('.l-field-help');gpuHelp.dataset.essential='true';gpuHelp.open=true;gpuHelp.querySelector('small').textContent=tr('按勾选顺序加入，可前移／后移；层数分配随显卡一起移动。','GPUs join in selection order. Reorder below; assigned layers move with each GPU.');
     }
     field(fields,p,'Context','最大上下文 · tokens','Context limit · tokens','number');
-    field(fields,p,'Budget','GPU 历史 KV 预算 · tokens','GPU history KV budget · tokens','number',null,['不是整卡显存上限','Not a device VRAM limit']);
-    field(fields,p,'HostMiB','RAM 历史缓存 · MiB','RAM history cache · MiB','number',null,['1024 MiB = 1 GiB；不含模型内存','1024 MiB = 1 GiB; excludes model memory']);
-    for(const key of ['Context','Budget','HostMiB'])fields.querySelector(`[data-param=${key}]`).closest('label').classList.add('l-resource-field');
+    field(fields,p,'Budget','GPU 历史 KV 预算 · tokens','GPU history KV budget · tokens','number',null,['每条活动请求选中的历史 KV，不含生成预留空间；不是整卡显存上限','Selected history KV per active request, excluding append workspace; not a device VRAM limit']);
+    field(fields,p,'Reserve','生成预留空间 · tokens','Generation reserve · tokens','number',null,n?['每条活动请求的追加 KV 工作空间；可循环复用，输出预算可以超过此值','Append KV workspace per active request; reusable, so output budget may exceed this value']:['每条活动请求的追加 KV 工作空间；当前 llama.cpp 的单次输出预算受此容量限制','Append KV workspace per active request; current llama.cpp output budget is limited by this capacity']);
+    for(const key of ['Context','Budget','Reserve'])fields.querySelector(`[data-param=${key}]`).closest('label').classList.add('l-resource-field');
     const section=make('section',{class:'s-card'}),tabs=make('div',{class:'l-tabs',role:'tablist','aria-label':tr('共性参数分组','Common settings groups')});section.append(tabs);form.append(section);const panels=[];
     groups.forEach((g,i)=>{const tab=make('button',{type:'button',class:'l-tab',role:'tab',id:'launch-tab-'+i,'aria-selected':String(activeTab===i),'aria-controls':'launch-panel-'+i},tr(...g));tabs.append(tab);const panel=make('div',{class:'l-panel',id:'launch-panel-'+i,role:'tabpanel','aria-labelledby':tab.id});panel.hidden=activeTab!==i;const grid=make('div',{class:'l-fields'});panel.append(grid);panels.push(grid);section.append(panel);tab.onclick=()=>{activeTab=i;tabs.querySelectorAll('button').forEach((x,j)=>x.setAttribute('aria-selected',String(i===j)));section.querySelectorAll('.l-panel').forEach((x,j)=>x.hidden=i!==j);};});
-    field(panels[0],p,'Reserve','生成预留空间 · tokens','Generation reserve · tokens','number');
+    field(panels[0],p,'HostMiB','RAM 历史缓存 · MiB','RAM history cache · MiB','number',null,['活动与空闲历史共享的原生 KV 数据硬预算；不含模型、统计索引等其他内存；1024 MiB = 1 GiB','Shared hard budget for active and idle native KV data; excludes model weights, statistics and other memory; 1024 MiB = 1 GiB']);
     const kv=n?['int8','bf16','fp8','nvfp4','k8v4','rk8v4','rk4v4','rk4v4-e8','rk2v4-e8']:[ 'q8_0','f16','f32','q5_0','q4_0'];
     field(panels[0],{...p,KvType:p.KvType||kv[0]},'KvType','KV 格式','KV format','text',kv.map(v=>[v,v]));
-    field(panels[0],p,'DiskPath','SSD 缓存目录（可选）','SSD cache directory (optional)','text',null,['填写目录后启用 SSD 缓存；留空不使用','Enter a directory to enable SSD caching; leave empty to keep it off']);
-    field(panels[0],{DiskMiB:4096,...p},'DiskMiB','SSD 缓存预算 · MiB','SSD cache budget · MiB','number');
+    // UI state only: the worker still receives the existing path/budget pair.
+    const diskEnabled=field(panels[0],{DiskEnabled:typeof p.DiskEnabled==='boolean'?p.DiskEnabled:!!p.DiskPath?.trim()&&p.DiskMiB!==0},'DiskEnabled','启用 SSD 缓存','Enable SSD cache','checkbox',null,['关闭后不传 SSD 参数；目录与预算仍保存在草稿和模板中，重新开启时可继续使用。','When off, no SSD arguments are passed. The directory and budget stay in drafts and templates for later reuse.']);
+    diskEnabled.dataset.uiOnly='true';diskEnabled.closest('label').classList.add('l-wide');
+    field(panels[0],p,'DiskPath','SSD 缓存目录','SSD cache directory','text',null,['开启 SSD 缓存时必填；配合正的 SSD 缓存预算使用。','Required when SSD cache is enabled, together with a positive SSD cache budget.']);
+    const diskBudget=field(panels[0],{DiskMiB:4096,...p},'DiskMiB','SSD 缓存预算 · MiB','SSD cache budget · MiB','number');
+    diskBudget.min='1';
     field(panels[0],p,'SinkTokens','保留开头 · tokens','Keep prefix · tokens','number');field(panels[0],p,'RecentTokens','保留最近 · tokens','Keep recent · tokens','number');
-    if(n)field(panels[0],p,'RetainedSessions','保留会话数量（可选）','Retained sessions (optional)','number',null,['保留的空闲会话数量，不含正在使用的会话','Idle sessions to retain; excludes active sessions']);
+    field(panels[0],p,'RetainedSessions','保留会话数量（可选）','Retained sessions (optional)','number',null,['保留的空闲会话数量，不含正在使用的会话','Idle sessions to retain; excludes active sessions']);
     const advanced=make('details',{class:'l-advanced'});advanced.append(make('summary',{},tr('高级 · 历史检索与保留策略','Advanced · History retrieval & retention')));const ag=make('div',{class:'l-fields'});advanced.append(ag);['SinkTokens','RecentTokens','RetainedSessions'].forEach(k=>{const el=panels[0].querySelector(`[data-param="${k}"]`);if(el)ag.append(el.closest('label'));});panels[0].append(advanced);
     const retrieval=make('section',{class:'l-retrieval l-wide','data-lrfu-settings':''});
     retrieval.append(make('h3',{class:'s-title'},tr('LRFU 与检索评分','LRFU & retrieval scoring')));
@@ -401,42 +512,50 @@
     // Keep persisted/native NoLrfu semantics; only the UI uses a positive toggle.
     const lrfu=field(retrievalFields,p,'NoLrfu','启用 LRFU','Enable LRFU','checkbox');lrfu.dataset.inverted='true';lrfu.checked=!p.NoLrfu;
     for(const [key,zh,en,fallback] of [['LrfuLambda','LRFU 衰减系数 λ','LRFU decay λ','0.5'],['LrfuTopFraction','LRFU 候选比例','LRFU candidate fraction','0.9']]){
-      const input=field(retrievalFields,p,key,zh,en,'number');input.step='any';input.max='1';input.placeholder=tr('默认 '+fallback,'Default '+fallback);
+      const input=field(retrievalFields,p,key,zh,en,'number',null,['开启 LRFU 时生效；关闭后保留填写的值。','Applies when LRFU is enabled; values are retained when off.']);input.step='any';input.max='1';input.placeholder=tr('默认 '+fallback,'Default '+fallback);
     }
     field(retrievalFields,{ScoreAggregation:'max',...p},'ScoreAggregation','注意力分数组合方式','Attention score aggregation','text',[['max',tr('最大值','Maximum')],['mean',tr('平均值','Mean')]]);
     field(panels[1],p,'Prefill','预填充块大小 · tokens','Prefill chunk · tokens','number');
     const layerSplit=field(panels[1],{...p,StageLayers:(p.StageLayers||[]).join(',')},'StageLayers','多卡层数分配（可选）','Layer split (optional)','text',null,[n?'依次对应上方第 1、2…张显卡，用逗号分隔；留空由后端分配':'当前接入暂不支持设置多卡层数',n?'Comma-separated counts for GPU 1, 2, … above; empty uses backend allocation':'Layer assignment is unavailable in this integration'],!n);
     layerSplit.addEventListener('input',refreshGpuOrder);refreshGpuOrder();
-    field(panels[1],p,'MtpDrafts','MTP 推测长度 · tokens','MTP draft length · tokens','number',null,['还需模型支持；留空沿用默认','Requires model support; empty uses default'],l);
-    field(panels[1],p,'AdaptiveMtp','启用自适应 MTP','Enable adaptive MTP','checkbox',null,null,!n);field(panels[1],p,'FastPrefill','启用快速预填充','Enable fast prefill','checkbox',null,null,!n);
-    field(panels[2],p,'MaxTokens','默认最大输出 · tokens','Default output limit · tokens','number');field(panels[2],p,'ThinkingBudget','默认思考预算（可选）','Default thinking budget (optional)','number',null,['限制思考阶段的 token 数；留空使用引擎默认值','Limits thinking tokens; leave empty for the engine default'],!n);
-    panels[2].append(make('p',{class:'l-muted l-wide'},tr('温度、top-p 等采样参数目前由聊天请求设置，尚未映射为统一启动参数。','Temperature, top-p and other sampling controls currently belong to chat requests, not this launch adapter.')));
+    const mtpDrafts=field(panels[1],p,'MtpDrafts','MTP 推测长度 · tokens','MTP draft length · tokens','number',null,['需要模型支持；1–15 启用，0 或留空关闭。关闭后自适应 MTP 与 N-gram 设置保留但不生效。','Requires model support; 1–15 enables MTP, while 0 or empty disables it. Adaptive MTP and N-gram settings are retained while inactive.'],l);mtpDrafts.max='15';
+    field(panels[1],p,'AdaptiveMtp','启用自适应 MTP','Enable adaptive MTP','checkbox',null,['需要先启用 MTP；关闭自适应后仍可使用固定长度 MTP。','Requires MTP. Turning adaptive mode off still allows fixed-length MTP.'],!n);field(panels[1],p,'FastPrefill','启用快速预填充','Enable fast prefill','checkbox',null,['支持 int8、rk8v4、rk4v4、rk4v4-e8、rk2v4-e8；还需模型支持。与 MTP、普通预填充块大小分别设置。','Supports int8, rk8v4, rk4v4, rk4v4-e8 and rk2v4-e8; model support is also required. Independent of MTP and the standard prefill chunk size.'],!n);
+    field(panels[2],p,'MaxTokens','默认最大输出 · tokens','Default output limit · tokens','number',null,['聊天请求可以覆盖默认输出预算。温度、top-p 等采样参数由聊天请求设置。','Chat requests can override the default output budget. Temperature, top-p and other sampling controls are set by chat requests.']);
+    const thinking=field(panels[2],{ThinkingMode:'default',...p},'ThinkingMode','默认思考模式','Default thinking mode','text',[['default',tr('沿用引擎 / 模型默认','Use engine / model default')],['on',tr('开启','On')],['off',tr('关闭','Off')]],n?['NInfer 启动参数支持默认与关闭；显式开启由聊天请求选择，仍需模型支持。','NInfer supports default/off at startup; explicit thinking-on belongs to chat requests and requires model support.']:['llama.cpp 当前默认关闭；开启仍需模型与模板支持。聊天请求可以覆盖此默认值。','llama.cpp currently defaults to off. Enabling requires model/template support; chat requests can override this default.']);
+    if(n){thinking.querySelector('[value=on]').disabled=true;thinking.querySelector('[value=on]').textContent=tr('开启 · 由聊天请求设置','On · Set by chat request');}
+    field(panels[2],p,'ThinkingBudget','默认思考预算（可选）','Default thinking budget (optional)','number',null,['限制思考阶段的 token 数；留空使用引擎默认值','Limits thinking tokens; leave empty for the engine default'],!n);
     field(panels[3],p,'Vision','启用图像输入','Enable vision','checkbox',null,['需要模型及配套资源支持','Requires compatible model and resources'],l);
-    field(panels[3],p,'VisionTokens','图像 token 上限（可选）','Image token limit (optional)','number',null,null,l);field(panels[3],{VisionResidency:'resident',...p},'VisionResidency','图像编码器存放位置','Vision encoder placement','text',[['resident','GPU'],['cpu','CPU']],null,l);
-    panels[3].append(make('p',{class:'l-muted l-wide'},tr('聊天模板使用模型与引擎的默认设置。','Chat templates use model and engine defaults.')));
-    field(panels[4],{ListenHost:'127.0.0.1',...p},'ListenHost','监听地址','Listen address','text',[['127.0.0.1',tr('127.0.0.1 · 仅本机','127.0.0.1 · This computer')],['0.0.0.0',tr('0.0.0.0 · 所有网卡','0.0.0.0 · All interfaces')]],['选择所有网卡后，其他设备可通过本机 IP 和端口访问推理服务','All interfaces allows other devices to access inference through this computer’s IP and port']);field(panels[4],p,'Port','服务端口','Service port','number');field(panels[4],p,'Concurrency','同时处理的请求数（可选）','Simultaneous requests (optional)','number',null,[n?'范围 1–8':'当前接入暂不支持调整并发数',n?'Range 1–8':'Concurrency cannot be adjusted in this integration'],!n);
+    field(panels[3],p,'VisionTokens','图像 token 上限（可选）','Image token limit (optional)','number',null,['开启图像输入时生效。','Applies when vision input is enabled.'],l);field(panels[3],{VisionResidency:'resident',...p},'VisionResidency','图像编码器存放位置','Vision encoder placement','text',[['resident','GPU'],['cpu','CPU']],['开启图像输入时生效；关闭后保留原选择。','Applies when vision input is enabled; the selection is retained when off.'],l);
+    templateFileField(panels[3],p);
+    field(panels[4],{ListenHost:'127.0.0.1',...p},'ListenHost','监听地址','Listen address','text',[['127.0.0.1',tr('127.0.0.1 · 仅本机','127.0.0.1 · This computer')],['0.0.0.0',tr('0.0.0.0 · 所有网卡','0.0.0.0 · All interfaces')]],['选择所有网卡后，其他设备可通过本机 IP 和端口访问推理服务','All interfaces allows other devices to access inference through this computer’s IP and port']);field(panels[4],p,'Port','服务端口','Service port','number');
+    const concurrency=field(panels[4],p,'Concurrency','同时处理的请求数（可选）','Simultaneous requests (optional)','number',null,n?['范围 1–8；留空为 1。并发增加会提高 KV 和显存需求。','Range 1–8; empty uses 1. More concurrent requests require more KV and VRAM.']:['范围 1–4；留空为 1。当前控制台使用单卡；并发大于 1 时需关闭 SSD 缓存。','Range 1–4; empty uses 1. This console uses one GPU; concurrency above 1 requires SSD cache disabled.']);concurrency.min='1';concurrency.max=n?'8':'4';
+    credentialField(panels[4],p);
+    const serviceAdvanced=make('details',{class:'l-advanced l-wide'});serviceAdvanced.append(make('summary',{},tr('高级 · 服务标识与日志','Advanced · Service identity & logs')));const serviceFields=make('div',{class:'l-fields l-service-fields'});serviceAdvanced.append(serviceFields);panels[4].append(serviceAdvanced);
+    field(serviceFields,p,'ModelAlias','对外模型名（可选）','Served model name (optional)','text',null,['供 API 客户端使用的稳定名称；留空沿用模型名称。','A stable name for API clients; leave empty to inherit the model name.']);
+    field(serviceFields,{LogLevel:'',...p},'LogLevel','日志级别','Log level','text',[['',tr('引擎默认 · Info','Engine default · Info')],['info','Info'],['debug','Debug'],['trace','Trace'],['warning','Warning'],['error','Error'],['off',tr('关闭日志','Off')]],['通常使用 Info；排查问题时可临时选择 Debug。','Use Info normally; select Debug temporarily for troubleshooting.']);
     const native=make('details',{class:'s-card l-native'});native.append(make('summary',{},tr('引擎专属参数 · ','Engine-specific settings · ')+names[b]));const ng=make('div',{class:'l-fields'});native.append(ng);
     if(n||l){
       const detected=info.workers?.[b];
       const worker=field(ng,p,'Worker','后端程序（可选）','Backend executable (optional)','text',null,
-        detected?.available?['留空自动使用已登记的后端程序','Leave empty to use the registered backend executable']:['尚未找到可用程序，请填写已安装程序的路径','No executable found; enter its installed path']);
+        detected?.available?['留空自动使用已登记的后端程序：'+detected.path,'Leave empty to use the registered backend executable: '+detected.path]:['尚未找到可用程序，请填写已安装程序的路径','No executable found; enter its installed path']);
       worker.placeholder=detected?.available?detected.path:tr('请选择已安装的后端程序','Enter the installed backend executable');
-      if(detected?.available)worker.parentElement.append(make('small',{'data-default-worker':'',style:'overflow-wrap:anywhere'},tr('自动选用：','Automatic: ')+detected.path));
+      if(!detected?.available&&!p.Worker)worker.parentElement.append(make('small',{class:'l-unavailable'},tr('未登记默认程序','No default executable registered')));
     }
     if(n){
-      field(ng,p,'NgramDrafts','N-gram 推测 token 数','N-gram draft tokens','number');
-      field(ng,p,'NgramMinMatch','N-gram 最短匹配','N-gram minimum match','number');
+      const ngram=field(ng,p,'NgramDrafts','N-gram 推测 token 数','N-gram draft tokens','number',null,['依赖 MTP；0 或留空关闭 N-gram，1–63 启用。并发时后端可能缩小实际推测宽度。','Requires MTP. 0 or empty disables N-gram; 1–63 enables it. The backend may reduce its width under concurrency.']);ngram.max='63';
+      const minMatch=field(ng,p,'NgramMinMatch','N-gram 最短匹配','N-gram minimum match','number',null,['同时启用 MTP 和 N-gram 时生效，范围 4–64。','Applies when both MTP and N-gram are enabled; range 4–64.']);minMatch.min='4';minMatch.max='64';
       field(ng,p,'DeviceProfile','设备性能配置','Device profile','text',[['off',tr('关闭','Off')],['auto',tr('自动','Auto')]]);
 
     }
-    const nativeLabel=make('label',{class:'l-field l-wide'});nativeLabel.append(make('span',{},tr('原生选项 · JSON 参数数组','Native options · JSON argument array')));const raw=make('textarea',{'data-native':'',rows:'2',spellcheck:'false'});raw.value=JSON.stringify(p.WorkerArgs||[]);nativeLabel.append(raw,make('small',{},tr('当前允许：','Currently allowed: ')+(info.native_options[b].join(', ')||tr('暂无附加选项','none'))));ng.append(nativeLabel);form.append(native);
+    const nativeLabel=make('label',{class:'l-field l-wide'}),nativeTitle=make('span',{},tr('原生选项 · JSON 参数数组','Native options · JSON argument array'));nativeLabel.append(nativeTitle);const raw=make('textarea',{'data-native':'',rows:'2',spellcheck:'false','aria-label':tr('原生选项 · JSON 参数数组','Native options · JSON argument array')});raw.value=JSON.stringify(p.WorkerArgs||[]);nativeLabel.append(raw);help(nativeTitle,tr('原生选项','Native options'),tr('按选项和值成对填写 JSON 数组。当前允许：','Use a JSON array of option/value pairs. Currently allowed: ')+(info.native_options[b].join(', ')||tr('暂无附加选项','none')),raw);ng.append(nativeLabel);form.append(native);
     const actions=make('div',{class:'l-actions l-draft-actions'});const save=make('button',{type:'button',class:'s-button','data-action':'template'},tr('另存为模板','Save as template'));const preview=make('button',{type:'button',class:'s-button','data-action':'preview'},tr('检查配置','Check configuration'));actions.append(preview,save);heading.append(actions);const output=make('pre',{class:'l-result l-notice','data-launch-message':'','aria-live':'polite'});heading.after(output);
-    const status=make('section',{class:'s-card l-runtime'});status.append(make('h2',{class:'s-title'},tr('当前运行服务','Running service')),make('p',{class:'l-status s-badge','data-runtime-state':''},tr('读取中','Loading')));const progress=make('div',{class:'l-launch-progress','data-launch-progress':'',hidden:''});progress.append(make('p',{'data-launch-phase':'',role:'status'}),make('div',{class:'l-launch-track',role:'progressbar','data-launch-track':''}),make('small',{class:'l-muted','data-launch-help':''}));status.append(progress,make('dl',{'data-runtime-details':''}));const lifecycle=make('div',{class:'l-actions'});const start=make('button',{type:'button',class:'s-button l-primary','data-action':'start'},tr('启动服务','Start service'));const stop=make('button',{type:'button',class:'s-button','data-action':'stop',disabled:''},tr('停止服务','Stop service'));lifecycle.append(start,stop);status.append(lifecycle,make('p',{class:'l-muted'},tr('只管理此控制台启动的服务。停止会卸载模型并清空其内存缓存。','Only services started here are managed. Stopping unloads the model and its in-memory cache.')));side.append(status);
+    const status=make('section',{class:'s-card l-runtime'}),statusTitle=make('h2',{class:'s-title'},tr('当前运行服务','Running service'));status.append(statusTitle,make('p',{class:'l-status s-badge','data-runtime-state':''},tr('读取中','Loading')));help(statusTitle,tr('当前运行服务','Running service'),tr('只管理此控制台启动的服务。停止会卸载模型并清空其内存缓存。','Only services started here are managed. Stopping unloads the model and its in-memory cache.'));const progress=make('div',{class:'l-launch-progress','data-launch-progress':'',hidden:''});progress.append(make('p',{'data-launch-phase':'',role:'status'}),make('div',{class:'l-launch-track',role:'progressbar','data-launch-track':''}),make('small',{class:'l-muted','data-launch-help':''}));status.append(progress,make('dl',{'data-runtime-details':''}));const lifecycle=make('div',{class:'l-actions'});const start=make('button',{type:'button',class:'s-button l-primary','data-action':'start'},tr('启动服务','Start service'));const stop=make('button',{type:'button',class:'s-button','data-action':'stop',disabled:''},tr('停止服务','Stop service'));lifecycle.append(start,stop);status.append(lifecycle);side.append(status);
     presetPanel(side);
     const log=make('details',{class:'s-card l-log'});log.append(make('summary',{},tr('启动日志','Startup log')));const refresh=make('button',{type:'button',class:'s-button l-secondary'},tr('刷新日志','Refresh log'));log.append(refresh,make('pre',{class:'l-result','data-log':''}));side.append(log);refresh.onclick=async()=>{try{log.querySelector('[data-log]').textContent=(await api('log')).text||tr('暂无日志','No log yet');}catch(e){message(e.message,true);}};
     const origin=make('div',{class:'l-environment'});origin.append(make('span',{class:'l-muted'},tr('后端安装目录','Backend checkout')),make('p',{class:'l-muted',style:'overflow-wrap:anywhere'},info.backend_root));log.append(origin);
     backend.onchange=()=>{try{const old=captureDraft().parameters;old.Backend=b;perBackend[b]=old;selectedPreset='';render(perBackend[backend.value]||{...defaults,Backend:backend.value});scheduleSave();}catch(e){backend.value=b;message(e.message,true);}};
     [save,preview,start,stop].forEach(button=>button.onclick=()=>act(button.dataset.action));
+    syncDependencies();
     updateStatus(runtime);
     draftStatus();
   }

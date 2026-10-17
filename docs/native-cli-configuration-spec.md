@@ -597,6 +597,43 @@ KVMem 新公共配置的默认策略由一份版本化定义提供，模板可�
 
 “公共/专属”是语义属性，“常用/高级”是展示属性。可以把后端专属的常用参数放在对应分组，也可以把两边都支持的少用参数折叠起来。
 
+### 已接入控制台的常用原生设置
+
+UI 只提供常用设置，不复制完整原生命令行。以下名称属于 UI 配置和 PowerShell 启动器，EXE 的原生名称保持不变：
+
+| 配置字段 | UI 位置 | llama.cpp 输出 | NInfer 输出 |
+|---|---|---|---|
+| `ApiKey` | 服务与并发 | `--api-key KEY` | 同名，公共入口限单个 key |
+| `ModelAlias` | 服务与并发 → 高级 | `--alias NAME` | `--model-id NAME` |
+| `LogLevel` | 服务与并发 → 高级 | `--verbosity`：off=0、error=1、warning=2、info=3、trace=4、debug=5 | `--log-level` 对应文字值 |
+| `ChatTemplateFile` | 模板与图像 → 高级 | `--chat-template-file PATH` | `--chat-template PATH`（此处原生含义就是文件） |
+| `ThinkingMode` | 生成与思考 | default 不传覆盖，on=`--enable-thinking`，off=`--no-think` | default 不传覆盖，off=`--no-thinking`；缺少原生启动 on 选项，UI 禁用 on，不模拟成其他参数 |
+| `Concurrency` | 服务与并发 | `--parallel N`，1–4；当前控制台单卡，并发大于 1 时要求关闭 SSD | `--max-concurrency N`，1–8 |
+
+模型名、日志和模板文件留空时不产生覆盖参数；思考模式继承各自原生默认，不能把 llama 的默认关闭和 NInfer 的模型默认描述为相同的运行状态。思考预算仍仅对 NInfer 开放，UI 关闭思考时不发送预算。温度、top-p 等继续交给聊天请求。
+
+密钥支持随机生成与显示/隐藏，只在页面内存和正在运行的控制器/worker 中保留。浏览器草稿、个人模板和控制器保存的草稿都排除密钥；刷新后重启服务需要重新输入。预览/复制命令使用 `<redacted>`，手动执行前要替换占位符。控制器不把密钥写入启动计划临时 JSON；状态只报告是否配置，日志接口屏蔽已用密钥。当前控制器对自己管理的服务自动携带密钥读取健康状态和固定监控路由；外部聊天客户端仍须提供密钥。
+
+启动器的同一设置不能同时从命名字段和 `WorkerArgs` 覆盖。未使用相应命名字段时，直接脚本仍可保留原有原生高级参数；UI 的原生参数数组继续使用小范围白名单，不开放任意参数传递。
+
+### 已实现的布局、帮助与条件联动
+
+顶部资源区展示逻辑上下文、GPU 历史预算 B 和生成预留 R；RAM 历史预算 H 放在“缓存与历史”。参数说明通过信息按钮悬浮、键盘聚焦或点击显示，Escape 或点击外部关闭，不占用表单行高。禁用控件的具体原因也通过该提示展示。
+
+| 条件 | 受影响的控件与导出规则 |
+|---|---|
+| SSD 关闭 | 目录与预算变灰，预览和启动均省略两个实参；`DiskEnabled` 只属于浏览器草稿/模板，不传给启动器或 EXE |
+| LRFU 关闭 | 衰减系数与候选比例变灰；分数组合方式仍可设置；导出明确的关闭开关 |
+| 图像输入关闭 | 图像 token 上限、编码器存放位置变灰并省略 |
+| 默认思考模式关闭 | 默认思考预算变灰并省略；不改写后端原生开关 |
+| MTP 长度为 0 或留空 | 自适应 MTP、N-gram 推测与匹配设置变灰并省略；自适应开关本身不控制固定 MTP/N-gram |
+| N-gram 推测为 0 | 最短匹配设置变灰并省略 |
+| KV 格式不支持快速预填充 | 快速预填充变灰并省略，预填充分块仍独立设置 |
+| 少于两张显卡 | NInfer 层数分配不可编辑；显卡数量变化时清除已失效的层数分配 |
+| llama.cpp 并发大于 1 | SSD 开关及目录/预算均不可用，不导出 SSD 实参；回到单并发可恢复先前选择 |
+
+由于依赖条件暂时禁用的值仍保存在草稿和个人模板中，刷新、套用模板和后端来回切换后可恢复。后端本身不支持的控件不会因其他开关变化而被启用。旧草稿缺少 `DiskEnabled` 时，按已有非空目录与非零预算推断开关状态。
+
 ## 七 来源与帮助差异
 
 | 内容 | 当前来源 |
@@ -624,6 +661,9 @@ KVMem 新公共配置的默认策略由一份版本化定义提供，模板可�
 | llama 服务 CLI 兼容检查 | 98 项通过；包含新 KVMem 规则、原生参数及别名 |
 | Windows 统一启动器 | 参数数组、字面路径、能力选择、无效组合及新公共参数映射通过 |
 | 本地控制台 | 19 项单元测试通过，覆盖密钥不落盘/不回显、两后端原生映射、能力拒绝和模板文件选择 |
+| 新增 UI 设置实际启动 | RTX 5050 Laptop + Qwen3.5-0.8B-Q8_0，23 项检查通过：鉴权、模型别名、自定义模板、双并发、健康检测、监控自动鉴权及脱敏；临时服务已停止 |
+| UI 条件联动专项 | 30 项浏览器与原生启动预览检查通过；覆盖禁用值保留、有效参数导出、模板恢复和后端能力边界，不启动推理 |
+| 仓库内 UI 回归 | `node ui/test-launcher.cjs` 通过，包含新增的 `test-launcher-settings.cjs`：悬浮/键盘帮助、资源位置、依赖条件、有效预览请求、密钥和草稿/模板恢复；该部分使用设备与预览响应 fixture，不启动推理。`node ui/test-monitor.cjs` 也通过 |
 | llama 实际会话配额 | Qwen3.5-0.8B-Q8_0；单路 N=2、双路 N=1，共 54 项检查通过；覆盖复用、隔离、淘汰、两个活动请求、排队预览失效、错误及断线收尾 |
 | NInfer 参数及缓存策略 | cli_options、context_cache_defaults、kv_capacity、serve_options、unique_strings 共 5 组通过 |
 | NInfer 实际启动及请求 | Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp；通过公共 CLI 启用 KVMem，B=384、R=128、H=512 MiB、sessions=1、SSD=0；19 项检查通过；普通聊天与流式返回正常，流式完成 192 个输出 tokens，活动/非活动计数分开报告 |
@@ -631,4 +671,4 @@ KVMem 新公共配置的默认策略由一份版本化定义提供，模板可�
 
 llama 功能测试使用 RTX 5050 Laptop（`GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29`）；NInfer 27B 功能测试使用空闲 RTX 5060 Ti（`GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`）。本轮为功能验证，不形成性能比较结论。测试仅启动和关闭自身的临时服务。
 
-可复现入口：[llama 会话配额测试](../scripts/test_server_session_quota.py)、[NInfer CLI 实际请求测试](../scripts/test_ninfer_kvmem_cli.py)、[启动器测试](../scripts/windows/test-backend-launcher.ps1)。本次实际模型验证使用纯文本和单卡，没有重新验收视觉、MTP 或多卡推理；llama 的 R 输出能力限制继续保留。
+可复现入口：[llama 会话配额测试](../scripts/test_server_session_quota.py)、[NInfer CLI 实际请求测试](../scripts/test_ninfer_kvmem_cli.py)、[启动器测试](../scripts/windows/test-backend-launcher.ps1)、[启动配置浏览器测试](../ui/test-launcher.cjs)及[设置专项测试](../ui/test-launcher-settings.cjs)。本次实际模型验证使用纯文本和单卡，没有重新验收视觉、MTP 或多卡推理；llama 的 R 输出能力限制继续保留。

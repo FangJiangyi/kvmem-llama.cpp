@@ -161,7 +161,7 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
  await page.waitForFunction(()=>JSON.parse(localStorage.getItem('kvmem-launch-draft-v2')).parameters.NoLrfu===false);
  await page.locator('[data-theme-select]').selectOption('blue');
  await page.getByRole('tab',{name:'硬件与加速'}).click();
- assert.equal(await page.locator('[data-param=StageLayers]').isEnabled(),true);
+ assert.equal(await page.locator('[data-param=StageLayers]').isEnabled(),await page.locator('[data-gpu-choice]:checked').count()>1);
  await page.locator('[data-param=Backend]').selectOption('llamacpp');
  assert.equal(await page.locator('[data-param=StageLayers]').isDisabled(),true);
  await page.getByRole('tab',{name:'缓存与历史'}).click();
@@ -297,6 +297,7 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
  for(const width of [1920,1440,1366,768,390]){await page.setViewportSize({width,height:width===1366?768:1080});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'horizontal overflow '+width);if(width===1366){const box=await page.locator('[data-action=template]').boundingBox();assert.ok(box.y+box.height<=768,'template action below laptop viewport: '+JSON.stringify(box));}}
  await page.setViewportSize({width:1920,height:1080});
  if(process.env.SCREENSHOT_DIR){fs.mkdirSync(process.env.SCREENSHOT_DIR,{recursive:true});await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'launch-desktop.png'),fullPage:true});}
+ await require('./test-launcher-settings.cjs')({browser,base,info});
  if(process.env.TEST_MODEL&&process.env.TEST_WORKER&&process.env.TEST_GPU){
   const config={schema_version:1,parameters:{Backend:'llamacpp',Model:process.env.TEST_MODEL,Worker:'',Gpu:process.env.TEST_GPU,Context:4096,Budget:2048,Reserve:512,HostMiB:256,Prefill:128,MaxTokens:128,Port:port+1,ListenHost:'127.0.0.1',SinkTokens:512,RecentTokens:64,WorkerArgs:['--n-gpu-layers','99']}};
   const preview=await api('preview',config);assert.equal(preview.code,200,JSON.stringify(preview.body));assert.ok(preview.body.argv.includes('--kvmem'));

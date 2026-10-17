@@ -162,7 +162,11 @@ candidate discovery, not architecture/quantization compatibility validation.
 
 This console supports NInfer and llama.cpp. Only these two backends can be selected,
 even when another checkout's launcher declares experimental engines. Unsupported sampling/template controls
-are explicitly unavailable. Native options keep their original spellings, with a small
+are explicitly unavailable. Common controls include a single API key, served model name,
+log level, custom chat-template file, default thinking mode and concurrency. They map to
+each backend's existing native flags; NInfer's thinking-on override remains a chat-request
+setting. llama.cpp currently exposes concurrency 1–4 on one GPU, NInfer 1–8.
+Native options keep their original spellings, with a small
 allowlist of numeric thread/GPU-offload options; arbitrary shell text and duplicate common
 options are rejected. Multi-GPU selection is currently exposed for NInfer layer splitting.
 
@@ -179,7 +183,7 @@ The heading shows saving/saved status and offers retry on storage failure. Reloa
 the browser draft; clearing site data removes it. The server-side v1 draft remains the
 initial fallback and is available through the existing save API.
 `Save as template` stores a named snapshot with an optional description under **My templates**.
-Personal templates include machine-specific paths and all settings, and support apply/undo,
+Personal templates include machine-specific paths and settings except API keys, and support apply/undo,
 rename, explicit update from the current draft, and confirmed deletion. They are stored in
 this browser alongside edits, not shared across browsers. Built-in recipes remain separate.
 `Check configuration` opens a dialog with model, GPU order/layers, cache budgets, resolved
@@ -210,11 +214,36 @@ The persisted v1 console format is `{schema_version: 1, parameters: {...}}`, usi
 launcher parameter names. It is a bridge to the existing launcher, not an implementation
 of the separate proposed `common/backends` public configuration schema. Unexposed settings
 are omitted so native defaults survive; unsupported keys/types fail rather than being
-silently ignored. Raw API keys are not a console configuration option.
+silently ignored. API keys remain only in page/controller/worker memory: drafts, personal
+templates and launch-plan files exclude them; previews and log responses redact them.
+Reloading clears the input, so restarting requires re-entry. Monitoring automatically
+authenticates to the owned service; external clients supply the same key themselves.
+
+The primary resource row contains context, GPU history budget B and generation reserve R;
+RAM history budget H is under Cache & history. R is append KV workspace per active request,
+not an output-length setting. The current llama.cpp implementation still limits output to
+R, while NInfer can reuse that workspace. Retained sessions counts idle histories only.
+Help appears from the small information buttons on hover or keyboard focus. Click to pin,
+press Escape or click elsewhere to dismiss; opening help does not move the form.
+
+Feature switches disable only dependent controls. Disabled values stay in browser drafts
+and personal templates but are omitted from preview/start payloads. SSD controls its path
+and budget; LRFU controls decay and candidate fraction, while score aggregation stays
+independent. Vision controls image budget and encoder placement; thinking-off disables
+the thinking budget. MTP length zero disables adaptive MTP and N-gram overrides; N-gram
+zero disables minimum match. Fast prefill depends on KV format, and layer allocation needs
+at least two GPUs. llama.cpp concurrency above one disables SSD while keeping its saved
+values. Controls unsupported by a backend remain unavailable when other switches change.
+The SSD switch is browser state only; workers keep the existing path/budget parameters.
 
 Checks: `python tests/test_local_console.py`, `python tests/test_webui_builder.py`,
 `node ui/test-monitor.cjs`, and `node ui/test-launcher.cjs`. The launcher browser check
-uses a disposable controller and state directory. Optional `TEST_MODEL`, `TEST_WORKER`,
+uses a disposable controller and state directory, and loads `ui/test-launcher-settings.cjs`
+for isolated, model-free checks of help, dependencies, active preview payloads, credentials
+and draft/template restoration. These settings checks fixture device discovery and preview
+responses; native argument translation is checked separately by
+`powershell -File scripts/windows/test-backend-launcher.ps1` and the console unit tests.
+Optional `TEST_MODEL`, `TEST_WORKER`,
 and `TEST_GPU` enable a real llama.cpp start/generate/monitor/stop check. `BACKEND_ROOT`
 selects its adapter checkout, and `CONSOLE_TEST_PORT` defaults to 18431 (worker uses +1).
 `CHROMIUM` and `PLAYWRIGHT_MODULE` select the locally installed browser/runtime.

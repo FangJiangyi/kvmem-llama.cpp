@@ -73,7 +73,6 @@
   function applyDensity() {
     app.dataset.density = density;
     $("[data-density-select]").value = density;
-    $$(".l-field-help").forEach(el => { el.open = el.dataset.essential === "true" || density !== "compact"; });
   }
   applyDensity();
   $("[data-density-select]").onchange = (e) => {
@@ -362,7 +361,7 @@
       ? conversations.slice(0, 1)
       : conversations;
     const data = {
-      retained_sessions: sum(c, "count"),
+      retained_sessions: c.reduce((n, item) => n + (number(item.retained_sessions) ? item.retained_sessions : item.count || 0), 0),
       history_hits: sum(c, "extends"),
       history_evictions: sum(c, "evictions"),
     };
