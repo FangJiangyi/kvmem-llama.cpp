@@ -101,7 +101,7 @@ ngram 默认关闭。
 - NVFP4 的 D256 K/V 每 token 每 KV head 共 288 字节（两份 128 字节 codes 与 16 字节 scales）；K8V4 为 402 字节（256+128+2+16），INT8 为 528 字节，RK8V4 为 408 字节。换页按原始字节传输，不重新量化；权重、GDN state、workspace 与 CUDA Graph 不随 KV 格式同比缩小。格式布局身份和冷快照执行配置区分 NVFP4 与其他 KV 格式。
 - prefill 是 128 的倍数且不超过 R。追加压力触发选页，逻辑历史保留原始位置。生成上限由请求输出预算和逻辑上下文上限共同决定。
 - H 只限制原生 KV payload。统计索引、每会话最多四个检查点的 GDN StateImage、模型和临时缓冲另计，H 不等于进程总内存上限。
-- 长期历史保存在普通 Host 内存，CUDA 搬运复用一个不超过 B+R 原生页大小的 pinned 缓冲区；其用量单独通过 `transfer_staging_bytes` 报告。
+- 长期历史保存在普通 Host 内存。KV CUDA 搬运分批复用 Program 持有的 pinned 缓冲区，以 64 MiB 为目标按完整原生页对齐；单页超过该目标时至少容纳一页，小请求按需分配。D2H、H2D 与 KV 字节校验复用同一缓冲，扩容先释放旧 pin；GDN 检查点与状态校验缓冲另计。`transfer_staging_bytes` 报告搬运暂存总量，SSD 模式还包括普通 RAM scratch，并非进程全部锁页内存。验证范围见 [分批 pin 搬运验证](ninfer-pinned-transfer-validation-20261018.md)。
 - 请求在执行前检查整段合法历史的 H 需求，已知预算不足返回错误。编辑历史不匹配可信前缀时从头计算。
 - 如果单请求可容纳，但并发请求的全局 H 预留暂时不足，后续请求进入原生 FIFO 队列；不会让每个请求重复独占 H。服务入口默认排队时限 600 秒，Engine API 默认 30 秒，可显式配置。
 - 图像区域完整保留，连同 sink 和追加页必须能装入 B；不满足时在准入阶段拒绝，可增大 B 或降低 `VisionTokens`。换图按内容、位置和精确前缀使旧 checkpoint 失效，不依赖文件名。
