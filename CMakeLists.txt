@@ -354,6 +354,21 @@ if (KVMEM_BUILD_LLAMA)
 
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if (Python3_Interpreter_FOUND)
+        add_test(NAME kvmem-session-restore-regression
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/session-restore-regression.py
+                --exe $<TARGET_FILE:llama-kvmem-server>
+                --out ${CMAKE_CURRENT_BINARY_DIR}/session-restore-regression)
+        add_test(NAME kvmem-session-restore-mtp-regression
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/session-restore-regression.py
+                --exe $<TARGET_FILE:llama-kvmem-server> --mtp
+                --out ${CMAKE_CURRENT_BINARY_DIR}/session-restore-mtp-regression)
+        add_test(NAME kvmem-session-restore-mtp-small-block-regression
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/session-restore-regression.py
+                --exe $<TARGET_FILE:llama-kvmem-server> --mtp --block-tokens 32 --turns 12 --cancel-rounds 3
+                --out ${CMAKE_CURRENT_BINARY_DIR}/session-restore-mtp-small-block-regression)
+        set_tests_properties(kvmem-session-restore-regression kvmem-session-restore-mtp-regression
+            kvmem-session-restore-mtp-small-block-regression
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 RUN_SERIAL TRUE)
         add_test(NAME kvmem-prefix-reuse-regression
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/prefix-reuse-regression.py
                 --exe $<TARGET_FILE:llama-kvmem-server>
@@ -365,6 +380,12 @@ if (KVMEM_BUILD_LLAMA)
         set_tests_properties(kvmem-prefix-reuse-regression kvmem-prefix-reuse-mtp-regression
             PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 RUN_SERIAL TRUE)
     endif()
+
+    add_executable(kvmem-checkpoint-tail-test tests/checkpoint-tail-test.cpp)
+    target_include_directories(kvmem-checkpoint-tail-test PRIVATE src/adapter)
+    target_link_libraries(kvmem-checkpoint-tail-test PRIVATE llama kvmem)
+    add_test(NAME kvmem-checkpoint-tail-test COMMAND kvmem-checkpoint-tail-test)
+    set_tests_properties(kvmem-checkpoint-tail-test PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(kvmem-gdn-replay-test tests/gdn-replay-test.cpp)
     target_include_directories(kvmem-gdn-replay-test PRIVATE src/adapter)

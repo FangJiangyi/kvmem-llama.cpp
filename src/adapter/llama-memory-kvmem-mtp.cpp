@@ -602,6 +602,41 @@ void llama_memory_kvmem_mtp::write_block_to_gpu(uint32_t block_id) {
     }
 }
 
+bool llama_memory_kvmem_mtp::restore_checkpoint_block(uint32_t block_id) {
+    if (!target_ || !kv_ || !raw_ || v_trans_) return false;
+    const auto & store = target_->store();
+    if (block_id >= store.block_count()) return false;
+    const auto & block = store.blocks()[block_id];
+    if (block.gpu_slot < 0 || !block.n_tokens ||
+            !checkpoint_block_packed(block_id, block.n_tokens)) return false;
+    ggml_tensor * kt = kv_->get_k_storage((int32_t) il_graph_);
+    ggml_tensor * vt = kv_->get_v_storage((int32_t) il_graph_);
+    if (!kt || !vt) return false;
+    harvest_flush();
+    const size_t krow = ggml_row_size(type_k_, n_embd_k_);
+    const size_t vrow = ggml_row_size(type_v_, n_embd_v_);
+    const size_t cell0 = (size_t) block.gpu_slot * block_tokens_;
+    const size_t kbytes = block.n_tokens * krow, vbytes = block.n_tokens * vrow;
+    std::vector<uint8_t> kpack(kbytes), vpack(vbytes);
+    // Read both complete payloads before marking any native cell reusable.
+    if (!raw_->copy_k_gpu(block_id, 0, kpack.data(), block.n_tokens) ||
+            !raw_->copy_v_gpu(block_id, 0, vpack.data(), block.n_tokens)) return false;
+    target_->note_attention_change();
+    kvmem_tensor_set(kt, kpack.data(), cell0 * krow, kbytes);
+    kvmem_tensor_set(vt, vpack.data(), cell0 * vrow, vbytes);
+    if (trace_) {
+        std::vector<uint8_t> actual_k(kbytes), actual_v(vbytes);
+        kvmem_tensor_get(kt, actual_k.data(), cell0 * krow, kbytes);
+        kvmem_tensor_get(vt, actual_v.data(), cell0 * vrow, vbytes);
+        if (actual_k != kpack || actual_v != vpack) return false;
+        kvmem_diag("KVMEM_TRACE checkpoint_mtp_restore block=%u tokens=%u bytes_verified=1\n",
+                block_id, block.n_tokens);
+    }
+    occupy_block(block_id);
+    if (block.n_tokens == block_tokens_) clear_slot_taint(block.gpu_slot);
+    return true;
+}
+
 void llama_memory_kvmem_mtp::on_stage_out(uint32_t block_id) {
     if (target_) target_->note_attention_change();
     if (!target_) {

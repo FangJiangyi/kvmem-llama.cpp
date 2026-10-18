@@ -1100,6 +1100,8 @@ static void multimodal_restore(LlamaEngineState & st, const MultimodalCheckpoint
         llama_kvmem_truncate_cached(checkpoint.row);
         if (!llama_kvmem_set_tail_mean(checkpoint.row, checkpoint.data->tail_mean))
             throw std::runtime_error("mean-K checkpoint restore rejected");
+        if (!llama_kvmem_restore_checkpoint_tail())
+            throw std::runtime_error("checkpoint KV coverage is incomplete");
     }
     st.mm_live_row = checkpoint.row;
     st.mm_live_checkpoint = checkpoint.data;
@@ -1275,7 +1277,17 @@ static bool run_prefill_multimodal(LlamaEngineState & st, kvmem::RequestControl 
         st.mm_rollback = std::make_shared<MultimodalCheckpoint>(base);
         st.mm_rollback_prompt = st.cached_prompt ? st.cached_prompt->prefix(base.row) : nullptr;
         st.mm_committed = false;
-        multimodal_restore(st, base, true, true);
+        try {
+            multimodal_restore(st, base, true, true);
+        } catch (const std::exception & error) {
+            kvmem_diag("KVMEM_TRACE checkpoint_restore_fallback row=%d reason=%s\n", base.row, error.what());
+            llama_driver_clear(st);
+            st.mm_lcp = 0;
+            base = multimodal_checkpoint(st, 0);
+            st.mm_rollback = std::make_shared<MultimodalCheckpoint>(base);
+            st.mm_rollback_prompt.reset();
+            multimodal_restore(st, base, true, true);
+        }
         begin_history_round(st);
         llama_kvmem_begin_cached_turn();
         std::vector<uint32_t> starts, ends;
