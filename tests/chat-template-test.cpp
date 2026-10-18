@@ -48,9 +48,9 @@ static void test_render() {
     const std::string source = R"JINJA({% if reasoning_effort is defined %}effort={{ reasoning_effort }};{% endif %}{% if flag is defined and flag is true %}typed-bool;{% endif %}{% if count is defined and count == 2 %}typed-number;{% endif %}{% for message in messages %}{{ '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %})JINJA";
     auto tmpls = common_chat_templates_init(nullptr, source);
     const auto chat = render(tmpls.get(), {{"reasoning_effort", "low"}, {"chat_template_kwargs", {{"flag", true}, {"count", 2}}}});
-    CHECK(chat.prompt.find("effort=low;typed-bool;typed-number;") != std::string::npos);
-    CHECK(chat.prompt.find("Hello") != std::string::npos);
-    CHECK(render(tmpls.get(), {{"reasoning_effort", "default"}}).prompt.find("effort=") == std::string::npos);
+    CHECK(chat.prompt.str().find("effort=low;typed-bool;typed-number;") != std::string::npos);
+    CHECK(chat.prompt.str().find("Hello") != std::string::npos);
+    CHECK(render(tmpls.get(), {{"reasoning_effort", "default"}}).prompt.str().find("effort=") == std::string::npos);
 }
 
 int main(int argc, char ** argv) {
@@ -64,12 +64,12 @@ int main(int argc, char ** argv) {
         const auto low = render(tmpls.get(), {{"reasoning_effort", "low"}});
         const auto medium = render(tmpls.get(), {{"reasoning_effort", "medium"}});
         const auto high = render(tmpls.get(), {{"reasoning_effort", "xhigh"}});
-        CHECK(low.prompt.find("Keep your thinking brief and focused") != std::string::npos);
-        CHECK(high.prompt.find("validate key assumptions") != std::string::npos);
-        CHECK(low.prompt != medium.prompt && medium.prompt != high.prompt);
-        CHECK(render(tmpls.get(), nlohmann::json::object()).prompt == high.prompt);
+        CHECK(low.prompt.str().find("Keep your thinking brief and focused") != std::string::npos);
+        CHECK(high.prompt.str().find("validate key assumptions") != std::string::npos);
+        CHECK(low.prompt.str() != medium.prompt.str() && medium.prompt.str() != high.prompt.str());
+        CHECK(render(tmpls.get(), nlohmann::json::object()).prompt.str() == high.prompt.str());
         const auto off = render(tmpls.get(), {{"reasoning_effort", "none"}});
-        CHECK(off.prompt.find("Reasoning effort is set to") == std::string::npos);
+        CHECK(off.prompt.str().find("Reasoning effort is set to") == std::string::npos);
         bool rejected = false;
         try { render(tmpls.get(), {{"reasoning_effort", "high"}}); }
         catch (const std::exception &) { rejected = true; }

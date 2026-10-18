@@ -1,0 +1,128 @@
+{
+  "upstream_release": "v0.7.0",
+  "upstream_commit": "620d2225cc436ab0b001e3200e590e3b286ef9ab",
+  "gpu_uuid": "GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c",
+  "gpu_model": "NVIDIA GeForce RTX 5060 Ti",
+  "model_filename": "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+  "model_sha256": "58fd826723939933dc86f45b7fe04545cbc2de1c70f6fe2cdd3858c87a98c12f",
+  "model_bytes": 12120016960,
+  "fixture_sha256": "f899dd873480dd5cccbd017c89add8a8899d8f7aa64e17c8e0fb714deafcf4cb",
+  "budget": 36864,
+  "reserve": 16384,
+  "prompt_tokens": 36864,
+  "output_tokens": 256,
+  "batch": 512,
+  "ubatch": 512,
+  "target_kv": "q8_0",
+  "draft_kv": "f16",
+  "mtp": 3,
+  "sampling": "greedy; EOG bias -inf; no penalties",
+  "warmups_per_case": 1,
+  "measured_runs_per_case": 2,
+  "timing": "first token belongs to prefill; decode = 255 / seconds from first to last token",
+  "source": "tests/llama-backend-perf.cpp; initial three cases used the saved pre-replay-extension driver",
+  "cases": {
+    "native": {
+      "variant": "native",
+      "prompt_tps": 564.1011500202096,
+      "generation_tps": 37.9430859662363,
+      "ttft_seconds": 65.349982,
+      "drafted": 464,
+      "accepted": 356,
+      "repetitions": 2,
+      "peak_gpu_mib": 14703.0,
+      "generation_tps_each": [
+        37.94311419523324,
+        37.94305773728138
+      ],
+      "prompt_delta_percent": 0.0,
+      "generation_delta_percent": 0.0,
+      "mtp_state": "snapshots",
+      "block_tokens": 32,
+      "logical_ctx": 53248,
+      "busy_clock_mhz_median": 1777.0,
+      "busy_temperature_c_max": 72.0
+    },
+    "patched-off": {
+      "variant": "patched-off",
+      "prompt_tps": 566.137521690305,
+      "generation_tps": 37.75061690799797,
+      "ttft_seconds": 65.114921,
+      "drafted": 464,
+      "accepted": 356,
+      "repetitions": 2,
+      "peak_gpu_mib": 14703.0,
+      "generation_tps_each": [
+        37.730187434693484,
+        37.771068516866414
+      ],
+      "prompt_delta_percent": 0.3609940646322807,
+      "generation_delta_percent": -0.5072572600172798,
+      "mtp_state": "snapshots",
+      "block_tokens": 32,
+      "logical_ctx": 53248,
+      "busy_clock_mhz_median": 1777.0,
+      "busy_temperature_c_max": 73.0
+    },
+    "kvmem-on": {
+      "variant": "kvmem-on",
+      "prompt_tps": 558.8775082298329,
+      "generation_tps": 35.5441368273638,
+      "ttft_seconds": 65.9607865,
+      "drafted": 464,
+      "accepted": 356,
+      "repetitions": 2,
+      "peak_gpu_mib": 14827.0,
+      "generation_tps_each": [
+        35.80694244658868,
+        35.285160832530536
+      ],
+      "prompt_delta_percent": -0.9260115477852882,
+      "generation_delta_percent": -6.322493486711145,
+      "mtp_state": "snapshots",
+      "block_tokens": 32,
+      "logical_ctx": 131072,
+      "busy_clock_mhz_median": 1777.0,
+      "busy_temperature_c_max": 73.0
+    },
+    "kvmem-default": {
+      "variant": "kvmem-default",
+      "prompt_tps": 558.2987626240242,
+      "generation_tps": 36.784214350127876,
+      "ttft_seconds": 66.029163,
+      "drafted": 464,
+      "accepted": 356,
+      "repetitions": 2,
+      "peak_gpu_mib": 14391.0,
+      "generation_tps_each": [
+        37.013936255034444,
+        36.55732633191243
+      ],
+      "prompt_delta_percent": -1.0286076169101044,
+      "generation_delta_percent": -3.054236593037396,
+      "mtp_state": "replay",
+      "block_tokens": 128,
+      "logical_ctx": 131072,
+      "busy_clock_mhz_median": 1777.0,
+      "busy_temperature_c_max": 73.0
+    }
+  },
+  "validation": {
+    "fixed_tokens_match_all_12_runs": true,
+    "mtp_accepted_and_drafted_match": true,
+    "no_internal_decode_errors_in_final_runs": true,
+    "public_headers_unchanged": 23,
+    "same_backend_library_for_patched_cases": true
+  },
+  "limitations": [
+    "One GPU, one model, one fixed workload, two measured repetitions.",
+    "Common B+R range only; no 256K tool workload, multi-GPU or image matrix.",
+    "Default replay uses 128-token blocks; snapshots diagnostic uses 32-token blocks."
+  ],
+  "post_measurement_change": {
+    "kind": "metadata only",
+    "old_backend_version": "7fe450e+kvmem-native-v1",
+    "final_backend_version": "620d222+kvmem-native-v1",
+    "compute_or_memory_logic_changed": false
+  }
+}

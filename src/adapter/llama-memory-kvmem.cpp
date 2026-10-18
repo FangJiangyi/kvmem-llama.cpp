@@ -157,6 +157,11 @@ std::shared_ptr<kvmem::SpillFile> kvmem_execution_spill_file(const llama_kvmem_e
     return state && state->payload_storage ? state->payload_storage->spill_file() : nullptr;
 }
 
+ggml_backend_dev_t kvmem_model_layer_device(const llama_model * model, int layer) {
+    if (!model) return nullptr;
+    return layer < 0 ? model->dev_output() : model->dev_layer(layer);
+}
+
 llama_kvmem_execution_state * llama_kvmem_execution_create() {
     return new llama_kvmem_execution_state;
 }
@@ -832,15 +837,11 @@ llama_memory_i * llama_memory_kvmem_maybe_create(
         return nullptr;
     }
     if (params.ctx_type == LLAMA_CONTEXT_TYPE_MTP) {
-        llama_memory_kvmem * tgt = nullptr;
-        if (cparams.ctx_other) {
-            llama_memory_t mem = llama_get_memory(cparams.ctx_other);
-            if (auto * hyb = dynamic_cast<llama_memory_kvmem_hybrid *>(mem)) {
-                tgt = hyb->attn_kvmem();
-            } else {
-                tgt = dynamic_cast<llama_memory_kvmem *>(mem);
-            }
-        }
+        // The execution domain owns one target and its MTP follower. Follow
+        // that target's slot layout without setting native ctx_other: v0.7
+        // uses ctx_other to mean shared native KV (e.g. Gemma assistants),
+        // whereas Qwen MTP has separate KV and must advance draft positions.
+        llama_memory_kvmem * tgt = kvmem_capture_active();
         if (!tgt) {
             return nullptr;
         }
@@ -5692,7 +5693,7 @@ struct llama_memory_kvmem::NativeBackend final : kvmem::MemoryBackend {
     kvmem::MemoryDescriptor descriptor() const override {
         kvmem::MemoryDescriptor d;
         // In-process compatibility, never a claim of a portable state image.
-        d.identity = {"llama.cpp", "7fe450e+kvmem-native-v1",
+        d.identity = {"llama.cpp", "620d222+kvmem-native-v1",
             std::to_string(reinterpret_cast<uintptr_t>(&owner.model_)), "attention-only-v1"};
         d.layout = kvmem::raw_kv_payload_layout(owner.raw_cfg_,
             std::string("llama-packed-") + ggml_type_name(owner.type_k_) + "/" + ggml_type_name(owner.type_v_),

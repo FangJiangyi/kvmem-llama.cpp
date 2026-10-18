@@ -3,12 +3,12 @@
   "llamacpp": {
     "path": "backends/llamacpp",
     "upstream": "https://github.com/ggml-org/llama.cpp.git",
-    "base_commit": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+    "base_commit": "620d2225cc436ab0b001e3200e590e3b286ef9ab",
     "license_file": "backends/llamacpp/LICENSE",
     "local_changes": "KVMem integration is maintained in the versioned patch; the submodule remains pinned to base_commit",
     "patch": "backends/patches/llamacpp-kvmem.patch",
-    "patch_sha256": "6004bd7d148f1a4eb10ed816be81228fdff5d9686bac90374f55c2f4bc2494b5",
-    "patched_tree": "b190e67570206f5f1aa8c2adbc1cb05c914d9354"
+    "patch_sha256": "7c8f513e4035b3b2ac99b3b68d1e7542a4e238b75fc50ea9abaa125ee2d3f51a",
+    "patched_tree": "0ef285c261f510cd670c7558236490fa02d7b62d"
   },
   "ninfer": {
     "path": "backends/ninfer",

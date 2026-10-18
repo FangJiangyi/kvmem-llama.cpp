@@ -5,6 +5,7 @@
 #include "llama-memory-kvmem-hybrid.h"
 #include "llama-kvmem-stagein.h"
 #include "llama-memory-recurrent.h"
+#include "llama-ext.h"
 
 #include "ggml-backend.h"
 
@@ -280,14 +281,19 @@ static void check_batch_inputs(llama_model * model) {
             hidden[i*width+j] = -i*10-j-1;
         }
     }
-    llama_batch batch{};
-    batch.n_tokens = n;
-    batch.embd = input.data();
-    batch.embd_nextn = hidden.data();
-    batch.pos = pos.data();
-    batch.logical_pos = logical.data();
+    llama_batch_ext batch(n, width, width, 2, nullptr,
+                          llama_vocab_n_tokens(llama_model_get_vocab(model)), 4, width);
+    for (int i = 0; i < n; ++i) {
+        const int idx = batch.add_token(0);
+        llama_pos row_pos[4];
+        for (int j = 0; j < 4; ++j) row_pos[j] = pos[j*n+i];
+        require(batch.set_token_embd(idx, {input.data() + i*width, 1, width}), "set input failed");
+        require(batch.set_token_state(idx, {hidden.data() + i*width, 1, width}), "set state failed");
+        require(batch.set_token_pos(idx, row_pos), "set M-RoPE failed");
+        batch.tokens[idx].logical_pos = logical[i];
+    }
     llama_batch_allocr allocator(4);
-    require(allocator.init(batch, *llama_model_get_vocab(model), nullptr, width, 1, true), "visual batch init failed");
+    require(allocator.init(batch, *llama_model_get_vocab(model), true), "visual batch init failed");
     allocator.split_reset();
     int seen = 0;
     while (seen < n) {
@@ -298,19 +304,18 @@ static void check_batch_inputs(llama_model * model) {
             require(row == seen++, "split lost logical row order");
             for (int j = 0; j < width; ++j) {
                 require(ub.embd[i*width+j] == input[row*width+j], "split lost input embedding");
-                require(ub.embd_nextn[i*width+j] == hidden[row*width+j], "split lost MTP hidden input");
+                require(ub.embd_state[i*width+j] == hidden[row*width+j], "split lost MTP hidden input");
             }
             for (int j = 0; j < 4; ++j) require(ub.pos[j*ub.n_tokens+i] == pos[j*n+row], "split lost M-RoPE position plane");
         }
     }
-    std::vector<int32_t> n_seq(n, 1);
     std::vector<llama_seq_id> seq(n);
-    std::vector<llama_seq_id *> ids(n);
-    for (int i = 0; i < n; ++i) { seq[i] = i%2; ids[i] = &seq[i]; }
-    batch.n_seq_id = n_seq.data();
-    batch.seq_id = ids.data();
+    for (int i = 0; i < n; ++i) {
+        seq[i] = i%2;
+        batch.tokens[i].seq_ids = {seq[i]};
+    }
     llama_batch_allocr reordered(4);
-    require(reordered.init(batch, *llama_model_get_vocab(model), nullptr, width, 2, true), "reordered batch init failed");
+    require(reordered.init(batch, *llama_model_get_vocab(model), true), "reordered batch init failed");
     reordered.split_reset();
     std::vector<bool> visited(n, false);
     for (int count = 0; count < n;) {
@@ -323,7 +328,7 @@ static void check_batch_inputs(llama_model * model) {
             require(ub.seq_id[i][0] == seq[row], "reordered sequence differs");
             for (int j = 0; j < width; ++j) {
                 require(ub.embd[i*width+j] == input[row*width+j], "reorder lost visual input");
-                require(ub.embd_nextn[i*width+j] == hidden[row*width+j], "reorder lost hidden input");
+                require(ub.embd_state[i*width+j] == hidden[row*width+j], "reorder lost hidden input");
             }
             for (int j = 0; j < 4; ++j) require(ub.pos[j*ub.n_tokens+i] == pos[j*n+row], "reorder lost M-RoPE plane");
         }
@@ -749,6 +754,8 @@ int main(int argc, char ** argv) {
             // Stop the follower before freeing its target, including on failure.
             test_spec_session sess;
             require(kvmem_spec_start(sess, model.get(), ctx.get(), opts), "MTP init failed");
+            require(llama_get_ctx_other(sess.ctx_dft) == nullptr,
+                    "Qwen MTP must own separate native KV, even when following KVMem slots");
             auto * mtp = dynamic_cast<llama_memory_kvmem_mtp *>(llama_get_memory(sess.ctx_dft));
             require(mtp != nullptr, "missing KVMem MTP follower");
             require(mtp->target()->get_kv()->type_k() == type && mtp->target()->get_kv()->type_v() == type_v,
