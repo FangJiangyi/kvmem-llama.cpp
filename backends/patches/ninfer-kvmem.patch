@@ -2951,18 +2951,48 @@ index 92b37774e08d3b98ce7dbba9eaf4178d12016a4f..ced302201f9ca4ac01d6b5e744884345
      std::vector<MediaPlaceholderByteSpec> media_placeholders;
      std::vector<MediaTokenRunByteSpec> media_token_runs;
 diff --git a/src/models/qwen3_5/frontend/frontend.cpp b/src/models/qwen3_5/frontend/frontend.cpp
-index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..0668f92a56b70fbea5a1556a6df0fe6704d5544c 100644
+index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..80ac09976e1ab9c68ac2cec64e7a053b7f87658c 100644
 --- a/src/models/qwen3_5/frontend/frontend.cpp
 +++ b/src/models/qwen3_5/frontend/frontend.cpp
-@@ -14,6 +14,7 @@
+@@ -14,6 +14,8 @@
  #include "models/qwen3_5/program/prefix/block_keys.h"
  #include "text/unicode.h"
  #include "text/structured_output.h"
 +#include "models/qwen3_5/frontend/tool_grammar.h"
++#include "models/qwen3_5/frontend/tool_open_token.h"
  #include <mutex>
  
  #include <nlohmann/json.hpp>
-@@ -1185,6 +1186,12 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
+@@ -1002,8 +1004,28 @@ public:
+         throw std::invalid_argument("unknown graft '" + name + "'");
+     }
+ 
++    // Cached: the vocabulary does not change, and scanning it per request is the cost this
++    // path is avoiding relative to compiling a prohibition grammar.
++    [[nodiscard]] std::optional<TokenId> unique_tool_open_token() const {
++        std::lock_guard lock(grammar_mutex);
++        if (!tool_open_resolved) {
++            tool_open_resolved = true;
++            tool_open_token    = fi::unique_exact_token(
++                tokenizer->vocab_size(),
++                [&](std::size_t id) -> std::string_view {
++                    const auto token = static_cast<int>(id);
++                    if (!tokenizer->is_valid_token(token)) { return {}; }
++                    return tokenizer->decode_token_bytes(token, false);
++                },
++                "<tool_call>");
++        }
++        return tool_open_token;
++    }
++
+     mutable std::mutex grammar_mutex;
+     mutable std::unique_ptr<text::StructuredCompiler> grammar_compiler;
++    mutable bool tool_open_resolved = false;
++    mutable std::optional<TokenId> tool_open_token;
+     fi::CompiledChatTemplate chat_template;
+     std::shared_ptr<const fi::Tokenizer> tokenizer;
+     fi::ProcessorOptions processor;
+@@ -1185,6 +1207,12 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
      auto prepared              = std::make_unique<PreparedPromptData>();
      PreparedPromptData& result = *prepared;
      result.tool_call_output    = tool_call_output;
@@ -2975,7 +3005,7 @@ index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..0668f92a56b70fbea5a1556a6df0fe67
      if (impl_->ngram_sources_enabled) {
          result.ngram_boundaries = impl_->ngram_boundaries;
          std::size_t remaining   = impl_->max_context;
-@@ -1220,6 +1227,9 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
+@@ -1220,6 +1248,9 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
          } catch (const fi::ProcessorError& error) { throw_processor_error(error); }
          result.token_ids.assign(processed.input_ids.begin(), processed.input_ids.end());
          result.starts_in_reasoning = processed.starts_in_reasoning;
@@ -2985,7 +3015,7 @@ index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..0668f92a56b70fbea5a1556a6df0fe67
          result.token_types         = std::move(processed.token_types);
          result.positions           = std::move(processed.positions);
          result.rope_delta          = processed.rope_delta;
-@@ -1263,6 +1273,9 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
+@@ -1263,6 +1294,9 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
              throw_context_length_exceeded(impl_->max_context);
          }
          result.token_ids                   = std::move(encoded.input_ids);
@@ -2995,7 +3025,7 @@ index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..0668f92a56b70fbea5a1556a6df0fe67
          result.identity.rewrite_checkpoint = encoded.rewrite_checkpoint;
          result.identity.rewrite_execution_frontiers =
              std::move(encoded.rewrite_execution_frontiers);
-@@ -1284,6 +1297,8 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
+@@ -1284,6 +1318,8 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
      // request builds on, so it publishes no prefix of its own; a prefill graft is replayed, and its
      // end is published as a shared prefix.
      const bool is_direct_graft = graft && graft->kind != GraftKind::PrefillKV;
@@ -3004,7 +3034,7 @@ index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..0668f92a56b70fbea5a1556a6df0fe67
      if (impl_->ngram_archive_enabled) {
          const std::span<const TokenId> tokens(result.token_ids);
          auto add = [&](std::span<const TokenId> span, NgramSourceKind kind, int priority) {
-@@ -1425,6 +1440,7 @@ PreparedPrompt Frontend::prepare_tokens(std::vector<TokenId> token_ids, bool all
+@@ -1425,6 +1461,7 @@ PreparedPrompt Frontend::prepare_tokens(std::vector<TokenId> token_ids, bool all
      auto prepared              = std::make_unique<PreparedPromptData>();
      PreparedPromptData& result = *prepared;
      result.token_ids           = std::move(token_ids);
@@ -3012,7 +3042,7 @@ index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..0668f92a56b70fbea5a1556a6df0fe67
      if (impl_->ngram_sources_enabled) {
          result.ngram_boundaries = impl_->ngram_boundaries;
          build_ngram_index(result);
-@@ -1470,23 +1486,34 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
+@@ -1470,23 +1507,34 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
                                              const StopPolicy& caller_stop,
                                              const OutputOptions& output,
                                              const ThinkingControlOptions& thinking,
@@ -3053,7 +3083,7 @@ index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..0668f92a56b70fbea5a1556a6df0fe67
          }
          std::lock_guard lock(impl_->grammar_mutex);
          if (!impl_->grammar_compiler) {
-@@ -1494,19 +1521,25 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
+@@ -1494,20 +1542,32 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
              for (std::size_t id = 0; id < vocab.size(); ++id) {
                  if (impl_->tokenizer->is_valid_token(id) &&
                      (!impl_->tokenizer->is_special_token(id) ||
@@ -3073,15 +3103,23 @@ index 8886bf4df1e94f78c2370a05cb81d05c9c2d3971..0668f92a56b70fbea5a1556a6df0fe67
 +                                                     structured, envelope.reasoning_close,
 +                                                     prompt.data_->assistant_continuation)
 +            : impl_->grammar_compiler->compile(structured, envelope);
++    }
++    std::optional<TokenId> suppressed_tool_open;
++    if (!impl_->gemma && !grammar && tool_choice.mode == ToolChoiceMode::None &&
++        tool_choice.constraints == ToolConstraintMode::Automatic &&
++        prompt.data_->tool_call_output && !prompt.data_->tool_call_output->tools.empty()) {
++        suppressed_tool_open = impl_->unique_tool_open_token();
      }
      if (output.raw) { policy.publish_stop_token = true; }
      return OutputSession(impl_->tokenizer, std::move(policy), output,
                           prompt.data_->starts_in_reasoning, thinking,
 -                         impl_->thinking_control_tokens, prompt.data_->tool_call_output,
-+                         impl_->thinking_control_tokens, std::move(contract),
-                          std::move(grammar), impl_->gemma);
+-                         std::move(grammar), impl_->gemma);
++                         impl_->thinking_control_tokens, std::move(contract), std::move(grammar),
++                         impl_->gemma, suppressed_tool_open);
  }
  
+ const StopPolicy& Frontend::default_stop_policy() const noexcept { return impl_->defaults; }
 diff --git a/src/models/qwen3_5/frontend/frontend.h b/src/models/qwen3_5/frontend/frontend.h
 index 8584a840c654262757370397f28df680be843100..32dcc1ad3b2f3dbbf9231ef20120c9a371a4a275 100644
 --- a/src/models/qwen3_5/frontend/frontend.h
@@ -3097,7 +3135,7 @@ index 8584a840c654262757370397f28df680be843100..32dcc1ad3b2f3dbbf9231ef20120c9a3
      [[nodiscard]] const ModelSamplingDefaults& sampling_defaults() const noexcept;
      // Publishes the resolved long-anchor count. Startup builds the frontend before the sequence
 diff --git a/src/models/qwen3_5/frontend/output_session.cpp b/src/models/qwen3_5/frontend/output_session.cpp
-index 4400ed30c2b2fdc6cf89eb6623de49a32f2c0324..e48409178a590ff85d757b48acd103ab5719a1f9 100644
+index 4400ed30c2b2fdc6cf89eb6623de49a32f2c0324..c55d4ef45d11db51b886ed8c19c8532db8e30d0e 100644
 --- a/src/models/qwen3_5/frontend/output_session.cpp
 +++ b/src/models/qwen3_5/frontend/output_session.cpp
 @@ -443,7 +443,8 @@ public:
@@ -3110,7 +3148,42 @@ index 4400ed30c2b2fdc6cf89eb6623de49a32f2c0324..e48409178a590ff85d757b48acd103ab
            split_reasoning(starts_in_reasoning && !output.raw),
            // Copied, not moved: the body still asks whether the request declared tools. Gemma's
            // calls go through gemma_tools; the Qwen decoder would seed its own opener for a forced
-@@ -657,6 +658,47 @@ OutputSession::preview_model(std::span<const TokenId> tokens, std::uint32_t tota
+@@ -532,6 +533,7 @@ public:
+     }
+     bool preview_ready = false;
+     std::shared_ptr<text::GrammarState> grammar;
++    std::optional<TokenId> suppressed_tool_open;
+     std::unique_ptr<text::GrammarState> preview_grammar;
+ };
+ 
+@@ -568,18 +570,24 @@ OutputSession::OutputSession(
+     bool starts_in_reasoning, ThinkingControlOptions thinking,
+     std::shared_ptr<const std::vector<TokenId>> thinking_control_tokens,
+     std::shared_ptr<const frontend::ToolCallOutputContract> tool_call_output,
+-    std::shared_ptr<text::GrammarState> grammar, std::shared_ptr<const frontend::GemmaMarkers> gemma)
++    std::shared_ptr<text::GrammarState> grammar, std::shared_ptr<const frontend::GemmaMarkers> gemma,
++    std::optional<TokenId> suppressed_tool_open)
+     : impl_(std::make_unique<Impl>(std::move(tokenizer), std::move(policy), output,
+                                    starts_in_reasoning, thinking,
+                                    std::move(thinking_control_tokens), std::move(tool_call_output),
+                                    std::move(gemma))) {
+-    impl_->grammar = std::move(grammar);
++    impl_->grammar               = std::move(grammar);
++    impl_->suppressed_tool_open  = suppressed_tool_open;
+ }
+ 
+ std::shared_ptr<text::GrammarState> OutputSession::grammar_state() const {
+     return impl_ ? impl_->grammar : nullptr;
+ }
+ 
++std::optional<TokenId> OutputSession::suppressed_tool_open() const {
++    return impl_ ? impl_->suppressed_tool_open : std::nullopt;
++}
++
+ runtime::OutputDecision
+ OutputSession::preview_model(std::span<const TokenId> tokens, std::uint32_t total_budget_remaining,
+                              FinishReason limit_reason,
+@@ -657,6 +665,47 @@ OutputSession::preview_model(std::span<const TokenId> tokens, std::uint32_t tota
          const bool stop_token =
              std::find(impl_->policy.token_ids.begin(), impl_->policy.token_ids.end(), token) !=
              impl_->policy.token_ids.end();
@@ -3158,7 +3231,7 @@ index 4400ed30c2b2fdc6cf89eb6623de49a32f2c0324..e48409178a590ff85d757b48acd103ab
          DecoderState before_state;
          PublishedOutput before_output;
          if (stop_token && !impl_->policy.publish_stop_token) {
-@@ -752,7 +794,8 @@ std::span<const TokenId> OutputSession::pending_control_tokens() const noexcept
+@@ -752,7 +801,8 @@ std::span<const TokenId> OutputSession::pending_control_tokens() const noexcept
      if (impl_ == nullptr || !impl_->semantic.control_pending || !impl_->thinking_control_tokens) {
          return {};
      }
@@ -3168,7 +3241,7 @@ index 4400ed30c2b2fdc6cf89eb6623de49a32f2c0324..e48409178a590ff85d757b48acd103ab
  }
  
  std::uint32_t OutputSession::control_suffix_tokens() const noexcept {
-@@ -761,7 +804,7 @@ std::uint32_t OutputSession::control_suffix_tokens() const noexcept {
+@@ -761,7 +811,7 @@ std::uint32_t OutputSession::control_suffix_tokens() const noexcept {
          return 0;
      }
      return impl_->semantic.control_pending || impl_->semantic.in_reasoning
@@ -3177,7 +3250,7 @@ index 4400ed30c2b2fdc6cf89eb6623de49a32f2c0324..e48409178a590ff85d757b48acd103ab
                 : 0U;
  }
  
-@@ -771,9 +814,9 @@ runtime::OutputDecision OutputSession::preview_control(std::span<const TokenId>
+@@ -771,9 +821,9 @@ runtime::OutputDecision OutputSession::preview_control(std::span<const TokenId>
      if (impl_->state.terminal) { throw std::logic_error("output session is already terminal"); }
      if (impl_->preview_ready) { throw std::logic_error("output session already has a preview"); }
      const std::span<const TokenId> expected = pending_control_tokens();
@@ -3189,7 +3262,7 @@ index 4400ed30c2b2fdc6cf89eb6623de49a32f2c0324..e48409178a590ff85d757b48acd103ab
      }
      if (tokens.size() > total_budget_remaining) {
          throw std::invalid_argument("thinking control span exceeds the remaining output budget");
-@@ -799,15 +842,16 @@ runtime::OutputDecision OutputSession::preview_control(std::span<const TokenId>
+@@ -799,15 +849,16 @@ runtime::OutputDecision OutputSession::preview_control(std::span<const TokenId>
          feed_token_bytes(impl_->preview_state, presentation_bytes, impl_->policy,
                           impl_->preview_output, static_cast<std::uint32_t>(index + 1), nullptr);
      }
@@ -3211,7 +3284,7 @@ index 4400ed30c2b2fdc6cf89eb6623de49a32f2c0324..e48409178a590ff85d757b48acd103ab
      if (impl_->grammar) {
          auto grammar = impl_->grammar->fork();
          grammar->accept(tokens);
-@@ -816,6 +860,8 @@ runtime::OutputDecision OutputSession::preview_control(std::span<const TokenId>
+@@ -816,6 +867,8 @@ runtime::OutputDecision OutputSession::preview_control(std::span<const TokenId>
      impl_->preview_ready = true;
      return runtime::OutputDecision{
          .accepted_tokens              = static_cast<std::uint32_t>(tokens.size()),
@@ -3221,7 +3294,7 @@ index 4400ed30c2b2fdc6cf89eb6623de49a32f2c0324..e48409178a590ff85d757b48acd103ab
      };
  }
 diff --git a/src/models/qwen3_5/frontend/output_session.h b/src/models/qwen3_5/frontend/output_session.h
-index 4267fc2896c76fc8576051e64cac48d9a6457131..882e61b45a4daa8c585bd2755d91d5de2bce7e5a 100644
+index 4267fc2896c76fc8576051e64cac48d9a6457131..bd1918a19db62586eb3c374bd96fab9751b41866 100644
 --- a/src/models/qwen3_5/frontend/output_session.h
 +++ b/src/models/qwen3_5/frontend/output_session.h
 @@ -74,6 +74,8 @@ public:
@@ -3233,6 +3306,26 @@ index 4267fc2896c76fc8576051e64cac48d9a6457131..882e61b45a4daa8c585bd2755d91d5de
      [[nodiscard]] runtime::OutputDecision preview_control(std::span<const TokenId> tokens,
                                                            std::uint32_t total_budget_remaining);
      [[nodiscard]] runtime::OutputDecision preview_terminal(FinishReason reason);
+@@ -83,6 +85,9 @@ public:
+     // block and its closing whitespace, including the markup of a tool call.
+     [[nodiscard]] std::vector<TokenLogprob> take_content_logprobs() noexcept;
+     [[nodiscard]] std::shared_ptr<text::GrammarState> grammar_state() const;
++    // The single <tool_call> vocabulary id forbidden for default tool_choice none.
++    // Empty when that spelling is missing or ambiguous, or when a grammar is active.
++    [[nodiscard]] std::optional<TokenId> suppressed_tool_open() const;
+     [[nodiscard]] std::vector<GeneratedToolCall> take_tool_calls() noexcept;
+     [[nodiscard]] ToolCallParseDiagnostics tool_call_parse_diagnostics() const noexcept;
+     [[nodiscard]] std::uint32_t reasoning_tokens() const noexcept;
+@@ -98,7 +103,8 @@ private:
+                   std::shared_ptr<const std::vector<TokenId>> thinking_control_tokens,
+                   std::shared_ptr<const frontend::ToolCallOutputContract> tool_call_output,
+                   std::shared_ptr<text::GrammarState> grammar          = {},
+-                  std::shared_ptr<const frontend::GemmaMarkers> gemma = {});
++                  std::shared_ptr<const frontend::GemmaMarkers> gemma = {},
++                  std::optional<TokenId> suppressed_tool_open         = {});
+     std::unique_ptr<Impl> impl_;
+ 
+     friend class Frontend;
 diff --git a/src/models/qwen3_5/frontend/prepared_prompt.h b/src/models/qwen3_5/frontend/prepared_prompt.h
 index 4eae32ca426a6405d9549733a53010a0e83880a6..d8f214b48d9be3c24645d1833eced5d2b02ca42a 100644
 --- a/src/models/qwen3_5/frontend/prepared_prompt.h
@@ -3518,10 +3611,10 @@ index 2a52830c80e8cce7bf871a2a4e048ba611cd6c09..5ed8c930a63d1477a80a6c7ae0205b06
      std::string content;
 diff --git a/src/models/qwen3_5/frontend/tool_contract.cpp b/src/models/qwen3_5/frontend/tool_contract.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a55eb81a9bd83662a71c3f68d339b9b1dd5ec371
+index 0000000000000000000000000000000000000000..6859764ed4d4b4e4dea61d61485613e8dc88213e
 --- /dev/null
 +++ b/src/models/qwen3_5/frontend/tool_contract.cpp
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,303 @@
 +#include "models/qwen3_5/frontend/tool_call_parser.h"
 +#include "text/structured_output.h"
 +#include "text/schema_normalization.h"
@@ -3762,7 +3855,8 @@ index 0000000000000000000000000000000000000000..a55eb81a9bd83662a71c3f68d339b9b1
 +select_tool_call_contract(const std::shared_ptr<const ToolCallOutputContract>& declarations,
 +                          const ToolChoice& choice) {
 +    // Keep the tool definitions in the reusable prompt, but do not decode calls or build a
-+    // prohibition grammar for the default none path. Generated markup can remain plain text.
++    // prohibition grammar for the default none path. A separate sampler mask bans the single
++    // vocabulary token whose text is exactly <tool_call> when that token is unique.
 +    if (choice.mode == ToolChoiceMode::None &&
 +        choice.constraints == ToolConstraintMode::Automatic)
 +        return {};
@@ -3922,6 +4016,38 @@ index 0000000000000000000000000000000000000000..81c71d7679f1007575eaf480226c0fed
 +namespace ninfer::models::qwen3_5::frontend {
 +std::string tool_grammar(const ToolCallOutputContract&, const StructuredOutputOptions&);
 +}
+diff --git a/src/models/qwen3_5/frontend/tool_open_token.h b/src/models/qwen3_5/frontend/tool_open_token.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..da7d1f887a20cf4919f796585f2955da1693f0f7
+--- /dev/null
++++ b/src/models/qwen3_5/frontend/tool_open_token.h
+@@ -0,0 +1,26 @@
++#pragma once
++
++#include "ninfer/types.h"
++
++#include <cstddef>
++#include <optional>
++#include <string_view>
++
++namespace ninfer::models::qwen3_5::frontend {
++
++// The vocabulary id whose decoded text is exactly `text`, when that id is unique.
++// Zero matches and more than one match both return empty: a missing or ambiguous
++// spelling is left to the model instead of guessing which id to forbid.
++template <typename Lookup>
++std::optional<TokenId> unique_exact_token(std::size_t vocab_size, Lookup&& decoded_bytes,
++                                          std::string_view text) {
++    std::optional<TokenId> found;
++    for (std::size_t id = 0; id < vocab_size; ++id) {
++        if (decoded_bytes(id) != text) { continue; }
++        if (found) { return {}; }
++        found = static_cast<TokenId>(id);
++    }
++    return found;
++}
++
++} // namespace ninfer::models::qwen3_5::frontend
 diff --git a/src/models/qwen3_5/frontend_sources.cmake b/src/models/qwen3_5/frontend_sources.cmake
 index 0c7fce3865f606f3358494a76a589b8006f342a7..de9a362b174feff2e380ea6dd1d3b2e5e014015c 100644
 --- a/src/models/qwen3_5/frontend_sources.cmake
@@ -4045,10 +4171,18 @@ index 11a33ca2e9d96e5c2fab28baa12317bf7452c9a9..c6cbb78ed37f3a9ffc8c20d0a51ac20c
  
  struct OrdinaryBatchContext {
 diff --git a/src/models/qwen3_5/program/decode.cpp b/src/models/qwen3_5/program/decode.cpp
-index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb7104a231 100644
+index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..6cdaaabdda2c55c08115625a10253d254e46b97b 100644
 --- a/src/models/qwen3_5/program/decode.cpp
 +++ b/src/models/qwen3_5/program/decode.cpp
-@@ -16,6 +16,7 @@
+@@ -9,6 +9,7 @@
+ #include "ninfer/ops/logprob_topk.h"
+ #include "ninfer/ops/prepare_ragged_prefix.h"
+ #include "ninfer/ops/sampling.h"
++#include "models/qwen3_5/program/tool_open_mask.h"
+ #include "ninfer/ops/scatter.h"
+ 
+ #include <algorithm>
+@@ -16,6 +17,7 @@
  #include <chrono>
  #include <cstddef>
  #include <cstdint>
@@ -4056,7 +4190,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
  #include <limits>
  #include <optional>
  #include <span>
-@@ -43,6 +44,7 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
+@@ -43,6 +45,7 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
                           {}, state.execution.linear_attention, state.execution.io,
                           state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
                           &state.text_cache);
@@ -4064,15 +4198,46 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          card.set_stage_runtime(state.execution.stages);
          card.set_expert_runtime(state.execution.experts);
          card.set_rope_yarn(state.execution.rope_yarn);
-@@ -186,7 +188,6 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
+@@ -176,6 +179,20 @@ void ProgramImpl::update_sampling(SequenceHandle handle,
+                                device.stream));
+ }
+ 
++void ProgramImpl::ensure_suppressed_tool_open_mask(TokenId token) {
++    if (suppressed_tool_open_id == token && suppressed_tool_open_mask.p != nullptr) { return; }
++    const std::uint32_t domain = parameters.model.resources().public_token_count;
++    if (token < 0 || static_cast<std::uint32_t>(token) >= domain) {
++        throw std::logic_error("suppressed tool-open token is outside the public vocabulary");
++    }
++    const std::size_t words = (static_cast<std::size_t>(domain) + 31U) / 32U;
++    std::vector<std::uint32_t> host(words);
++    fill_forbidden_token_mask(host, static_cast<std::uint32_t>(token), domain);
++    suppressed_tool_open_mask = DeviceBuffer(words * sizeof(std::uint32_t));
++    suppressed_tool_open_mask.copy_from_host(host.data(), host.size() * sizeof(std::uint32_t));
++    suppressed_tool_open_id = token;
++}
++
+ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& request,
+                                    const ops::SamplingConfig& config) {
+     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
+@@ -185,8 +202,16 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
+         request.sampling_host.token_mask        = structured_round->device_mask(sequence.lane);
          request.sampling_host.token_mask_stride = structured_round->stride();
          structured_round->fill(sequence.lane, *request.grammar, device.stream);
++    } else if (request.suppressed_tool_open && *request.suppressed_tool_open >= 0 &&
++               static_cast<std::uint32_t>(*request.suppressed_tool_open) <
++                   parameters.model.resources().public_token_count) {
++        // One static column. Stride 0 makes every MTP draft column read it, so the ban does not
++        // allocate a grammar mask or change this request's draft eligibility.
++        ensure_suppressed_tool_open_mask(*request.suppressed_tool_open);
++        request.sampling_host.token_mask =
++            static_cast<const std::uint32_t*>(suppressed_tool_open_mask.p);
++        request.sampling_host.token_mask_stride = 0;
      }
 -    request.mask_cost = {};
      request.next_mask.reset();
      request.speculative_stats = SpeculativeStats{
          .backend               = speculative_backend,
-@@ -440,17 +441,11 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
+@@ -440,17 +465,11 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
                                       {minimum_count, maximum_count});
  }
  
@@ -4091,7 +4256,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          request.next_mask.reset();
          return {};
      }
-@@ -490,13 +485,8 @@ ProgramImpl::take_next_mask(RequestControl& request, const SequenceState& sequen
+@@ -490,13 +509,8 @@ ProgramImpl::take_next_mask(RequestControl& request, const SequenceState& sequen
      return std::exchange(request.next_mask, nullptr);
  }
  
@@ -4107,7 +4272,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
  }
  
  void ProgramImpl::validate_licensed_tokens(std::span<const TokenId> tokens) const {
-@@ -529,7 +519,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
+@@ -529,7 +543,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
                  lanes.begin() + static_cast<std::ptrdiff_t>(row)) {
              throw std::invalid_argument("ordinary batch contains an invalid or duplicate lane");
          }
@@ -4116,7 +4281,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          const RequestControl& request = requests[lane];
          if (request.lifecycle != Lifecycle::Active ||
              budgets[row].generated_tokens_remaining == 0 || !sequence.kv ||
-@@ -541,7 +531,10 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
+@@ -541,7 +555,10 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
              sequence.prefix_digests.size() != sequence.ledger_frontier) {
              throw std::logic_error("ordinary batch row is not decode-ready");
          }
@@ -4128,7 +4293,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
      }
  
      const auto start = Clock::now();
-@@ -567,9 +560,13 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
+@@ -567,9 +584,13 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
              const std::uint32_t frontier       = sequence.execution_frontier;
              ordinary_host_ingress->tokens[row] = sequence.ledger.back();
              ordinary_host_ingress->cache_positions[row] =
@@ -4143,7 +4308,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
              ordinary_host_ingress->rope_positions[row] =
                  checked_i32(frontier, "ordinary batch RoPE position") + sequence.rope_delta;
              ordinary_host_ingress->text_kv_table_rows[row] =
-@@ -602,6 +599,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
+@@ -602,6 +623,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
              *ordinary_host_egress,
              state_images->continuation_hidden_store()};
  
@@ -4151,7 +4316,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          mark_workspace_usage(workspace_plan.ordinary_round);
          execution::ordinary_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                           envelope, executable);
-@@ -613,9 +611,10 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
+@@ -613,9 +635,10 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
                                           static_cast<std::uint64_t>(lanes.size()));
              device.synchronize();
          }
@@ -4163,7 +4328,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
          for (std::size_t row = 0; row < lanes.size(); ++row) {
              SequenceState& sequence    = active_sequence(lanes[row]);
-@@ -629,6 +628,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
+@@ -629,6 +652,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
              if (request.logprobs) {
                  round_logprobs[row] = fetched_logprob(static_cast<std::int32_t>(row), token);
              }
@@ -4171,7 +4336,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
              sequence.text_kv_valid = base_E + 1;
              commit_sequence_kv(sequence, sequence.text_kv_valid, 0);
              sequence.tail_hidden_valid = true;
-@@ -692,7 +692,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -692,7 +716,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                  lanes.begin() + static_cast<std::ptrdiff_t>(row)) {
              throw std::invalid_argument("MTP batch contains an invalid or duplicate lane");
          }
@@ -4180,7 +4345,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          const RequestControl& request = requests[lane];
          if (request.lifecycle != Lifecycle::Active ||
              budgets[row].generated_tokens_remaining == 0 || !sequence.kv || !sequence.kv->backend ||
-@@ -707,7 +707,12 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -707,7 +731,12 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
              sequence.mtp_draft_count > draft_window) {
              throw std::logic_error("MTP batch row is not decode-ready");
          }
@@ -4194,7 +4359,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          signals[row]     = &request.mtp_signal;
          room[row]        = std::min(budgets[row].generated_tokens_remaining,
                                      capacity - sequence.execution_frontier);
-@@ -733,6 +738,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -733,6 +762,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                         mtp_minimum_adaptive_window(draft_window), draft_window);
      }
      const std::uint32_t width = verify_window + 1;
@@ -4202,7 +4367,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
  
      const auto started = Clock::now();
      try {
-@@ -741,7 +747,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -741,7 +771,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                               static_cast<std::uint64_t>(lanes.size()));
          DecodeGraphExecutable* executable = nullptr;
          execution::MtpCausalAttentionEnvelopes envelopes =
@@ -4211,7 +4376,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          if (use_cuda_graph) {
              DecodeGraphFamily& family = copy_round ? ngram_graphs : mtp_graphs;
              DecodeGraphProfile& profile =
-@@ -749,7 +755,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -749,7 +779,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                       maximum_frontier, "MTP batch", verify_window);
              executable = &install_graph_profile(family, profile, "MTP batch");
              envelopes  = mtp_causal_attention_envelopes(profile.max_execution_frontier,
@@ -4220,7 +4385,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          }
  
          bool logprobs = false;
-@@ -765,10 +771,14 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -765,10 +795,14 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
              const std::uint32_t extent        = std::min(
                  {row_copy ? static_cast<std::uint32_t>(match.tokens.size())
                            : sequence.mtp_draft_count,
@@ -4238,7 +4403,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
              mtp_host_ingress->remaining_budgets[row] =
                  checked_i32(budgets[row].generated_tokens_remaining, "MTP batch remaining budget");
              mtp_host_ingress->current_extents[row]      = static_cast<std::int32_t>(extent);
-@@ -790,7 +800,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -790,7 +824,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
              const StateImageSelectors selectors            = state_selectors(sequence);
              mtp_host_ingress->state_source_slots[row]      = selectors.source;
              mtp_host_ingress->state_destination_slots[row] = selectors.destination;
@@ -4247,7 +4412,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
              mtp_host_ingress->sampling[row]                = request.sampling_host;
              logprobs = logprobs || request.logprobs;
              if (request.grammar) {
-@@ -821,6 +831,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -821,6 +855,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
              *mtp_host_egress,
              state_images->continuation_hidden_store()};
  
@@ -4255,7 +4420,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          mark_workspace_usage(workspace_plan.mtp_round);
          execution::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                      verify_window, draft_window, envelopes, executable);
-@@ -832,7 +843,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
+@@ -832,7 +867,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                           static_cast<std::uint64_t>(lanes.size()));
              device.synchronize();
          }
@@ -4264,7 +4429,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          timing.end_wait();
  
          const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
-@@ -1004,8 +1015,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
+@@ -1004,8 +1039,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                             ? static_cast<std::uint32_t>(matches[row].tokens.size())
                                             : (drafter_runs ? draft_window : 0U);
          const std::uint32_t extent =
@@ -4274,7 +4439,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
          maximum_target_tokens =
              std::max(maximum_target_tokens, sequence.execution_frontier + extent + 1U);
-@@ -1046,7 +1056,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
+@@ -1046,7 +1080,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                      ? static_cast<std::uint32_t>(matches[row].tokens.size())
                      : (drafter_runs ? draft_window : 0U);
              const std::uint32_t extent = std::min(
@@ -4283,7 +4448,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
              dflash_host_ingress->anchors[row] = sequence.ledger.back();
              dflash_host_ingress->execution_frontiers[row] =
                  checked_i32(frontier, "DFlash batch frontier");
-@@ -1117,7 +1127,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
+@@ -1117,7 +1151,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                           static_cast<std::uint64_t>(lanes.size()));
              device.synchronize();
          }
@@ -4292,7 +4457,7 @@ index 0490cf494b9c60e5d0d43a10b8b2e7d5b418d402..a3d064b5857426ec5e4448981f372adb
          timing.end_wait();
  
          const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
-@@ -1269,6 +1279,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
+@@ -1269,6 +1303,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
      }
      trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
      if (terminal) { sequence.mtp_draft_count = 0; }
@@ -4456,7 +4621,7 @@ index 328a7bc0f7fb18a2a0633a9f6d1c41aa0eceffe8..99b8a32f261e5c2b9bcc7d54357f15fa
  bool ProgramImpl::persistent_backfill_safe(
      const RequestBasePlan& blocked_head, const AdmissionCandidate& candidate,
 diff --git a/src/models/qwen3_5/program/planning/request_plan.cpp b/src/models/qwen3_5/program/planning/request_plan.cpp
-index 9811b10e74fcf5099736f13f261a3bd94ec989e7..33ff71025d88f72bad3b89e2702c5c78c852f91e 100644
+index 9811b10e74fcf5099736f13f261a3bd94ec989e7..bdbd81f50565ccbcf1c3d44c85f86bd1734a7314 100644
 --- a/src/models/qwen3_5/program/planning/request_plan.cpp
 +++ b/src/models/qwen3_5/program/planning/request_plan.cpp
 @@ -84,7 +84,7 @@ runtime::PrefillWork scheduled_prefill_work(std::uint32_t begin, std::uint32_t e
@@ -4497,7 +4662,15 @@ index 9811b10e74fcf5099736f13f261a3bd94ec989e7..33ff71025d88f72bad3b89e2702c5c78
      base->summary.prompt_tokens           = static_cast<std::uint32_t>(prompt.token_ids.size());
      base->summary.requested_output_tokens = options.requested_output_tokens;
      const std::uint32_t capacity_output =
-@@ -351,6 +366,31 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
+@@ -317,6 +332,7 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
+                                                : FinishReason::ContextCapacity;
+     base->sampling                       = translate_sampling(options.sampling);
+     base->grammar                        = options.grammar;
++    base->suppressed_tool_open           = options.suppressed_tool_open;
+     base->logprobs                       = options.logprobs;
+     base->allow_prefix_reuse             = options.allow_prefix_reuse;
+     base->summary.publish_continuation =
+@@ -351,6 +367,31 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
                  std::min(capacity, base->summary.prompt_tokens + backend_window_tokens - 1U));
          }
      }
@@ -4529,7 +4702,13 @@ index 9811b10e74fcf5099736f13f261a3bd94ec989e7..33ff71025d88f72bad3b89e2702c5c78
      detail::PhysicalDeviceResources root_active{
          .active_lanes     = 1,
          .state_slots      = 1U,
-@@ -552,6 +592,9 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
+@@ -547,11 +588,15 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
+     plan->summary                     = base.summary;
+     plan->sampling                    = base.sampling;
+     plan->grammar                     = base.grammar;
++    plan->suppressed_tool_open        = base.suppressed_tool_open;
+     plan->logprobs                    = base.logprobs;
+     plan->text_kv_page_entitlement    = base.text_kv_page_entitlement;
      plan->backend_kv_page_entitlement = base.backend_kv_page_entitlement;
      plan->root_rebuild_work           = base.root_rebuild_work;
      plan->root_rebuild_tail_begin     = base.root_rebuild_tail_begin;
@@ -4539,7 +4718,7 @@ index 9811b10e74fcf5099736f13f261a3bd94ec989e7..33ff71025d88f72bad3b89e2702c5c78
  
      if ((source != nullptr && shared_source != nullptr) ||
          ((source == nullptr && shared_source == nullptr) != !checkpoint.has_value())) {
-@@ -687,6 +730,15 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
+@@ -687,6 +732,15 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
          }
      }
  
@@ -4555,7 +4734,7 @@ index 9811b10e74fcf5099736f13f261a3bd94ec989e7..33ff71025d88f72bad3b89e2702c5c78
      const std::optional<RewriteCheckpointSpec>& desired = base.rewrite_checkpoint;
      const bool can_retain_rewrite =
          desired && source != nullptr &&
-@@ -821,6 +873,14 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
+@@ -821,6 +875,14 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
      }
      plan->summary.reusable_prompt_tokens = plan->reuse_base;
      plan->summary.prefix_reuse_path      = plan->reuse;
@@ -4570,7 +4749,7 @@ index 9811b10e74fcf5099736f13f261a3bd94ec989e7..33ff71025d88f72bad3b89e2702c5c78
      if (speculative_backend == SpeculativeBackend::Mtp) {
          if (plan->reuse == ReusePath::Root) {
              plan->prepare_mtp = true;
-@@ -868,6 +928,8 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
+@@ -868,6 +930,8 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
          projected_service_work(plan->summary, service_work_base(*plan), prefill_chunk,
                                 prefill_splits, plan->capture_groups,
                                 prompt.identity.rewrite_execution_frontiers);
@@ -4579,7 +4758,7 @@ index 9811b10e74fcf5099736f13f261a3bd94ec989e7..33ff71025d88f72bad3b89e2702c5c78
      std::uint64_t remaining_vision_items   = 0;
      std::uint64_t remaining_vision_patches = 0;
      if (plan->vision) {
-@@ -1423,6 +1485,8 @@ void ProgramImpl::select_shared_captures(AdmissionCandidate& candidate,
+@@ -1423,6 +1487,8 @@ void ProgramImpl::select_shared_captures(AdmissionCandidate& candidate,
          projected_service_work(plan.summary, service_work_base(plan), prefill_chunk,
                                 prefill_splits, plan.capture_groups,
                                 prompt.identity.rewrite_execution_frontiers);
@@ -4789,7 +4968,7 @@ index 120f013f4d4cc7e47114315ab6d61093d2855f79..eae23c71a9be09bae7fa93b74b0f812b
      std::uint32_t main_page_groups          = 0;
      std::uint32_t max_concurrency           = 1;
 diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
-index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afadd0b74c66 100644
+index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabfc67c605e 100644
 --- a/src/models/qwen3_5/program/prefill.cpp
 +++ b/src/models/qwen3_5/program/prefill.cpp
 @@ -1,5 +1,6 @@
@@ -4823,18 +5002,21 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
      card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
      card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                     : -1);
-@@ -715,7 +719,9 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
+@@ -715,8 +719,11 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                             prompt_tokens + (initial_mtp_extent == 0 ? 0U : initial_mtp_extent - 1U))
              : speculative_backend == SpeculativeBackend::DFlash ? prompt_tokens
                                                                  : 0U;
 -        ensure_sequence_kv_mapped(sequence, prompt_tokens, backend_materialized);
+-        request.grammar  = request_plan.grammar;
 +        if (!kvmem_window_tokens) {
 +            ensure_sequence_kv_mapped(sequence, prompt_tokens, backend_materialized);
 +        }
-         request.grammar  = request_plan.grammar;
++        request.grammar              = request_plan.grammar;
++        request.suppressed_tool_open = request_plan.suppressed_tool_open;
          request.logprobs = request_plan.logprobs;
          install_sampling(sequence, request, request_plan.sampling);
-@@ -725,6 +731,9 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
+         sequence.rope_delta = staged.prompt.rope_delta;
+@@ -725,6 +732,9 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
          request.timings              = {};
          request.pending              = {};
          request.publish_continuation = request_plan.summary.publish_continuation;
@@ -4844,7 +5026,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
          sequence.mtp_draft_count     = 0;
          sequence.tail_hidden_valid   = base == prompt_tokens && sequence.tail_hidden_valid;
          sequence.ledger.swap(materialization_ledger_);
-@@ -733,6 +742,25 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
+@@ -733,6 +743,25 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
          sequence.rebuild_work       = request_plan.root_rebuild_work;
          sequence.rebuild_tail_begin = request_plan.root_rebuild_tail_begin;
  
@@ -4870,7 +5052,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
          if (staged.disk_restore_frontier != 0) {
              bool restored = false;
              try {
-@@ -890,6 +918,93 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
+@@ -890,6 +919,93 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
      const auto tail_started           = Clock::now();
      try {
          timing.resume_submit();
@@ -4964,7 +5146,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
          const std::span<const ops::GdnReplayFoldRow> fold_span(fold_rows.data(), lanes.size());
          {
              // Each state shard folds its own layers on its own device's stream.
-@@ -1002,10 +1117,12 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
+@@ -1002,10 +1118,12 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
      const double tail_seconds = std::chrono::duration<double>(Clock::now() - tail_started).count();
      const std::uint32_t width = verify_drafts + 1U;
      try {
@@ -4977,7 +5159,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
                  if (!clear_lane_strict(sequence, request)) {
                      throw std::logic_error("cancelled speculative lane is not strictly releasable");
                  }
-@@ -1014,6 +1131,8 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
+@@ -1014,6 +1132,8 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
  
              const PendingCandidate pending = request.pending;
              const std::uint32_t committed  = accepted_tokens[row];
@@ -4986,7 +5168,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
              settle_state_fork(sequence);
              const TokenId* token_base =
                  speculative_backend == SpeculativeBackend::Mtp
-@@ -1059,6 +1178,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
+@@ -1059,6 +1179,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
  
              commit_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
              trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
@@ -4994,7 +5176,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
              if (terminal[row]) {
                  request.lifecycle = Lifecycle::Finishable;
              } else {
-@@ -1083,14 +1203,16 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1083,14 +1204,16 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
      }
  
      RequestControl::Prefill& staged = *request.prefill;
@@ -5013,7 +5195,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
      std::uint32_t processed_prompt_tokens = 0;
      // After a failed disk restore the admitted prefix is recomputed without being reported.
      const auto reported_tokens = [&staged, &processed_prompt_tokens] {
-@@ -1123,6 +1245,26 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1123,6 +1246,26 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
          // Prefill attention addresses its KV through the shared step table-row scalars. Another
          // lane's staging or capture can rebind them between this lane's steps, so every step
          // binds its own rows before any Prefill or MTP-bridge work.
@@ -5040,7 +5222,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
          bind_sequence_kv(sequence);
          StateImageSelectors selectors = state_selectors(sequence);
          // Hybrid prefix cache taps (docs/maintainer/hybrid-prefix-cache-spec.md §7.1): an exact tap
-@@ -1169,6 +1311,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1169,6 +1312,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
              selectors.destination,
              staged.initial_mtp_extent,
              0};
@@ -5051,7 +5233,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
          // The first pass after a Host restore waits for each layer's copies (hybrid spec §6.5).
          // The chunk function takes the events itself: they are a view into the landing batch, and
          // the KV commits between chunks (the MTP bridge's among them) poll the cache, which frees
-@@ -1208,7 +1354,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1208,7 +1355,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
  
          if (staged.cursor < staged.prompt_tokens) {
              const std::uint32_t nominal =
@@ -5060,7 +5242,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
              mark_workspace_usage(staged.prepare_mtp ? workspace_plan.mtp_prefill
                                                      : workspace_plan.text_prefill);
              if (is_masked_draft_backend(speculative_backend)) {
-@@ -1234,7 +1380,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1234,7 +1381,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                      schedule_state.rewrite_checkpoint_hidden = nullptr;
                  }
  
@@ -5070,7 +5252,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
                  const std::optional<std::uint32_t> capture_frontier =
                      staged.next_capture < staged.capture_groups.size()
                          ? std::optional<std::uint32_t>(
-@@ -1258,6 +1405,25 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1258,6 +1406,25 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                  if (hybrid_split && (!split_frontier || *hybrid_split < *split_frontier)) {
                      split_frontier = *hybrid_split;
                  }
@@ -5096,7 +5278,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
                  execution::PrefillChunkResult result;
                  timing.pause();
                  if (staged.vision) {
-@@ -1281,7 +1447,11 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1281,7 +1448,11 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                  if (result.processed_tokens == 0 || result.processed_tokens > remaining) {
                      throw std::logic_error("ordinary prefill chunk made invalid progress");
                  }
@@ -5109,7 +5291,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
                  staged.cursor += result.processed_tokens;
                  processed_prompt_tokens += result.processed_tokens;
                  remaining -= result.processed_tokens;
-@@ -1296,6 +1466,22 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1296,6 +1467,22 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                  // Prompt transitions are canonical immediately. If this was the first write after
                  // an immutable source, close the Fork before potentially freezing a new rewrite.
                  settle_state_fork(sequence);
@@ -5132,7 +5314,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
                  if (hybrid_lane != nullptr && !result.finalized) {
                      hybrid_after_prefill_chunk(sequence, staged.cursor, staged.prompt_tokens);
                  }
-@@ -1322,6 +1508,17 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1322,6 +1509,17 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
              }
  
              if (!finalized) {
@@ -5150,7 +5332,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
                  if (staged.cursor == staged.prompt_tokens) {
                      throw std::logic_error("staged prefill reached the prompt without sampling");
                  }
-@@ -1366,6 +1563,30 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1366,6 +1564,30 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
              }
          }
  
@@ -5181,7 +5363,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
          copy_round_token();
          if (request.logprobs) { fetch_logprobs(1); }
          std::array<TokenId, qwen3_5::kMtpDecodeMaximumDrafts> initial_drafts{};
-@@ -1440,6 +1661,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1440,6 +1662,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
              .complete                = true,
              .timing                  = timing.finish(),
          };
@@ -5192,6 +5374,28 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..2a55b92bd84f634817cb6b872cb1afad
      } catch (...) {
          timing.begin_wait();
          try {
+diff --git a/src/models/qwen3_5/program/prefix/hybrid_program.cpp b/src/models/qwen3_5/program/prefix/hybrid_program.cpp
+index fc1ffbcfea4f0f7528d0d5915e5f5c31db0fc4c1..24a62dfc5ec5fc5b99f07c66762685d3962b5773 100644
+--- a/src/models/qwen3_5/program/prefix/hybrid_program.cpp
++++ b/src/models/qwen3_5/program/prefix/hybrid_program.cpp
+@@ -222,6 +222,7 @@ HybridAdmissionQuote ProgramImpl::hybrid_quote(const PreparedPromptData& prompt,
+     quote->summary                     = plan.summary;
+     quote->sampling                    = plan.sampling;
+     quote->grammar                     = plan.grammar;
++    quote->suppressed_tool_open        = plan.suppressed_tool_open;
+     quote->logprobs                    = plan.logprobs;
+     quote->text_kv_page_entitlement    = plan.text_kv_page_entitlement;
+     quote->backend_kv_page_entitlement = plan.backend_kv_page_entitlement;
+@@ -916,7 +917,8 @@ StartResult ProgramImpl::hybrid_activate(HybridMaterializationTransaction& trans
+             : speculative_backend == SpeculativeBackend::DFlash ? n
+                                                                 : 0U;
+         ensure_sequence_kv_mapped(sequence, n, backend_materialized);
+-        request.grammar  = quote.grammar;
++        request.grammar              = quote.grammar;
++        request.suppressed_tool_open = quote.suppressed_tool_open;
+         request.logprobs = quote.logprobs;
+         install_sampling(sequence, request, quote.sampling);
+         sequence.mtp_draft_count = 0;
 diff --git a/src/models/qwen3_5/program/prefix_identity.h b/src/models/qwen3_5/program/prefix_identity.h
 index d19092aea2d27d90f87275c63c95f6a11dcd66ca..ead8ddeef3b755214ceba767957eac597c65ac74 100644
 --- a/src/models/qwen3_5/program/prefix_identity.h
@@ -5492,7 +5696,7 @@ index fe4ad6a6ad4c8394f1de3b942a6c942f21d1cbcd..3125563797d60c240f3b347299c0e621
      out.max_context     = capacity;
      out.kv_capacity     = kv_capacity;
 diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
-index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16fbadcfdbe 100644
+index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..5948fc274f5b5ed12a811afee36403b314737b9e 100644
 --- a/src/models/qwen3_5/program/program_impl.h
 +++ b/src/models/qwen3_5/program/program_impl.h
 @@ -6,6 +6,12 @@
@@ -5516,7 +5720,15 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
      runtime::RequestPlanSummary summary;
      detail::PhysicalDemand root_demand;
      runtime::PrefillWork root_rebuild_work;
-@@ -225,6 +232,7 @@ struct RequestBasePlanImpl {
+@@ -214,6 +221,7 @@ struct RequestBasePlanImpl {
+     qwen3_5::PreparedContextCache context_cache;
+     ops::SamplingConfig sampling;
+     std::shared_ptr<text::GrammarState> grammar;
++    std::optional<TokenId> suppressed_tool_open;
+     // The request asked for each generated token's log probability.
+     bool logprobs = false;
+     std::uint32_t text_kv_page_entitlement    = 0;
+@@ -225,6 +233,7 @@ struct RequestBasePlanImpl {
      qwen3_5::detail::PrefixShortlistDigests prefix_digests;
      std::uint32_t prefix_identity_tag = 0;
      bool allow_prefix_reuse           = false;
@@ -5524,7 +5736,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
  };
  
  // Program-owned physical planning state shared by request materialization and active capture.
-@@ -274,6 +282,7 @@ struct ResourceCandidateState {
+@@ -274,6 +283,7 @@ struct ResourceCandidateState {
  };
  
  struct AdmissionCandidateImpl : ResourceCandidateState {
@@ -5532,7 +5744,15 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
      MtpBridgeMode mtp_bridge = MtpBridgeMode::None;
      bool prepare_mtp         = false;
      std::optional<VisionPrefillPlan> vision;
-@@ -290,6 +299,9 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
+@@ -281,6 +291,7 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
+     std::vector<CaptureGroup> shared_candidates;
+     ops::SamplingConfig sampling;
+     std::shared_ptr<text::GrammarState> grammar;
++    std::optional<TokenId> suppressed_tool_open;
+     bool logprobs                             = false;
+     std::uint32_t text_kv_page_entitlement    = 0;
+     std::uint32_t backend_kv_page_entitlement = 0;
+@@ -290,6 +301,9 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
      std::uint32_t root_rebuild_tail_begin = 0;
      // A root whose prefix [0, frontier) the disk tier can restore; zero otherwise.
      std::uint32_t disk_restore_frontier   = 0;
@@ -5542,7 +5762,15 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
      bool text_retained_tail_release       = false;
      bool backend_retained_tail_release    = false;
      std::optional<std::uint32_t> graft_shared_slot_index;
-@@ -462,6 +474,131 @@ struct DecodeGraphFamily {
+@@ -303,6 +317,7 @@ struct HybridQuoteImpl {
+     runtime::RequestPlanSummary summary;
+     ops::SamplingConfig sampling;
+     std::shared_ptr<text::GrammarState> grammar;
++    std::optional<TokenId> suppressed_tool_open;
+     bool logprobs                             = false;
+     std::uint32_t text_kv_page_entitlement    = 0;
+     std::uint32_t backend_kv_page_entitlement = 0;
+@@ -462,6 +477,131 @@ struct DecodeGraphFamily {
  // Target model continuation for one logical sequence. This state remains meaningful after the
  // request which produced it has finished, so it is deliberately separate from request lifecycle,
  // output, sampling, and round-control state.
@@ -5674,7 +5902,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
  struct SequenceState {
      std::optional<SequenceKVBundle> kv;
      ActiveStateBinding state;
-@@ -477,6 +614,7 @@ struct SequenceState {
+@@ -477,6 +617,7 @@ struct SequenceState {
      qwen3_5::detail::ResidentPrefixIdentity prefix_identity;
      qwen3_5::detail::PrefixShortlistDigests prefix_digests;
      std::int32_t rope_delta               = 0;
@@ -5682,7 +5910,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
      std::uint32_t text_kv_valid           = 0;
      std::uint32_t mtp_kv_valid            = 0;
      std::uint32_t dflash_context_frontier = 0;
-@@ -533,10 +671,7 @@ struct RequestControl {
+@@ -533,10 +674,8 @@ struct RequestControl {
      PendingCandidate pending;
      ops::SamplingConfig sampling_host;
      std::shared_ptr<text::GrammarState> grammar;
@@ -5690,11 +5918,12 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
 -    // while they are not, the mask of its next token computing ahead of its next round, started
 -    // at the ledger frontier it was computed for.
 -    runtime::GrammarMaskCost mask_cost;
++    std::optional<TokenId> suppressed_tool_open;
 +    // An ordinary decoder's next mask computed ahead at its committed ledger frontier.
      std::shared_ptr<runtime::GrammarMaskJob> next_mask;
      std::uint32_t next_mask_frontier = 0;
      std::chrono::steady_clock::time_point next_mask_started;
-@@ -548,6 +683,9 @@ struct RequestControl {
+@@ -548,6 +687,9 @@ struct RequestControl {
      detail::PhysicalResources active_resources;
      detail::PhysicalResources optional_resources;
      bool publish_continuation = true;
@@ -5704,7 +5933,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
      // The sequence's own output ceiling: the largest frontier its lease may ever cover, so
      // on-demand growth never leases pages the request cannot reach.
      std::uint32_t lease_ceiling = 0;
-@@ -573,12 +711,16 @@ struct RequestControl {
+@@ -573,35 +715,42 @@ struct RequestControl {
          // not the restore succeeds; after a failed restore the prefill recomputes [0, frontier)
          // and keeps those tokens out of its reports, so the admitted suffix stays exact.
          std::uint32_t disk_restore_frontier = 0;
@@ -5721,7 +5950,14 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
          MtpBridgeMode mtp_bridge            = MtpBridgeMode::None;
      };
  
-@@ -591,12 +733,14 @@ struct RequestControl {
+     std::optional<Prefill> prefill;
+ 
+     // Returns the request slot to Empty once its lane's resources have been released. Nothing of
+-    // the request survives into the lane's next one: its grammar and its logprob switch belong to
+-    // the request, whichever admission path installs the next.
++    // the request survives into the lane's next one: its grammar, its tool-open ban, and its
++    // logprob switch belong to the request, whichever admission path installs the next.
+     void retire() noexcept {
          prefill.reset();
          lifecycle            = Lifecycle::Empty;
          pending              = {};
@@ -5737,7 +5973,13 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
          lease_settled        = false;
          lease_space_limited  = false;
          lease_minimum_target = {};
-@@ -701,6 +845,11 @@ public:
+         lease_ceiling        = 0;
+         grammar.reset();
++        suppressed_tool_open.reset();
+         next_mask.reset();
+     }
+ };
+@@ -701,6 +850,11 @@ public:
      // True while this sequence waits for a media item submitted to a concurrent overlay window:
      // the lane must not be given a prefill unit, and every other lane keeps running.
      [[nodiscard]] bool vision_pending(SequenceHandle sequence) const noexcept;
@@ -5749,7 +5991,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
      void update_sampling(SequenceHandle sequence, const ResolvedSamplingParameters& sampling);
      [[nodiscard]] StructuredReadiness structured_readiness(SequenceHandle sequence);
      [[nodiscard]] bool wait_context_transfer() noexcept;
-@@ -770,6 +919,7 @@ public:
+@@ -770,6 +924,7 @@ public:
      [[nodiscard]] KVEntitlementShape kv_entitlement_shape() const noexcept;
      [[nodiscard]] std::uint32_t concurrent_output_budget(std::uint32_t prompt_tokens) const noexcept;
      [[nodiscard]] bool isolated_request_feasible(const RequestBasePlan& base) const noexcept;
@@ -5757,7 +5999,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
  
      [[nodiscard]] bool hybrid_prefix_cache() const noexcept { return hybrid_ != nullptr; }
  
-@@ -828,11 +978,24 @@ public:
+@@ -828,11 +983,24 @@ public:
      void reset_memory_peaks() noexcept;
  
      friend struct qwen3_5::detail::PressurePlanningSessionImpl;
@@ -5782,7 +6024,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
      const std::uint32_t max_concurrency;
      // Frozen context-cache shape: an engaged host budget has already resolved host_state_slots,
      // host_kv_capacity_bytes and the long-anchor count on the plan this Program was built from.
-@@ -937,6 +1100,26 @@ public:
+@@ -937,10 +1105,33 @@ public:
      std::optional<DFlashPersistentState> dflash;
      qwen3_5::RoundState io;
      Tensor prefill_hidden;
@@ -5809,7 +6051,14 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
      std::optional<Tensor> score_hidden;
      Tensor sampling_config;
      Tensor token_counts;
-@@ -1226,6 +1409,7 @@ private:
+     std::unique_ptr<qwen3_5::StructuredRound> structured_round;
++    // One allow-mask shared by every default-none request. Built on the first such request.
++    DeviceBuffer suppressed_tool_open_mask;
++    std::optional<TokenId> suppressed_tool_open_id;
+ 
+     std::vector<SequenceState> continuation_states;
+     std::vector<ContinuationSlot> continuation_slots;
+@@ -1226,6 +1417,7 @@ private:
          bool cancel_pending                 = false;
          bool prepared                       = false;
          bool terminal                       = false;
@@ -5817,7 +6066,15 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
      };
  
      std::uint64_t next_materialization_id_ = 1;
-@@ -1698,15 +1882,12 @@ private:
+@@ -1673,6 +1865,7 @@ private:
+     void prepare_graphs();
+     void install_sampling(SequenceState& sequence, RequestControl& request,
+                           const ops::SamplingConfig& config);
++    void ensure_suppressed_tool_open_mask(TokenId token);
+     void set_device_i32(Tensor& tensor, std::int32_t value);
+     // Enables the device logprob gather for the next round when one of its rows asked for it.
+     void arm_logprobs(bool any);
+@@ -1698,15 +1891,12 @@ private:
                                         std::span<const std::uint32_t> starts,
                                         std::span<const std::uint32_t> counts);
      void validate_licensed_tokens(std::span<const TokenId> tokens) const;
@@ -5835,7 +6092,7 @@ index 56e87ea8aa2ed5f6b4670df6b5680523576f54fd..f2040a565430b7953508f18dfb08d16f
      void mark_workspace_usage(std::size_t phase_bytes) noexcept;
      [[nodiscard]] std::vector<NgramProposer::Match>
      propose_ngram(std::span<const std::uint32_t> lanes,
-@@ -1733,6 +1914,57 @@ private:
+@@ -1733,6 +1923,57 @@ private:
                                          std::uint32_t backend_pages);
      void bind_sequence_kv(SequenceState& sequence);
      void unbind_sequence_kv(SequenceState& sequence) noexcept;
@@ -7737,6 +7994,38 @@ index 0701716bde1ac17667820c163f84ca0be6cb315f..f9a3d852de1d5391828f6af79768523d
              std::copy_n(job->masks(), job->columns() * self.words_,
                          static_cast<std::uint32_t*>(self.host_masks_.data()) +
                              lane * self.width_ * self.words_);
+diff --git a/src/models/qwen3_5/program/tool_open_mask.h b/src/models/qwen3_5/program/tool_open_mask.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..458e350b0bdd0e0d98b3caa0b6779f0c66f602cc
+--- /dev/null
++++ b/src/models/qwen3_5/program/tool_open_mask.h
+@@ -0,0 +1,26 @@
++#pragma once
++
++#include <cstdint>
++#include <span>
++#include <stdexcept>
++
++namespace ninfer::models::qwen3_5 {
++
++// One column of the sampler allow-bitset. Bit 0 forbids `token`. The column covers
++// token ids in [0, domain). High bits past `domain` in the last word stay set; the
++// sampler does not read them. A stride of zero makes every speculative column use
++// this one column.
++inline void fill_forbidden_token_mask(std::span<std::uint32_t> words, std::uint32_t token,
++                                      std::uint32_t domain) {
++    if (domain == 0 || token >= domain) {
++        throw std::invalid_argument("forbidden token is outside the sampling domain");
++    }
++    const std::size_t needed = (static_cast<std::size_t>(domain) + 31U) / 32U;
++    if (words.size() < needed) {
++        throw std::invalid_argument("forbidden-token mask is shorter than the sampling domain");
++    }
++    for (std::size_t index = 0; index < needed; ++index) { words[index] = 0xFFFFFFFFU; }
++    words[token / 32U] &= ~(1U << (token % 32U));
++}
++
++} // namespace ninfer::models::qwen3_5
 diff --git a/src/models/qwen3_5/program/transactions/commit.cpp b/src/models/qwen3_5/program/transactions/commit.cpp
 index 9a1a1b398f7e05a3fd002c282d7aad89989f0974..3b7e895ba40af86c676fb70ea6ce69be0aae34eb 100644
 --- a/src/models/qwen3_5/program/transactions/commit.cpp
@@ -8140,10 +8429,19 @@ index 362100902e4b71a44187ca16d8e80f184d1b3989..61858a77d6e1e6f3a43b6c8bb2fd08fe
  // at start: the next token's (no drafts), or a speculative round's columns after its drafts. The
  // job owns its result; a request that goes away leaves a running job to finish and be discarded.
 diff --git a/src/runtime/contract/request.h b/src/runtime/contract/request.h
-index e47e8d08b61e5b2b3473afada7c1943db9d7b68b..5cc761d8360dc2d2b0adf4c904ef20f1689db43d 100644
+index e47e8d08b61e5b2b3473afada7c1943db9d7b68b..2e68331bb47fc65ba0ad773dd7d59432615686e1 100644
 --- a/src/runtime/contract/request.h
 +++ b/src/runtime/contract/request.h
-@@ -26,9 +26,12 @@ struct ResolvedExecutionOptions {
+@@ -18,6 +18,8 @@ namespace ninfer::runtime {
+ struct ResolvedExecutionOptions {
+     StructuredOutputOptions structured_output;
+     std::shared_ptr<text::GrammarState> grammar;
++    // Default tool_choice none may name the one vocabulary id the sampler must not emit.
++    std::optional<TokenId> suppressed_tool_open;
+     ResolvedSamplingParameters sampling;
+     // Applied once the model closes its reasoning block.
+     std::optional<ResolvedSamplingParameters> post_thinking_sampling;
+@@ -26,9 +28,12 @@ struct ResolvedExecutionOptions {
      ThinkingControlOptions thinking;
      // Gather each generated token's log probability and its likely alternatives.
      bool logprobs = false;
@@ -8303,7 +8601,7 @@ index f6d6c2c2407a32ebcb20b75ed8ce57184dde0d0b..5d5b2beb0a02b75d6a258d6c30b8a640
  
  bool Engine::is_available() const {
 diff --git a/src/runtime/engine/engine_core.h b/src/runtime/engine/engine_core.h
-index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce24ba801d1 100644
+index b21adce775f3baccdd54057f395ffdd71ce1c3c2..ba609d7817dec0fbb6f05cb7f47a98ea526653df 100644
 --- a/src/runtime/engine/engine_core.h
 +++ b/src/runtime/engine/engine_core.h
 @@ -3,6 +3,7 @@
@@ -8330,16 +8628,18 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
            thorough_admission_search_(options.context_cache.thorough_admission_search),
            branch_anchors_(options.context_cache.enabled && options.context_cache.branch_anchors),
            endpoint_anchors_(options.context_cache.enabled && options.context_cache.endpoint_anchors),
-@@ -322,7 +325,7 @@ public:
+@@ -322,8 +325,9 @@ public:
                  instance_.frontend.thinking_control_token_count());
              auto output = instance_.frontend.make_output_session(
                  prompt, options.stop, options.output, options.execution.thinking,
 -                options.execution.structured_output);
 +                options.execution.structured_output, options.tool_choice);
              options.execution.grammar = output.grammar_state();
++            options.execution.suppressed_tool_open = output.suppressed_tool_open();
              request = std::make_shared<Request>(request_id, publication_order, std::move(prompt),
                                                  std::move(output), prompt_summary, prepare_seconds,
-@@ -840,6 +843,9 @@ private:
+                                                 std::move(options), consumer_mode, observation,
+@@ -840,6 +844,9 @@ private:
          if constexpr (requires { instance_.program->expert_residency_stats(); }) {
              snapshot.experts = instance_.program->expert_residency_stats();
          }
@@ -8349,7 +8649,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
          {
              std::lock_guard lock(queue_mutex_);
              snapshot.waiting_requests = static_cast<std::uint32_t>(pending_.size());
-@@ -1466,7 +1472,14 @@ private:
+@@ -1466,7 +1473,14 @@ private:
          if (instance_.program->has_context_transaction()) { return cancelled; }
          for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
              if (slots_[lane] != nullptr) {
@@ -8365,7 +8665,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
              }
          }
          return cancelled;
-@@ -1558,6 +1571,13 @@ private:
+@@ -1558,6 +1572,13 @@ private:
              if (!request->sequence || !request->lane || request->lane->value != lane) {
                  throw std::logic_error("active cancellation has no sequence binding");
              }
@@ -8379,7 +8679,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
              (void)request->output.preview_terminal(FinishReason::Cancelled);
              auto aborted = resources_.abort(*instance_.program, *request->lane, *request->sequence);
              request->generation_timings = aborted.timings;
-@@ -2037,6 +2057,15 @@ private:
+@@ -2037,6 +2058,15 @@ private:
                               typename ModelContract::PrefillProgress&& progress,
                               const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start) {
          EnginePhaseScope phase(*this, EngineHostPhase::CommitOutput);
@@ -8395,7 +8695,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
          ++cumulative_stats_.host_work.prefill_units;
          ++request->host_timing.prefill_units;
          cumulative_stats_.computed_prefill_tokens += progress.processed_prompt_tokens;
-@@ -2103,14 +2132,25 @@ private:
+@@ -2103,14 +2133,25 @@ private:
          return scheduler_.select_runnable_prefill_lane(
              max_concurrency_, [&](std::uint32_t lane) -> std::optional<std::uint32_t> {
                  const auto& request = slots_[lane];
@@ -8422,7 +8722,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
      void run_prefill_step(const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start) {
          nvtx::ScopedRange prefill_range(nvtx::Name::Prefill, nvtx::Category::Prefill);
          EnginePhaseScope setup(*this, EngineHostPhase::CommitOutput);
-@@ -2127,18 +2167,22 @@ private:
+@@ -2127,18 +2168,22 @@ private:
          }
          setup.finish();
          ProgramCallScope program_call(*this);
@@ -8457,7 +8757,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
      }
  
      [[nodiscard]] FifoSnapshot pending_snapshot() const {
-@@ -2165,6 +2209,7 @@ private:
+@@ -2165,6 +2210,7 @@ private:
  
      void ensure_base_plan(const std::shared_ptr<Request>& request) {
          if (!request->base_plan) {
@@ -8465,7 +8765,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
              std::array<std::uint32_t, 2> anchors{};
              std::size_t anchor_count = 0;
              if constexpr (kLegacyContextCache) {
-@@ -2749,7 +2794,8 @@ private:
+@@ -2749,7 +2795,8 @@ private:
                  const OutputDecision decision =
                      request->output.preview_control(tokens, request->budget->remaining());
                  if (decision.accepted_tokens != membership.row_stride || decision.finished() ||
@@ -8475,7 +8775,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
                      (decision.prefix_execution_split_after &&
                       (*decision.prefix_execution_split_after == 0 ||
                        *decision.prefix_execution_split_after > decision.accepted_tokens))) {
-@@ -2795,7 +2841,8 @@ private:
+@@ -2795,7 +2842,8 @@ private:
              cumulative_stats_.committed_decode_tokens += membership.row_stride;
              auto timing = record_committed_output(request, membership.row_stride);
              append_output(request, commit_output(*request), std::move(timing));
@@ -8485,7 +8785,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
          }
          publish_runtime_stats();
      }
-@@ -3053,7 +3100,18 @@ private:
+@@ -3053,7 +3101,18 @@ private:
          published_residency_ = std::move(status);
      }
  
@@ -8504,7 +8804,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
          // Decode and control units executed since the last prefill unit; saturates.
          std::uint32_t decode_run = 0;
          for (;;) {
-@@ -3061,11 +3119,18 @@ private:
+@@ -3061,11 +3120,18 @@ private:
                  std::unique_lock lock(queue_mutex_);
                  if (!stopping_ && pending_.empty()) {
                      bool active = materializing_.has_value();
@@ -8524,7 +8824,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
                      }
                  }
                  if (stopping_) {
-@@ -3101,8 +3166,19 @@ private:
+@@ -3101,8 +3167,19 @@ private:
                  continue;
              }
              try {
@@ -8544,7 +8844,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
                  const bool have_pending       = expire_pending_requests();
                  // A pure queue wait changes no state that would publish, so the waits /stats
                  // reports are refreshed here.
-@@ -3126,6 +3202,7 @@ private:
+@@ -3126,6 +3203,7 @@ private:
                          have_pending, admission_check_pending, !membership.empty(), decode_run,
                          instance_.program->has_context_transaction()) &&
                      consume_admission_check()) {
@@ -8552,7 +8852,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
                      (void)try_admit_one();
                      membership = scheduler_.build_round_membership(slots_, max_concurrency_);
                  }
-@@ -3135,8 +3212,34 @@ private:
+@@ -3135,8 +3213,34 @@ private:
                  // not reinterpret an already-issued unit with a later atomic read.
                  const auto cancelled_at_unit_start = snapshot_cancellations();
                  cancel_active_requests(cancelled_at_unit_start, boundary);
@@ -8589,7 +8889,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
                  if (!control_membership.empty()) {
                      set_host_work_class(HostWorkClass::Control);
                      finish_engine_phase(boundary, EngineHostPhase::Boundary);
-@@ -3148,6 +3251,25 @@ private:
+@@ -3148,6 +3252,25 @@ private:
                  membership = scheduler_.build_round_membership(slots_, max_concurrency_);
                  admit_structured_lanes(membership, boundary);
  
@@ -8615,7 +8915,7 @@ index b21adce775f3baccdd54057f395ffdd71ce1c3c2..b8c9d42d482e37696b9447588f674ce2
                  const std::uint64_t prefill_mask = scheduler_.prefill_lane_mask();
                  for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
                      if ((prefill_mask & (1ULL << lane)) != 0 &&
-@@ -3269,6 +3391,7 @@ private:
+@@ -3269,6 +3392,7 @@ private:
      const std::uint32_t max_context_;
      const bool structured_output_;
      const std::uint32_t max_concurrency_;
@@ -15339,19 +15639,78 @@ index d439f60af8281a67ae30852cb78915e417f8b242..f73303ed76881c1fb6a5682967f50763
              while (first < want.size() && first < got.size() && want[first] == got[first]) { ++first; }
              std::cerr << "  first difference at token " << first << '\n';
 diff --git a/tests/models/qwen3_5/test_frontend.cpp b/tests/models/qwen3_5/test_frontend.cpp
-index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b41fc3fcc2 100644
+index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e1f87bf434eebec79731603a2baac185b5d709ee 100644
 --- a/tests/models/qwen3_5/test_frontend.cpp
 +++ b/tests/models/qwen3_5/test_frontend.cpp
-@@ -2102,7 +2102,7 @@ int test_terminal_flush(const Frontend& frontend) {
+@@ -7,6 +7,8 @@
+ #include "models/qwen3_5/frontend/processor.h"
+ #include "models/qwen3_5/frontend/test_access.h"
+ #include "models/qwen3_5/frontend/tokenizer.h"
++#include "models/qwen3_5/frontend/tool_open_token.h"
++#include "models/qwen3_5/program/tool_open_mask.h"
+ #include "text/unicode.h"
+ #include "text/structured_output.h"
+ 
+@@ -25,8 +27,10 @@
+ #include <iostream>
+ #include <iterator>
+ #include <memory>
++#include <optional>
+ #include <span>
+ #include <string>
++#include <string_view>
+ #include <thread>
+ #include <utility>
+ #include <vector>
+@@ -2102,7 +2106,46 @@ int test_terminal_flush(const Frontend& frontend) {
      return failures;
  }
  
 -int test_structured_tool_output() {
++int test_tool_open_suppression() {
++    using ninfer::models::qwen3_5::fill_forbidden_token_mask;
++    using ninfer::models::qwen3_5::frontend::unique_exact_token;
++    auto lookup = [](const std::vector<std::string>& vocab) {
++        return [&](std::size_t id) -> std::string_view {
++            if (id >= vocab.size() || vocab[id].empty()) { return {}; }
++            return vocab[id];
++        };
++    };
++    const std::vector<std::string> none = {"a", "b", "c"};
++    int failures = check(!unique_exact_token(none.size(), lookup(none), "<tool_call>"),
++                         "missing tool-open token was reported");
++    std::vector<std::string> one = none;
++    one.emplace_back("<tool_call>");
++    failures += check(unique_exact_token(one.size(), lookup(one), "<tool_call>") == 3,
++                      "unique tool-open token was not found");
++    std::vector<std::string> two = one;
++    two.emplace_back("<tool_call>");
++    failures += check(!unique_exact_token(two.size(), lookup(two), "<tool_call>"),
++                      "ambiguous tool-open token was selected");
++    const std::vector<std::string> invalid = {"<tool_call>", ""};
++    failures += check(unique_exact_token(invalid.size(), lookup(invalid), "<tool_call>") == 0,
++                      "an empty slot counted as a second tool-open token");
++
++    std::vector<std::uint32_t> words(2);
++    fill_forbidden_token_mask(words, 3, 40);
++    const bool bit_clear = (words[0] & (1U << 3)) == 0;
++    const bool neighbors = (words[0] & (1U << 2)) != 0 && (words[0] & (1U << 4)) != 0;
++    const bool rest      = (words[0] | (1U << 3)) == 0xFFFFFFFFU && words[1] == 0xFFFFFFFFU;
++    failures += check(bit_clear && neighbors && rest,
++                      "forbidden-token mask did not clear exactly one bit");
++    bool rejected = false;
++    try {
++        fill_forbidden_token_mask(words, 40, 40);
++    } catch (const std::invalid_argument&) { rejected = true; }
++    failures += check(rejected, "a token outside the sampling domain was masked");
++    return failures;
++}
++
 +int test_constrained_tool_output() {
      const Frontend frontend = make_frontend(resources());
  
      ninfer::ChatMessage message;
-@@ -2115,20 +2115,25 @@ int test_structured_tool_output() {
+@@ -2115,20 +2158,25 @@ int test_structured_tool_output() {
      input.options.tool_jsons.push_back(
          R"({"type":"function","function":{"name":"TaskUpdate","parameters":{"type":"object","properties":{"taskId":{"type":"string"},"enabled":{"type":"boolean"},"count":{"type":"integer"}},"required":["taskId"]}}})");
      auto prompt = frontend.prepare(std::move(input));
@@ -15384,7 +15743,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
                        "frontend did not hide the terminal tool-call suffix");
      const std::vector<ninfer::GeneratedToolCall> calls = session.take_tool_calls();
      failures += check(calls.size() == 1 && calls.front().name == "TaskUpdate",
-@@ -2148,6 +2153,73 @@ int test_structured_tool_output() {
+@@ -2148,6 +2196,90 @@ int test_structured_tool_output() {
                                !arguments.contains("enabled") && arguments.at("count") == "many",
                            "frontend did not preserve normalized tool arguments");
      }
@@ -15410,6 +15769,8 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
 +    auto no_tools = frontend.make_output_session(prompt, {}, {}, {}, {}, none);
 +    const auto none_grammar = no_tools.grammar_state();
 +    failures += check(bool(none_grammar), "explicit basic none lost its prohibition grammar");
++    failures += check(!no_tools.suppressed_tool_open(),
++                      "explicit basic none applied the single-token sampler ban");
 +    if (none_grammar) {
 +        bool rejected = false;
 +        try { none_grammar->fork()->accept(fixture_tokenizer().encode(generated)); }
@@ -15423,6 +15784,8 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
 +    auto native = frontend.make_output_session(
 +        prompt, {}, ninfer::OutputOptions{.preserve_special_tokens = true});
 +    failures += check(!native.grammar_state(), "default auto unexpectedly enabled tool grammar");
++    failures += check(!native.suppressed_tool_open(),
++                      "default auto suppressed the tool-call token");
 +    (void)native.preview_model(tokens, static_cast<std::uint32_t>(tokens.size() + 1U),
 +                               ninfer::FinishReason::OutputLimit);
 +    (void)native.commit_preview();
@@ -15436,6 +15799,17 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
 +    auto free_none = frontend.make_output_session(
 +        prompt, {}, ninfer::OutputOptions{.preserve_special_tokens = true}, {}, {}, none);
 +    failures += check(!free_none.grammar_state(), "default none unexpectedly enabled tool grammar");
++    const auto& open_tokenizer = fixture_tokenizer();
++    const auto expected_open   = ninfer::models::qwen3_5::frontend::unique_exact_token(
++        open_tokenizer.vocab_size(),
++        [&](std::size_t id) -> std::string_view {
++            const auto token = static_cast<int>(id);
++            if (!open_tokenizer.is_valid_token(token)) { return {}; }
++            return open_tokenizer.decode_token_bytes(token, false);
++        },
++        "<tool_call>");
++    failures += check(free_none.suppressed_tool_open() == expected_open,
++                      "default none did not suppress the unique <tool_call> token");
 +    (void)free_none.preview_model(tokens, static_cast<std::uint32_t>(tokens.size() + 1U),
 +                                  ninfer::FinishReason::OutputLimit);
 +    const auto none_output = free_none.commit_preview();
@@ -15447,6 +15821,8 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
 +    auto json_none = frontend.make_output_session(prompt, {}, {}, {}, json, none);
 +    const auto json_grammar = json_none.grammar_state();
 +    failures += check(bool(json_grammar), "default none lost explicit JSON grammar");
++    failures += check(!json_none.suppressed_tool_open(),
++                      "none plus JSON applied the single-token sampler ban");
 +    if (json_grammar) {
 +        bool rejected = false;
 +        const auto call_only = compact.substr(compact.find("<tool_call>"));
@@ -15458,7 +15834,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
      return failures;
  }
  
-@@ -2213,6 +2285,69 @@ ninfer::models::qwen3_5::PreparedPrompt thinking_prompt(const Frontend& frontend
+@@ -2213,6 +2345,69 @@ ninfer::models::qwen3_5::PreparedPrompt thinking_prompt(const Frontend& frontend
      return frontend.prepare(std::move(input));
  }
  
@@ -15528,7 +15904,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
  int test_reasoning_close_requires_boundary(const Frontend& frontend) {
      auto prompt  = thinking_prompt(frontend);
      auto session = frontend.make_output_session(prompt, {});
-@@ -2293,7 +2428,7 @@ int test_thinking_budget_ignores_quoted_close(const Frontend& frontend) {
+@@ -2293,7 +2488,7 @@ int test_thinking_budget_ignores_quoted_close(const Frontend& frontend) {
      return failures;
  }
  
@@ -15537,7 +15913,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
      const Frontend frontend = make_frontend(resources());
  
      ninfer::ChatMessage message;
-@@ -2306,8 +2441,10 @@ int test_tool_marker_after_quoted_marker() {
+@@ -2306,8 +2501,10 @@ int test_tool_marker_after_quoted_marker() {
      input.options.tool_jsons.push_back(
          R"({"type":"function","function":{"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}})");
      auto prompt = frontend.prepare(std::move(input));
@@ -15550,7 +15926,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
  
      const std::string quoted =
          "<tool_call>\\n<function=shell>\\n<function=command>\\nbroken\\n</parameter>\\n"
-@@ -2412,6 +2549,33 @@ int test_thinking_budget_control(const Frontend& frontend) {
+@@ -2412,6 +2609,33 @@ int test_thinking_budget_control(const Frontend& frontend) {
                            session.model_token_budget_remaining(17) == 17,
                        "thinking control accounting or post-close license is incorrect");
  
@@ -15584,7 +15960,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
      const auto content_decision = session.preview_model(std::array<ninfer::TokenId, 1>{0}, 17,
                                                          ninfer::FinishReason::OutputLimit);
      failures +=
-@@ -2433,17 +2597,21 @@ int test_thinking_budget_control(const Frontend& frontend) {
+@@ -2433,17 +2657,21 @@ int test_thinking_budget_control(const Frontend& frontend) {
                            !natural_session.thinking_stats().applied,
                        "natural thinking close left control armed");
  
@@ -15617,7 +15993,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
  
      auto limit_prompt  = thinking_prompt(frontend);
      auto limit_session = frontend.make_output_session(limit_prompt, {}, {},
-@@ -3208,6 +3376,40 @@ int test_media_preparation_cancellation() {
+@@ -3208,6 +3436,40 @@ int test_media_preparation_cancellation() {
      return check(false, "cancelled media preparation completed successfully");
  }
  
@@ -15658,7 +16034,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
  int test_ngram_proposal_only_sources() {
      ninfer::models::qwen3_5::FrontendOptions options;
      options.vision_enabled        = false;
-@@ -3394,29 +3596,25 @@ int test_forced_tool_call(const Frontend& frontend) {
+@@ -3394,29 +3656,25 @@ int test_forced_tool_call(const Frontend& frontend) {
      };
  
      const ForcedOutcome complete =
@@ -15700,7 +16076,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
      return failures;
  }
  
-@@ -3554,11 +3752,32 @@ int test_gemma_forced_tool_call() {
+@@ -3554,11 +3812,33 @@ int test_gemma_forced_tool_call() {
      return failures;
  }
  
@@ -15711,6 +16087,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
      const Frontend frontend       = make_frontend(owned);
      int failures                  = 0;
 +    if (argc == 2 && std::string_view(argv[1]) == "--tool-output-only") {
++        failures += test_tool_open_suppression();
 +        failures += test_constrained_tool_output();
 +        failures += test_forced_tool_call(frontend);
 +        failures += test_unconstrained_tool_marker_after_quoted_marker();
@@ -15734,11 +16111,12 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
      failures += test_ngram_proposal_only_sources();
      failures += test_tokenizer_config_merge();
      failures += test_bpe_merge_order();
-@@ -3595,10 +3814,12 @@ int main() {
+@@ -3595,10 +3875,13 @@ int main() {
      failures += test_cross_round_stop(frontend);
      failures += test_same_token_stop_priority(frontend);
      failures += test_terminal_flush(frontend);
 -    failures += test_structured_tool_output();
++    failures += test_tool_open_suppression();
 +    failures += test_constrained_tool_output();
      failures += test_forced_tool_call(frontend);
 -    failures += test_tool_marker_after_quoted_marker();
@@ -15749,7 +16127,7 @@ index e6e9bebeecee327126cf049f3a507f5ab78ea1f5..e923ab754a480256f8a08e45f6cd44b4
      failures += test_reasoning_close_requires_boundary(frontend);
      failures += test_reasoning_close_resolves_at_terminal(frontend);
      failures += test_thinking_budget_control(frontend);
-@@ -3619,4 +3840,8 @@ int main() {
+@@ -3619,4 +3902,8 @@ int main() {
      failures += test_gemma_media_layout();
      failures += test_gemma_forced_tool_call();
      return failures == 0 ? 0 : 1;
