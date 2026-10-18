@@ -4968,7 +4968,7 @@ index 120f013f4d4cc7e47114315ab6d61093d2855f79..eae23c71a9be09bae7fa93b74b0f812b
      std::uint32_t main_page_groups          = 0;
      std::uint32_t max_concurrency           = 1;
 diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
-index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabfc67c605e 100644
+index 87862274889d8e6679ee2041dd56e8f54d7418ea..b4ec6e21224313ed91b7f1c984385acae12adbb6 100644
 --- a/src/models/qwen3_5/program/prefill.cpp
 +++ b/src/models/qwen3_5/program/prefill.cpp
 @@ -1,5 +1,6 @@
@@ -5052,7 +5052,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
          if (staged.disk_restore_frontier != 0) {
              bool restored = false;
              try {
-@@ -890,6 +919,93 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
+@@ -890,6 +919,96 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
      const auto tail_started           = Clock::now();
      try {
          timing.resume_submit();
@@ -5143,15 +5143,13 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
 +                }
 +            }
 +        }
++        // Candidate statistics belong to verification, not Fold. Read them
++        // before Fold so host bookkeeping can overlap the state update.
++        read_memory_candidates();
          const std::span<const ops::GdnReplayFoldRow> fold_span(fold_rows.data(), lanes.size());
          {
              // Each state shard folds its own layers on its own device's stream.
-@@ -1002,10 +1118,12 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
-     const double tail_seconds = std::chrono::duration<double>(Clock::now() - tail_started).count();
-     const std::uint32_t width = verify_drafts + 1U;
-     try {
-+        read_memory_candidates();
-         for (std::size_t row = 0; row < lanes.size(); ++row) {
+@@ -1006,6 +1125,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
              SequenceState& sequence = active_sequence(lanes[row]);
              RequestControl& request = requests[lanes[row]];
              if (cancelled[row]) {
@@ -5159,7 +5157,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
                  if (!clear_lane_strict(sequence, request)) {
                      throw std::logic_error("cancelled speculative lane is not strictly releasable");
                  }
-@@ -1014,6 +1132,8 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
+@@ -1014,6 +1134,8 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
  
              const PendingCandidate pending = request.pending;
              const std::uint32_t committed  = accepted_tokens[row];
@@ -5168,7 +5166,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
              settle_state_fork(sequence);
              const TokenId* token_base =
                  speculative_backend == SpeculativeBackend::Mtp
-@@ -1059,6 +1179,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
+@@ -1059,6 +1181,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
  
              commit_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
              trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
@@ -5176,7 +5174,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
              if (terminal[row]) {
                  request.lifecycle = Lifecycle::Finishable;
              } else {
-@@ -1083,14 +1204,16 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1083,14 +1206,16 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
      }
  
      RequestControl::Prefill& staged = *request.prefill;
@@ -5195,7 +5193,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
      std::uint32_t processed_prompt_tokens = 0;
      // After a failed disk restore the admitted prefix is recomputed without being reported.
      const auto reported_tokens = [&staged, &processed_prompt_tokens] {
-@@ -1123,6 +1246,26 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1123,6 +1248,26 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
          // Prefill attention addresses its KV through the shared step table-row scalars. Another
          // lane's staging or capture can rebind them between this lane's steps, so every step
          // binds its own rows before any Prefill or MTP-bridge work.
@@ -5222,7 +5220,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
          bind_sequence_kv(sequence);
          StateImageSelectors selectors = state_selectors(sequence);
          // Hybrid prefix cache taps (docs/maintainer/hybrid-prefix-cache-spec.md §7.1): an exact tap
-@@ -1169,6 +1312,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1169,6 +1314,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
              selectors.destination,
              staged.initial_mtp_extent,
              0};
@@ -5233,7 +5231,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
          // The first pass after a Host restore waits for each layer's copies (hybrid spec §6.5).
          // The chunk function takes the events itself: they are a view into the landing batch, and
          // the KV commits between chunks (the MTP bridge's among them) poll the cache, which frees
-@@ -1208,7 +1355,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1208,7 +1357,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
  
          if (staged.cursor < staged.prompt_tokens) {
              const std::uint32_t nominal =
@@ -5242,7 +5240,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
              mark_workspace_usage(staged.prepare_mtp ? workspace_plan.mtp_prefill
                                                      : workspace_plan.text_prefill);
              if (is_masked_draft_backend(speculative_backend)) {
-@@ -1234,7 +1381,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1234,7 +1383,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                      schedule_state.rewrite_checkpoint_hidden = nullptr;
                  }
  
@@ -5252,7 +5250,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
                  const std::optional<std::uint32_t> capture_frontier =
                      staged.next_capture < staged.capture_groups.size()
                          ? std::optional<std::uint32_t>(
-@@ -1258,6 +1406,25 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1258,6 +1408,25 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                  if (hybrid_split && (!split_frontier || *hybrid_split < *split_frontier)) {
                      split_frontier = *hybrid_split;
                  }
@@ -5278,7 +5276,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
                  execution::PrefillChunkResult result;
                  timing.pause();
                  if (staged.vision) {
-@@ -1281,7 +1448,11 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1281,7 +1450,11 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                  if (result.processed_tokens == 0 || result.processed_tokens > remaining) {
                      throw std::logic_error("ordinary prefill chunk made invalid progress");
                  }
@@ -5291,7 +5289,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
                  staged.cursor += result.processed_tokens;
                  processed_prompt_tokens += result.processed_tokens;
                  remaining -= result.processed_tokens;
-@@ -1296,6 +1467,22 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1296,6 +1469,22 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                  // Prompt transitions are canonical immediately. If this was the first write after
                  // an immutable source, close the Fork before potentially freezing a new rewrite.
                  settle_state_fork(sequence);
@@ -5314,7 +5312,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
                  if (hybrid_lane != nullptr && !result.finalized) {
                      hybrid_after_prefill_chunk(sequence, staged.cursor, staged.prompt_tokens);
                  }
-@@ -1322,6 +1509,17 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1322,6 +1511,17 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
              }
  
              if (!finalized) {
@@ -5332,7 +5330,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
                  if (staged.cursor == staged.prompt_tokens) {
                      throw std::logic_error("staged prefill reached the prompt without sampling");
                  }
-@@ -1366,6 +1564,30 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1366,6 +1566,30 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
              }
          }
  
@@ -5363,7 +5361,7 @@ index 87862274889d8e6679ee2041dd56e8f54d7418ea..6b980a30abab8ef2abbd20cfaf68eabf
          copy_round_token();
          if (request.logprobs) { fetch_logprobs(1); }
          std::array<TokenId, qwen3_5::kMtpDecodeMaximumDrafts> initial_drafts{};
-@@ -1440,6 +1662,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+@@ -1440,6 +1664,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
              .complete                = true,
              .timing                  = timing.finish(),
          };

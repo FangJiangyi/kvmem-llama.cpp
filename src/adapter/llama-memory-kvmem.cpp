@@ -10,12 +10,14 @@
 #include "llama-kvmem-factory.h"
 #include "llama-kvmem-hooks.h"
 #include "llama-kvmem-gpu.h"
+#include "llama-kvmem-gpu-order.h"
 #include "llama-kvmem-quant.h"
 #include "llama-kvmem-stagein.h"
 #include "llama-kvmem-transfer.h"
 
 #include "llama-arch.h"
 #include "llama-cparams.h"
+#include "llama-context.h"
 #include "llama-impl.h"
 #include "llama-memory-recurrent.h"
 #include "llama-memory-hybrid.h"
@@ -49,6 +51,8 @@
 struct llama_memory_kvmem::GdnReplay {
     struct Group {
         ggml_backend_buffer_ptr descriptors;
+        ggml_backend_dev_t backend_device = nullptr;
+        ggml_backend_event_t completion = nullptr;
         cudaStream_t stream = nullptr;
         int layers = 0;
         int device = -1;
@@ -58,6 +62,7 @@ struct llama_memory_kvmem::GdnReplay {
                 cudaStreamSynchronize(stream);
                 cudaStreamDestroy(stream);
             }
+            if (completion) ggml_backend_event_free(completion);
         }
     };
     std::vector<std::unique_ptr<Group>> groups;
@@ -276,6 +281,7 @@ void llama_memory_kvmem::set_recurrent(llama_memory_recurrent * recr) {
         auto group = std::make_unique<GdnReplay::Group>();
         group->device = device;
         group->layers = static_cast<int>(build.layers.size());
+        group->backend_device = ggml_backend_buft_get_device(build.buft);
         const size_t descriptor_bytes = build.layers.size() * sizeof(build.layers[0]);
         if (cudaSetDevice(device) != cudaSuccess) throw std::runtime_error("cannot select GDN replay device");
         group->descriptors.reset(ggml_backend_buft_alloc_buffer(build.buft, descriptor_bytes));
@@ -288,6 +294,7 @@ void llama_memory_kvmem::set_recurrent(llama_memory_recurrent * recr) {
         }
         kvmem_diag("KVMEM_GDN_MEMORY mode=replay device=%d layers=%d capacity=%u state_bytes=%zu record_bytes=%zu descriptor_bytes=%zu\n",
                 device, group->layers, recr->replay_capacity, build.states, build.records, descriptor_bytes);
+        group->completion = ggml_backend_event_new(group->backend_device);
         replay->groups.push_back(std::move(group));
     }
     gdn_replay_ = std::move(replay);
@@ -317,8 +324,21 @@ bool llama_memory_kvmem::gdn_replay_commit(llama_context * ctx, uint32_t n_keep)
         }
         launched.push_back(group.get());
     }
+    const char * sync = std::getenv("KVMEM_GDN_FOLD_SYNC");
+    const bool force_sync = sync && sync[0] != '\0' && sync[0] != '0';
     for (auto * group : launched) {
-        if (cudaSetDevice(group->device) != cudaSuccess || cudaStreamSynchronize(group->stream) != cudaSuccess) ok = false;
+        if (cudaSetDevice(group->device) != cudaSuccess) { ok = false; continue; }
+        bool ordered = false;
+        if (ok && !force_sync && group->completion) {
+            if (cudaEventRecord(static_cast<cudaEvent_t>(group->completion->context), group->stream) != cudaSuccess) {
+                ok = false;
+            } else {
+                ordered = kvmem_order_completion(ctx->get_sched(), group->backend_device, group->completion);
+            }
+        }
+        // Context synchronization, checkpoints and subsequent graphs all drain
+        // the queued wait. Missing event support keeps synchronous completion.
+        if ((!ordered || !ok) && cudaStreamSynchronize(group->stream) != cudaSuccess) ok = false;
     }
     if (!ok) {
         recr_->replay_poisoned = true;

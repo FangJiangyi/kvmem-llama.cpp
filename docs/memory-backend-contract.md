@@ -236,7 +236,11 @@ P2 独立构建目标：Windows / MSVC 19.44、C++17，无 llama 子模块构建
 
 llama query 附件带捕获范围和前缀凭据，尾块 mean-K 附件带 checkpoint 行号和前缀凭据。导入还核对维度、有限值和有效行数。默认 user-query / 多模态 checkpoint 路径在恢复任何 recurrent/draft 字节前检查该凭据；选择时跳过已失效的候选，无法找到可信状态则从完整输入重新 prefill。输入/media 的逐前缀匹配继续由 driver 负责，统计附件的凭据不能替代该匹配。
 
-MTP 产品路径使用 `begin_speculative_evaluation` / `commit_speculative`。开始时绑定当前会话和执行历史，完成图计算后仅记录 evaluated 范围；接受时检查同一 capture、起点和宽度，先完成 GDN fold（若 recording），再推进 accepted KV 与 mean-K。未接受的草稿不生成 query 统计，不经 prefill mean-K 路径提交；零接受、部分接受、宽度一拒绝、超量/重复提交有真实 GPU 回归。原专用 hooks 保留，不要求 ninfer 使用 llama 的 tensor 或 recurrent 布局。
+MTP 产品路径使用 `begin_speculative_evaluation` / `commit_speculative`。开始时绑定当前会话和执行历史，完成图计算后仅记录 evaluated 范围；接受时检查同一 capture、起点和宽度，为 GDN fold（若 recording）建立完成依赖，再推进 accepted KV 与 mean-K。未接受的草稿不生成 query 统计，不经 prefill mean-K 路径提交；零接受、部分接受、宽度一拒绝、超量/重复提交有真实 GPU 回归。原专用 hooks 保留，不要求 ninfer 使用 llama 的 tensor 或 recurrent 布局。
+
+GPU 状态提交可以与不读取该状态的 Host 准备重叠。后续设备消费者必须排在提交之后，检查点、状态读取、迁移和释放必须排空相关依赖；逻辑接受不等于允许提前复用缓冲区。该规则由适配器兑现，公共核心不持有 CUDA stream/event，也不放宽 `MemoryTransfer::poll` 的 Complete 或 publish 门槛。
+
+llama ReplaySSM 在 Fold 流记录事件，并将依赖加入目标 context 的对应设备后端；原生 context 同步和检查点读取会排空该依赖。无事件/消费者支持时保持同步完成。`KVMEM_GDN_FOLD_SYNC=1` 是性能诊断用同步对照。NInfer 在普通 Fold 前取回验证阶段产生的候选统计，使后面的 Host 统计提交不再额外等待 Fold；重建锚点仍使用原来的完整捕获与恢复边界。
 
 这一步明确了适配器的统计/状态边界，没有把 Host worker 的完成事件伪装成公共 statistics version。`statistics_version=0`，公共 `pre_rope_statistics` / `state_checkpoint` 能力仍不声明。通用统计搬运接口、旧 server 编排分支和其余 legacy bridge 配置继续在 P3/P4 整理。
 
