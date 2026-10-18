@@ -21,6 +21,7 @@ if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $PythonSha2
 }
 $files = @('START-HERE-CN.bat', 'START-HERE-EN.bat', 'scripts/local-console.py', 'scripts/windows/start-ui.ps1',
            'scripts/windows/describe-launch-json.ps1', 'scripts/windows/start-backend.ps1',
+           'scripts/windows/start-ninfer.ps1', 'scripts/windows/start-dflash2.ps1',
            'scripts/windows/native-process.ps1', 'scripts/windows/select-model.ps1')
 foreach ($name in 'index.html', 'monitor.css', 'monitor.js', 'i18n.js', 'launcher.css', 'launcher.js',
                   'Strata-LICENSE.txt', 'Outfit-OFL.txt', 'outfit-latin-wght.woff2') {
