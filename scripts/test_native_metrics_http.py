@@ -1,4 +1,4 @@
-"""Small-model contract smoke test; owns one loopback worker and an explicit GPU."""
+"""Native contract smoke test; owns one loopback worker and an explicit GPU."""
 import argparse
 import json
 import math
@@ -80,6 +80,7 @@ def main():
             s = body["kvmem"]["speculative"]
             check("MTP native draft fields", t.get("draft_n", 0) == s["drafted_tokens"] and
                   t.get("draft_n_accepted", 0) == s["accepted_tokens"] <= s["drafted_tokens"])
+            check("MTP accepted positions reconcile", sum(s["accepted_per_position"]) == s["accepted_tokens"])
             if args.backend == "llamacpp":
                 check("MTP rounds reconcile", s["generation_rounds"] == s["verification_steps"] +
                       s["restore_rounds"] + s["fallback_rounds"] + s["uncommitted_rounds"])
@@ -163,10 +164,15 @@ def main():
                 check("Responses retains namespaced diagnostics", "kvmem" in terminal["response"])
             with opener.open(url + "/metrics", timeout=30) as response:
                 text = response.read().decode()
+            (args.output / "metrics.prom").write_text(text, encoding="utf-8")
             check("native metrics exported", "llamacpp:tokens_predicted_total " in text)
             if args.mtp:
-                check("speculative metrics exported", "llamacpp:spec_decode_num_drafts_total " in text and
-                      "llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position=" in text)
+                if args.backend == "llamacpp":
+                    check("speculative metrics exported", "llamacpp:spec_decode_num_drafts_total " in text and
+                          "llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position=" in text)
+                else:
+                    check("speculative metrics exported", "ninfer:draft_tokens_total " in text and
+                          "ninfer:draft_accepted_tokens_total " in text)
             if args.canary:
                 # Exercise the actual report client against this worker without a speed gate.
                 report = args.output / "canary.json"

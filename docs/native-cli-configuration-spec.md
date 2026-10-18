@@ -731,9 +731,9 @@ KVMem 的扩展放在 `kvmem.speculative` 中。已有 NInfer 的 `llamacpp:` �
 
 核心验证入口：`kvmem-server-metrics-test`、`kvmem-server-options-test`、NInfer 原生
 Chat/Responses schema tests，以及 `scripts/test_native_metrics_http.py`。GPU 验证必须
-传入明确 UUID 和小模型路径；四层执行夹具只验证接口与执行，不形成生成质量或性能结论。
+传入明确 UUID 和适合该卡容量的模型路径；四层执行夹具只验证接口与执行，不形成生成质量或性能结论。
 
-### 2026-10-19 核心验证范围
+### 2026-10-19 首轮核心验证范围
 
 两项 C++ 统计/参数测试和 NInfer 原生 Chat/Responses schema tests 通过。
 GPU 验证全部使用 RTX 5050 Laptop（`GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29`）：
@@ -746,3 +746,51 @@ NInfer 尝试 0.8B 模型时，其现有引擎拒绝该投影尺寸，因此改�
 夹具不用于生成质量判定；没有运行大模型、跨后端性能对比或完整回归套件。
 Windows 构建的声明/类型适配问题已修正；补丁打包中的行尾差异经逐文件比对后清理，
 两个后端的版本化补丁和精确源码树检查通过。
+
+### 2026-10-19 RTX 5060 Ti 补充验证
+
+经用户授权，使用 RTX 5060 Ti（`GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`）
+和实际 27B 模型补测，所有临时 worker 已退出。
+
+- llama 使用 `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf`：MTP replay 30 项检查通过，
+  snapshots 33 项检查通过，均包含 HTTP canary 报告读取。
+- NInfer 使用 `Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer`：MTP 33 项检查通过。
+  覆盖原生 token/首 token 计时、接受位置求和、流式 usage 开关、断线收尾、后续
+  Responses、原生 Prometheus 字段及 HTTP canary。模型包含视觉权重，本轮请求均为文本。
+- llama CLI replay 使用固定 seed 42、temperature 0.8，实际输出 32 tokens；报告的
+  11 个生成轮、32 个提出草稿和 21 个接受草稿均与逐轮 trace 对齐，接受位置合计同样为 21。
+  报告使用实际输出数和生成循环耗时，没有使用该请求中 libllama 的 `n_eval=1`。
+- 修正验证脚本中的跨后端字段断言：NInfer 保持原生 `ninfer:draft_tokens_total`
+  和 `ninfer:draft_accepted_tokens_total`；llama 继续检查其原生 speculative 系列。
+  同时保存抓取的 `metrics.prom`，增加接受位置合计检查。产品代码无需修改。
+
+本轮没有发现补丁阻塞项。replay 路径已实际执行；snapshots 使用原生 GPU GDN 回滚平面，
+已观察请求的 host checkpoint `restore_rounds` 均为 0，不能据此声称覆盖了非零 host restore。
+这次仍是功能和统计一致性检查，没有运行性能 A/B、生成质量评测或完整回归套件。
+
+### 速度 canary 报告
+
+`scripts/speed_canary.py` 保留 llama CLI 的 KVMem on/off 检查，并增加 HTTP 读取模式。
+HTTP 模式只读取已启动 worker 的原生输出，不启动或修改 worker；可选的 baseline URL
+由调用者分别配置。`KVMEM_API_KEY` 环境变量用于鉴权，报告不保存密钥。
+
+```sh
+python scripts/speed_canary.py --backend llamacpp --url http://127.0.0.1:8080 --runs 3 --seed 42 --output canary.json
+python scripts/speed_canary.py --backend ninfer --url http://127.0.0.1:8081 --baseline-url http://127.0.0.1:8082 --runs 3 --seed 42 --output canary-ninfer.json
+python scripts/speed_canary.py --cli build/bin/llama-kvmem-cli.exe -m model.gguf --spec-type draft-mtp --spec-draft-n-max 3 --seed 42 --output canary-cli.json
+```
+
+HTTP 报告保存原生 usage/timings、worker 的 props、请求设置和逐次结果。CLI 模式支持
+`--spec-kv-dtype` 与 `--mtp-state`，记录种子、GPU UUID、源码锁定的后端版本和测试配置。CLI 普通
+解码仍读取 `KVMEM_PERF`；MTP 使用新增的单条 `KVMEM_SPEC_METRICS` JSON 汇总，以已输出
+的 token 数和完整生成循环耗时计算实际吞吐量，避免把验证调用数当作输出数。
+该汇总不依赖逐轮 trace，也不要求增加 trace 级别；显式 `--seed` 同时传入普通与 MTP 采样。
+CLI 未显式指定种子时保留原有默认行为；canary 显式使用固定种子，默认 0。
+
+报告同时给出 tok/s、ms/round、tokens/round 和草稿接受率；缺少可靠轮数时显示 n/a。
+CLI 原有的可选 tok/s 回归门槛保留；HTTP 对独立配置的 worker 只出报告。
+没有把 ms/round 视作与文本或验证宽度无关的唯一门槛。比较前应固定 GPU、模型、上下文、
+草稿设置、采样参数及 trace 级别；相同 seed 不保证不同后端或不同 KV 配置生成完全相同的文本。
+
+工具核心测试：`python -m unittest discover -s scripts -p test_native_stats.py -v`。
+HTTP 小模型验证可加 `--canary`，在同一临时 worker 上检查报告读取链路。
