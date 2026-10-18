@@ -848,10 +848,21 @@ index 548122fc105d63c2a13d5e86cf1ca6de817de7f8..428392585375e76da3da4391ad783869
  sampled token's top 20 from the same logits before sampling.
  
 diff --git a/docs/serving.md b/docs/serving.md
-index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374d47f3090 100644
+index 66ec3957ad7b286e8b309f1e2c15699d324efc07..f15145be96467097e8ee43679c388d2f2d51135a 100644
 --- a/docs/serving.md
 +++ b/docs/serving.md
-@@ -148,7 +148,9 @@ accepted as `auto`, `high` or `low`. `auto` and `high` see the image at the reso
+@@ -50,7 +50,9 @@ ledger.
+ 
+ Other artifacts use the same command shape with their own path. For 35B-A3B DFlash, replace the MTP
+ selection with `--spec dflash --draft-tokens 7 --lm-head-draft`. Qwen3.8-27B
+-artifacts with DFlash2 companion weights also support `--spec dflash2 --draft-tokens 7`. DFlash2
++artifacts with DFlash2 companion weights also support `--spec dflash2 --draft-tokens 7`. With
++KVMem, DFlash2 is currently restricted to one sequence on one GPU, with resident or CPU Vision
++and 1 to 15 drafts. DFlash2
+ accepts draft counts 1..15 and supports the same sampling, concurrency, prefix reuse, and
+ image/video request surfaces. It may remain combined with
+ `--vision`.
+@@ -148,7 +150,9 @@ accepted as `auto`, `high` or `low`. `auto` and `high` see the image at the reso
  `--vision-max-merged` allows, which is NInfer's normal preprocessing. `low` bounds the image at the
  area of a 512 x 512 picture, 256 merged Vision tokens (or the server's bound when that is smaller),
  for a cheaper and coarser look. The same bytes at both details are prepared, cached and reused as
@@ -862,7 +873,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374
  `auto` when the server runs with `--lenient-image-detail`. Gemma 4 maps the three to its budgets:
  `low` 70 soft tokens, `auto` the release's 280, `high` the `--vision-max-merged` bound (1120 by
  default).
-@@ -220,13 +222,13 @@ milliseconds per token with a large vocabulary).
+@@ -220,13 +224,13 @@ milliseconds per token with a large vocabulary).
  
  Every model computes a constrained request's masks on host threads while the GPU runs the step
  that needs them: the next token's mask, or in a speculative round one mask per draft position,
@@ -882,7 +893,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374
  an explicit error, and so does a Gemma 4 or Flash-Next decoding request without a token for 120 s
  ([Gemma 4](gemma4.md#structured-output)). A generated token the grammar does not admit, which the
  masks should have excluded, fails its own request with an internal error (HTTP 500) and leaves
-@@ -351,14 +353,42 @@ asking for raw JSON without Markdown fences and retaining tools for information
+@@ -351,14 +355,42 @@ asking for raw JSON without Markdown fences and retaining tools for information
  This helps the model choose the intended final-answer branch when tools remain enabled; the
  token grammar enforces validity independently. Tool selection and termination remain model
  decisions under `tool_choice:"auto"`; use `tool_choice:"none"` when no further tools are needed.
@@ -933,7 +944,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374
  
  Only normal completed final-content responses guarantee a complete JSON document satisfying the supported
  schema. Token/context limits, cancellation, transport failure, or generation errors can leave a
-@@ -844,11 +874,10 @@ The endpoint supports:
+@@ -844,11 +876,10 @@ The endpoint supports:
  - function tools and free-form `custom` tools, the latter served to the model as a
    single-string-input function under the caller's own tool name so callers that dispatch by name
    keep working;
@@ -949,7 +960,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374
  - assistant tool-call history, tool-result messages, and legacy function-call history;
  - the top-level `reasoning_effort` field, where the `default` and `auto` aliases resolve to the
    server-configured level;
-@@ -861,7 +890,8 @@ The endpoint supports:
+@@ -861,7 +892,8 @@ The endpoint supports:
  Options whose observable behavior the Engine cannot provide are rejected when they request that
  behavior. This includes JSON constrained output on a server without `--structured-output` (unless
  it runs with `--unconstrained-response-format`), nonzero `logit_bias`, audio/file input or audio
@@ -959,7 +970,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374
  Each capability rejection identifies the affected field and the guarantee NInfer cannot provide.
  The vLLM/llama.cpp constrained-decoding extensions (`grammar`, `structured_outputs`, `guided_json`,
  `guided_regex`, `guided_choice`, and `guided_grammar`) are rejected explicitly instead of being
-@@ -910,7 +940,8 @@ value text, while `<` or the end of the output, after optional whitespace, makes
+@@ -910,7 +942,8 @@ value text, while `<` or the end of the output, after optional whitespace, makes
  value. A value therefore cannot contain a closing parameter tag followed by markup, nor an unmatched
  nested parameter opener; either makes the call malformed.
  
@@ -969,7 +980,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374
  opens with a complete call, each marker is tried in order, and the first complete region that
  consumes the rest of the response becomes the structured turn; quoted markup before it stays
  ordinary content. Generated reasoning closes only at a `</think>` followed by format whitespace or
-@@ -1316,15 +1347,15 @@ wire response contains typed `output` Items.
+@@ -1316,15 +1349,15 @@ wire response contains typed `output` Items.
  | `metadata` | at most 16 string pairs; keys at most 64 characters and values at most 512 |
  | `client_metadata` | Codex client extension; an object or `null`, accepted as opaque tracing metadata with no generation effect |
  | `reasoning.effort` | `none` requests disabled thinking; other standard effort values pass to the selected template |
@@ -988,7 +999,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374
  | `max_tool_calls` | non-negative integer accepted as a hosted-tool no-op; NInfer does not execute hosted tools |
  | `truncation` | omitted or `disabled`; overlong input fails instead of silently dropping Items |
  | `top_logprobs` | integer in `[0,20]`; a nonzero value also asks for [token log probabilities](#token-log-probabilities) |
-@@ -1419,7 +1450,7 @@ NInfer renders these definitions in the Qwen prompt and parses model output into
+@@ -1419,7 +1452,7 @@ NInfer renders these definitions in the Qwen prompt and parses model output into
  `function_call` output Items. Each output has a protocol Item `id` (`fc_...`) and a distinct
  `call_id` (`call_...`). The client executes the function and sends a `function_call_output` Item in
  a later request. Only functions in the current effective tool set can become structured calls;
@@ -997,7 +1008,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374
  declaration order, while `tool_choice:"none"` disables structured tool output even when the history
  contains earlier calls.
  
-@@ -1441,14 +1472,18 @@ NInfer does not execute functions or enforce JSON Schema through constrained dec
+@@ -1441,14 +1474,18 @@ NInfer does not execute functions or enforce JSON Schema through constrained dec
  `strict:true`, hosted tools, remote MCP tools, and custom free-form tools are rejected. Deferred
  loading, output schemas, and caller restrictions that exclude direct invocation are also rejected
  because their semantics cannot be honored.
@@ -1018,7 +1029,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374
  - an assistant `message` containing an `output_text` part;
  - one or more `function_call` Items.
  
-@@ -1499,13 +1534,11 @@ The normal lifecycle is:
+@@ -1499,13 +1536,11 @@ The normal lifecycle is:
  4. matching `*.done`, `response.content_part.done`, and `response.output_item.done` events;
  5. exactly one `response.completed`, `response.incomplete`, or `response.failed` terminal event.
  
@@ -1037,7 +1048,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374
  
  For `include:["reasoning.encrypted_content"]`, the in-progress
  `response.output_item.added` Item omits `encrypted_content` because the complete reasoning text is
-@@ -1578,8 +1611,8 @@ curl http://127.0.0.1:8080/v1/responses/input_tokens \
+@@ -1578,8 +1613,8 @@ curl http://127.0.0.1:8080/v1/responses/input_tokens \
  Unsupported Create fields include Conversations, prompt templates, context management, hosted
  moderation, `include` values other than
  `reasoning.encrypted_content`, background execution, compaction, files/audio, and
@@ -1048,7 +1059,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374
  
  
  ## Anthropic Messages
-@@ -1643,16 +1676,11 @@ protocol-validated value to the selected template, substituting the nearest valu
+@@ -1643,16 +1678,11 @@ protocol-validated value to the selected template, substituting the nearest valu
  accepts as described above. `output_config.format` accepts `{"type":"json_schema","schema":{...}}`,
  enforced strictly (see [Structured output](#structured-output)); Count Tokens ignores it.
  
@@ -1071,7 +1082,7 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..365d10333186a20d3a36daaf0e9f8374
  User turn must provide exactly one leading result for every declared ID; valid results are matched
  by ID and normalized to call order. A history that begins with results remains valid as a truncated
 diff --git a/docs/weight-conversion.md b/docs/weight-conversion.md
-index 7e3c99008808a9400a354837ab5ae6a354bcb8df..664f8d73c62f432f2ea631f28374d7cb9d8bab53 100644
+index 7e3c99008808a9400a354837ab5ae6a354bcb8df..e9066cf76d5d22af6341de4664e8c90e49da0688 100644
 --- a/docs/weight-conversion.md
 +++ b/docs/weight-conversion.md
 @@ -72,7 +72,8 @@ The built-in recipes are ordinary Python functions in
@@ -1116,6 +1127,39 @@ index 7e3c99008808a9400a354837ab5ae6a354bcb8df..664f8d73c62f432f2ea631f28374d7cb
  ### A mixed-precision Qwen3.8-27B GGUF
  
  `qwen3_8_27b_gguf` ([`gguf_blocks.py`](../tools/convert/gguf_blocks.py)) imports a Qwen3.8-27B GGUF
+@@ -221,7 +247,8 @@ conventions the same way `bonsai2_27b_ternary` does, by row gathers and exact sm
+ transforms. The one convention a row copy cannot undo is the tiled value-head order of the GDN
+ output projection's input columns: its Use carries an `input_columns` auxiliary, and the runtime
+ reads the activation through that permutation when it quantizes it. Vision comes from the release's
+-`mmproj` file in the official Vision formats, DFlash2 from `--source dflash2`, and `--proposal`
++`mmproj` file in the official Vision formats, DFlash2 from `--source dflash2` (a Safetensors
++directory or the release's separate DFlash2 GGUF), and `--proposal`
+ gathers the proposal head's rows from the output head in its own block format.
+ 
+ ```bash
+@@ -570,13 +597,15 @@ normal multi-component conversion, though each component needs its own wiring:
+   argument reassembles by reading both from the underlying `GGUFSource` and
+   stacking them -- see its docstring if you need the same pattern elsewhere.
+ 
+-- **DFlash2** needs no GGUF-specific code at all in the cases seen so far: it's
+-  a small enough draft head that a plain Safetensors checkpoint for it is the
+-  normal way to get one, and `tools.convert` already reads that natively via
+-  `--source dflash2=PATH` plus `--components ...,dflash2` -- the same mechanism
+-  `qwen3_8_27b_nvfp4`'s example in this doc already uses. An override recipe
+-  only needs to touch `dflash2/*` parameters if you actually have a GGUF export
+-  of the draft head to source them from instead.
++- **DFlash2** accepts either a Safetensors directory or the separate `dflash`
++  architecture GGUF, such as `Qwen3.8-27B-DFlash2-Q4_K_M.gguf`, through
++  `--source dflash2=PATH` and `--components ...,dflash2`. With
++  `qwen3_8_27b_gguf`, its `dflash.*` metadata supplies geometry and conditioning
++  taps. Feature projection, compatible gate/up pairs and selector hidden
++  projection retain their ggml blocks. Attention input, attention output and
++  MLP down projections use Q8; convolution kernels, kernel projections and
++  selector codebooks use BF16. The draft remains a mixed-format companion;
++  it does not change the target model's block formats.
+ 
+ All three name maps above were checked against a real checkpoint/GGUF pair on
+ this machine the same way `qwen35_linear_attention_name_map` was (see its
 diff --git a/include/ninfer/ops/sliding_window_attention.h b/include/ninfer/ops/sliding_window_attention.h
 index 970484a9f364f2df4f864356c7120238ba7159d6..d1b4aef49a7a9355d2ca0e667011694116284edc 100644
 --- a/include/ninfer/ops/sliding_window_attention.h
@@ -9642,7 +9686,7 @@ index c056b1f50025966fc6f804d680d2977ff73ae57a..5332603b7fa60096b0081b9fdebc008a
 +
  } // namespace ninfer::runtime
 diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
-index d738cd25d51654a844224538418f7cf255c26d45..4f020beafbaa20799180fdbd0433548518e0c943 100644
+index d738cd25d51654a844224538418f7cf255c26d45..a50d7a3cfacd43fe43235dd51af49f8586471c0c 100644
 --- a/src/runtime/engine/model_instance.cpp
 +++ b/src/runtime/engine/model_instance.cpp
 @@ -1,4 +1,5 @@
@@ -9722,7 +9766,7 @@ index d738cd25d51654a844224538418f7cf255c26d45..4f020beafbaa20799180fdbd04335485
      if (options.artifact_path.empty()) {
          throw std::invalid_argument("Engine artifact_path must not be empty");
      }
-@@ -236,6 +285,99 @@ EngineOptions artifact_scoped_disk_tier(const EngineOptions& options,
+@@ -236,6 +285,104 @@ EngineOptions artifact_scoped_disk_tier(const EngineOptions& options,
  } // namespace
  
  EngineOptions normalize_engine_options(EngineOptions options) {
@@ -9777,13 +9821,18 @@ index d738cd25d51654a844224538418f7cf255c26d45..4f020beafbaa20799180fdbd04335485
 +        const bool fixed_mtp = memory_mtp && options.speculative.mtp_policy == MtpDraftPolicy::Fixed;
 +        const bool adaptive_mtp = memory_mtp &&
 +            options.speculative.mtp_policy == MtpDraftPolicy::Adaptive;
++        // DFlash2 uses the KVMem checkpoint/ring path. Keep its initial qualification
++        // on one sequence and one GPU; ordinary and MTP retain their wider contract.
++        const bool memory_dflash2 = options.speculative.backend == SpeculativeBackend::DFlash2 &&
++            options.max_concurrency == 1 && options.devices.size() <= 1 &&
++            options.speculative.draft_tokens >= 1 && options.speculative.draft_tokens <= 15;
 +        const bool memory_ngram_supported = options.speculative.ngram_draft_tokens == 0 ||
-+            (memory_mtp && (options.max_concurrency == 1 || options.speculative.ngram_draft_tokens <= 15) &&
++            ((memory_mtp || memory_dflash2) && (options.max_concurrency == 1 || options.speculative.ngram_draft_tokens <= 15) &&
 +             options.speculative.ngram_draft_tokens <= 63 &&
 +             options.speculative.ngram_min_match >= 4 && options.speculative.ngram_min_match <= 64 &&
 +             std::max(options.speculative.draft_tokens, options.speculative.ngram_draft_tokens) +
 +                 options.speculative.draft_tokens <= options.kvmem.reserve_tokens);
-+        const bool memory_spec_supported = (ordinary || fixed_mtp || adaptive_mtp) && memory_ngram_supported &&
++        const bool memory_spec_supported = (ordinary || fixed_mtp || adaptive_mtp || memory_dflash2) && memory_ngram_supported &&
 +            options.speculative.mtp_attention_window == 0;
 +
 +        if (options.purpose != EnginePurpose::Generation || options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency ||
@@ -9815,14 +9864,14 @@ index d738cd25d51654a844224538418f7cf255c26d45..4f020beafbaa20799180fdbd04335485
 +             options.kv_cache != KvCacheStorage::RotatedInt4KeyInt4ValueE8 &&
 +             options.kv_cache != KvCacheStorage::RotatedE8RootKeyInt4Value)) {
 +            throw std::invalid_argument("KVMem requires explicit B+R page-aligned "
-+                "capacity per lane, nonzero global H, aligned prefill <= R, BF16/INT8/FP8/NVFP4/K8V4/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8, 1..8 text or resident/CPU-vision lanes, ordinary/fixed/adaptive MTP1..15, ngram1..63 (automatically capped at 15 with 2..8 lanes), INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 fast prefill, "
++                "capacity per lane, nonzero global H, aligned prefill <= R, BF16/INT8/FP8/NVFP4/K8V4/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8, 1..8 text or resident/CPU-vision lanes, ordinary/fixed/adaptive MTP1..15 or single-sequence/single-GPU DFlash2 1..15, ngram1..63 (automatically capped at 15 with 2..8 lanes), INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 fast prefill, "
 +                "and disabled prefix cache");
 +        }
 +    }
      switch (options.purpose) {
      case EnginePurpose::Generation:
          break;
-@@ -259,6 +401,22 @@ EngineOptions normalize_engine_options(EngineOptions options) {
+@@ -259,6 +406,22 @@ EngineOptions normalize_engine_options(EngineOptions options) {
          throw std::invalid_argument("Engine max_concurrency must be in [1,8]");
      }
      ContextCacheOptions& cache = options.context_cache;
@@ -9845,7 +9894,7 @@ index d738cd25d51654a844224538418f7cf255c26d45..4f020beafbaa20799180fdbd04335485
      if (options.speculative.ngram_archive_bytes != 0 &&
          options.speculative.ngram_draft_tokens == 0) {
          throw std::invalid_argument(
-@@ -270,10 +428,9 @@ EngineOptions normalize_engine_options(EngineOptions options) {
+@@ -270,10 +433,9 @@ EngineOptions normalize_engine_options(EngineOptions options) {
          throw std::invalid_argument("ngram session capacity must be between 1 MiB and the total "
                                      "archive capacity");
      }
@@ -9859,7 +9908,7 @@ index d738cd25d51654a844224538418f7cf255c26d45..4f020beafbaa20799180fdbd04335485
      }
      const std::uint32_t concurrency = options.max_concurrency;
      // Injected grafts stay resident for the life of the Engine, each in a StateImage and a
-@@ -623,6 +780,30 @@ ResidencyTransition ModelInstance::resume(DeviceContext& device, DeviceSnapshot&
+@@ -623,6 +785,30 @@ ResidencyTransition ModelInstance::resume(DeviceContext& device, DeviceSnapshot&
  ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& device) {
      validate_options(requested);
      install_device_route_profile_for(requested, device);
@@ -9890,7 +9939,7 @@ index d738cd25d51654a844224538418f7cf255c26d45..4f020beafbaa20799180fdbd04335485
      const auto start = Clock::now();
      // Every later stage of startup checks its options against the ones the model was loaded with, so
      // the stage split is decided once, here, and carried in the options from then on.
-@@ -680,8 +861,15 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
+@@ -680,8 +866,15 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
              options.context_cache.host_kv_capacity_bytes = 0;
          }
      }
@@ -9906,7 +9955,7 @@ index d738cd25d51654a844224538418f7cf255c26d45..4f020beafbaa20799180fdbd04335485
      frontend.complete();
      StartupPhaseScope planning(options.startup_observer, StartupPhase::TargetFinalize);
      const std::size_t overlay_window_bytes =
-@@ -701,15 +889,39 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
+@@ -701,15 +894,39 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
              graft_main_pages += (graft.n_slots + page_tokens - 1U) / page_tokens;
          }
      }
@@ -9952,7 +10001,7 @@ index d738cd25d51654a844224538418f7cf255c26d45..4f020beafbaa20799180fdbd04335485
      std::unique_ptr<models::qwen3_5::execution::NativeExpertRuntime> experts;
      if (!instance->model->expert_sources().layers.empty()) {
          // Price startup with the real allocations before the KV plan is finalized: the delivery
-@@ -721,75 +933,139 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
+@@ -721,75 +938,139 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
          const bool automatic_kv = options.kv_capacity.mode == KvCapacityMode::Automatic;
          const std::uint64_t headroom =
              automatic_kv ? options.kv_capacity.automatic_headroom_bytes : 0;
@@ -11358,7 +11407,7 @@ index 0cfbd04a077f2cd961f411b36c4bdebb76a09b5a..fddf5ac0198aac0c92cfbca1f71f42fe
  
  // An optional `post_thinking` object: temperature (up to `max_temperature`), top_p, top_k, min_p,
 diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
-index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af15f026d2c 100644
+index 8fc5043c46b464507bb1bd5cc898936dbab34510..d59ed6a29406c087d8db414f5fbef54acf31cf65 100644
 --- a/src/serve/serve_options.cpp
 +++ b/src/serve/serve_options.cpp
 @@ -1,6 +1,9 @@
@@ -11371,7 +11420,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
  #include "product/post_thinking_options.h"
  #include "product/rope_yarn_options.h"
  #include "product/speculative_options.h"
-@@ -88,6 +91,31 @@ std::string serve_usage_text(const char* argv0) {
+@@ -88,6 +91,32 @@ std::string serve_usage_text(const char* argv0) {
             "  --version                     print the build version and exit\n"
             "\n"
             "MODEL & CONTEXT\n"
@@ -11394,7 +11443,8 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
 +           "                                verified history reuse; BF16/INT8/FP8/NVFP4/K8V4,\n"
 +           "                                RK8V4/RK4V4/RK4V4-E8/RK2V4-E8,\n"
 +           "                                1..8 text or resident/CPU-vision lanes,\n"
-+           "                                ordinary/fixed/adaptive MTP1..15; ngram1..63,\n"
++           "                                ordinary/fixed/adaptive MTP1..15; DFlash2 1..15\n"
++           "                                on one sequence/GPU; ngram1..63,\n"
 +           "                                C2..8 automatically cap ngram at 15;\n"
 +           "                                ngram text/images use all nine KV formats,\n"
 +           "                                SSD: process-local active/idle tiering; fast prefill supports\n"
@@ -11403,7 +11453,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
             "  --max-context N               logical context ceiling of each request (default\n"
             "                                8192)\n"
             "  --max-concurrency N           requests decoded together, 1..8 (default 1)\n"
-@@ -105,7 +133,7 @@ std::string serve_usage_text(const char* argv0) {
+@@ -105,7 +134,7 @@ std::string serve_usage_text(const char* argv0) {
             "  --chat-template FILE          replace the artifact's chat template at startup\n"
             "  --device N                    CUDA device index (default 0)\n"
             "  --devices A,B,...             one pipeline stage per listed device, 2..8\n"
@@ -11412,7 +11462,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
             "  --stage-layers A,B,...        layers per stage in --devices order (default:\n"
             "                                split by free memory)\n"
             "  --expert-residency device|host|disk  MoE experts on GPU (default), in pinned\n"
-@@ -168,6 +196,26 @@ std::string serve_usage_text(const char* argv0) {
+@@ -168,6 +197,26 @@ std::string serve_usage_text(const char* argv0) {
             "  --rope-scaling-original-context N\n"
             "                                the interpolation threshold (default: the\n"
             "                                model's native window)\n"
@@ -11439,7 +11489,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
             "  --wddm-evictable-budget       Windows builds: budget against dedicated\n"
             "                                memory, committing arenas at startup\n"
             "\n"
-@@ -202,9 +250,8 @@ std::string serve_usage_text(const char* argv0) {
+@@ -202,9 +251,8 @@ std::string serve_usage_text(const char* argv0) {
             "KV CACHE\n"
             "  --kv-capacity N|auto          shared KV capacity in tokens (default\n"
             "                                --max-context, or auto with\n"
@@ -11451,7 +11501,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
             "                                " +
             std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
             "); alias --vram-headroom-mib\n"
-@@ -343,8 +390,8 @@ std::string serve_usage_text(const char* argv0) {
+@@ -343,8 +391,8 @@ std::string serve_usage_text(const char* argv0) {
             "  --ngram-draft-tokens N        copy up to N tokens (1..63) per round from\n"
             "                                earlier prompt, tool-result or output text,\n"
             "                                verified alongside --spec; on with 15 whenever\n"
@@ -11462,7 +11512,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
             "  --ngram-min-match N           shortest match a copy is drawn from, 4..64\n"
             "                                (default 12)\n"
             "  --ngram-archive-mib N         keep finished requests' copy sources in RAM for\n"
-@@ -356,7 +403,7 @@ std::string serve_usage_text(const char* argv0) {
+@@ -356,7 +404,7 @@ std::string serve_usage_text(const char* argv0) {
             "  --lookup-ngram N              context-lookup drafting alongside --spec: the\n"
             "                                last N tokens are matched against the sequence\n"
             "                                so far and what followed is proposed (default 0:\n"
@@ -11471,7 +11521,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
             "\n"
             "VISION (off by default)\n"
             "  --vision                      accept images and video and load the Vision GPU\n"
-@@ -419,8 +466,7 @@ std::string serve_usage_text(const char* argv0) {
+@@ -419,8 +467,7 @@ std::string serve_usage_text(const char* argv0) {
             "\n"
             "API BEHAVIOR\n"
             "  --structured-output           accept JSON and JSON Schema response formats;\n"
@@ -11481,7 +11531,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
             "  --unconstrained-response-format\n"
             "                                without --structured-output, generate such a\n"
             "                                request unconstrained instead of refusing it\n"
-@@ -532,6 +578,7 @@ std::vector<std::uint32_t> parse_stage_layers(std::string_view text) {
+@@ -532,6 +579,7 @@ std::vector<std::uint32_t> parse_stage_layers(std::string_view text) {
  
  ServeOptions parse_serve_options(int argc, char** argv) {
      ServeOptions options;
@@ -11489,7 +11539,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
      options.startup_argv.reserve(static_cast<std::size_t>(argc));
      bool redact_next = false;
      for (int i = 0; i < argc; ++i) {
-@@ -624,6 +671,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -624,6 +672,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              options.kv_capacity  = parse_kv_capacity(require_value("--kv-capacity"));
              kv_capacity_explicit = true;
              continue;
@@ -11502,7 +11552,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
          }
          if (arg == "--kv-headroom-mib" || arg == "--vram-headroom-mib") {
              // --vram-headroom-mib is the Wallawalla47 fork's name for the same headroom.
-@@ -1219,7 +1272,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1219,7 +1273,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              continue;
          }
          if (arg == "--derive-session-keys") {
@@ -11511,7 +11561,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
              options.derive_session_keys = true;
              continue;
          }
-@@ -1303,6 +1356,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1303,6 +1357,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                  require_value("--rope-scaling-original-context"));
              continue;
          }
@@ -11525,7 +11575,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
          if (arg == "--wddm-evictable-budget") {
              options.wddm_evictable_budget = true;
              continue;
-@@ -1521,6 +1581,46 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1521,6 +1582,46 @@ ServeOptions parse_serve_options(int argc, char** argv) {
          throw std::invalid_argument("--default-graft '" + options.default_graft +
                                      "' does not name a --graft");
      }
@@ -11572,7 +11622,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
      if (!kv_capacity_explicit) {
          // The hybrid cache turns every Device page no active request holds into block cache, so
          // it sizes the KV pool to free VRAM unless a capacity is given.
-@@ -1534,8 +1634,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1534,8 +1635,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              "caching systems");
      }
      if (options.context_cache.mode == ContextCacheMode::Hybrid) {
@@ -11583,7 +11633,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
                                          " configures the default prefix cache and cannot be "
                                          "combined with --use-alt-prefix-caching");
          }
-@@ -1574,10 +1674,16 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1574,10 +1675,16 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                                      " requires --use-alt-prefix-caching");
      }
      if (kv_headroom_mib.has_value()) {
@@ -11600,7 +11650,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
      }
      if (long_anchor_spacing_explicit && !options.context_cache.automatic_long_anchors) {
          throw std::invalid_argument("--long-anchor-spacing requires --auto-long-anchors");
-@@ -1648,7 +1754,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1648,7 +1755,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
          throw std::invalid_argument("--stats-port must be in [1,65535] and differ from --port");
      }
      if (options.max_context == 0) { throw std::invalid_argument("--max-context must be positive"); }
@@ -11609,7 +11659,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
          options.kv_capacity.explicit_tokens < options.max_context) {
          throw std::invalid_argument("--kv-capacity must be at least --max-context");
      }
-@@ -1689,10 +1795,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1689,10 +1796,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
          throw std::invalid_argument(
              "--cuda-graph-allowance-mib requires CUDA graphs (omit --no-cuda-graph)");
      }
@@ -11625,7 +11675,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
      }
      if (options.ngram_native_sessions && options.speculative.ngram_archive_bytes == 0) {
          throw std::invalid_argument("--ngram-native-sessions requires --ngram-archive-mib");
-@@ -1712,6 +1819,84 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1712,6 +1820,89 @@ ServeOptions parse_serve_options(int argc, char** argv) {
      if (options.sleep_idle_seconds != 0 && !options.suspend.enabled && !options.router()) {
          throw std::invalid_argument("--sleep-idle-seconds requires --model-suspend");
      }
@@ -11642,13 +11692,18 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
 +        const bool fixed_mtp = memory_mtp && options.speculative.mtp_policy == MtpDraftPolicy::Fixed;
 +        const bool adaptive_mtp = memory_mtp &&
 +            options.speculative.mtp_policy == MtpDraftPolicy::Adaptive;
++        // DFlash2 uses the KVMem checkpoint/ring path. Keep its initial qualification
++        // on one sequence and one GPU; ordinary and MTP retain their wider contract.
++        const bool memory_dflash2 = options.speculative.backend == SpeculativeBackend::DFlash2 &&
++            options.max_concurrency == 1 && options.devices.size() <= 1 &&
++            options.speculative.draft_tokens >= 1 && options.speculative.draft_tokens <= 15;
 +        const bool memory_ngram_supported = options.speculative.ngram_draft_tokens == 0 ||
-+            (memory_mtp && (options.max_concurrency == 1 || options.speculative.ngram_draft_tokens <= 15) &&
++            ((memory_mtp || memory_dflash2) && (options.max_concurrency == 1 || options.speculative.ngram_draft_tokens <= 15) &&
 +             options.speculative.ngram_draft_tokens <= 63 &&
 +             options.speculative.ngram_min_match >= 4 && options.speculative.ngram_min_match <= 64 &&
 +             std::max(options.speculative.draft_tokens, options.speculative.ngram_draft_tokens) +
 +                 options.speculative.draft_tokens <= options.kvmem.reserve_tokens);
-+        const bool memory_spec_supported = (ordinary || fixed_mtp || adaptive_mtp) && memory_ngram_supported &&
++        const bool memory_spec_supported = (ordinary || fixed_mtp || adaptive_mtp || memory_dflash2) && memory_ngram_supported &&
 +            options.speculative.mtp_attention_window == 0;
 +
 +        if (legacy_cache_flag || hybrid_option_flag || original_cache_selected ||
@@ -11671,7 +11726,7 @@ index 8fc5043c46b464507bb1bd5cc898936dbab34510..36be80c8d5e607e43cc6253ffe360af1
 +             options.kv_cache != KvCacheStorage::RotatedLloyd4KeyInt4Value &&
 +             options.kv_cache != KvCacheStorage::RotatedInt4KeyInt4ValueE8 &&
 +             options.kv_cache != KvCacheStorage::RotatedE8RootKeyInt4Value)) {
-+            throw std::invalid_argument("KVMem requires ordinary/fixed/adaptive MTP1..15, ngram1..63 (automatically capped at 15 with 2..8 lanes), single-GPU or layer-pipeline BF16/INT8/FP8/NVFP4/K8V4/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 generation, 1..8 text or resident/CPU-vision lanes, INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 fast prefill, "
++            throw std::invalid_argument("KVMem requires ordinary/fixed/adaptive MTP1..15 or single-sequence/single-GPU DFlash2 1..15, ngram1..63 (automatically capped at 15 with 2..8 lanes), single-GPU or layer-pipeline BF16/INT8/FP8/NVFP4/K8V4/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 generation, 1..8 text or resident/CPU-vision lanes, INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 fast prefill, "
 +                "and exclusive ownership of history caching");
 +        }
 +        if (options.kvmem.recent_blocks() == 0) {
@@ -12470,6 +12525,112 @@ index 02e48ccc8dc2672e5b736342b87d81960b14f3fa..24389c9d21d6f7b5cf9b58a51ededda1
  
  target_include_directories(ninfer_bench_support_test PRIVATE ${PROJECT_SOURCE_DIR}/bench/inference)
  
+diff --git a/tests/convert/test_dflash2_gguf.py b/tests/convert/test_dflash2_gguf.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..848bafb65fd32392b58633702e00f827dd7f193c
+--- /dev/null
++++ b/tests/convert/test_dflash2_gguf.py
+@@ -0,0 +1,100 @@
++"""The draft GGUF has its own metadata and retains supported ggml blocks."""
++from pathlib import Path
++
++import numpy as np
++import pytest
++import torch
++
++from tools.convert.__main__ import _open_named_source
++from tools.convert.dflash2_gguf import DraftSource, draft_blocks
++from tools.convert.gguf_blocks import _companions
++from tools.convert.model import Model
++from tools.convert.qwen3_5 import _Builder, draft_config
++from tools.convert.recipe import Recipe
++from tools.convert.sources.gguf import TYPE_BF16, write_gguf
++
++
++def fixture(tmp_path: Path, **overrides):
++    kv = {
++        'general.architecture':'dflash', 'dflash.attention.causal':False,
++        'dflash.block_count':1, 'dflash.embedding_length':256,
++        'dflash.feed_forward_length':512, 'dflash.context_length':8192,
++        'dflash.attention.head_count':2, 'dflash.attention.head_count_kv':1,
++        'dflash.attention.key_length':128, 'dflash.attention.value_length':128,
++        'dflash.attention.layer_norm_rms_epsilon':1e-6, 'dflash.rope.freq_base':10000000.,
++        'dflash.target_layers':[2,6], 'dflash.attention.sliding_window_pattern':[True],
++        'dflash.attention.sliding_window':2048, 'dflash.conv_kernel_size':2,
++        'dflash.conv_group_size':16, 'dflash.selector_rank':256, 'dflash.selector_top_k':16,
++        'tokenizer.ggml.tokens':[str(i) for i in range(32)], 'tokenizer.ggml.mask_token_id':31,
++    } | overrides
++    shapes = {
++        'fc.weight':(256,512), 'enc.output_norm.weight':(256,), 'output_norm.weight':(256,),
++        'selector_hidden.weight':(256,256), 'selector_predecessor.weight':(32,256),
++        'selector_successor.weight':(32,256), 'blk.0.attn_norm.weight':(256,),
++        'blk.0.ffn_norm.weight':(256,), 'blk.0.attn_q.weight':(256,256),
++        'blk.0.attn_k.weight':(128,256), 'blk.0.attn_v.weight':(128,256),
++        'blk.0.attn_output.weight':(256,256), 'blk.0.attn_q_norm.weight':(128,),
++        'blk.0.attn_k_norm.weight':(128,), 'blk.0.ffn_gate.weight':(512,256),
++        'blk.0.ffn_up.weight':(512,256), 'blk.0.ffn_down.weight':(256,512),
++        'blk.0.attn_conv_base':(2,2,256), 'blk.0.ffn_conv_base':(2,2,256),
++        'blk.0.attn_conv_proj.weight':(64,256), 'blk.0.ffn_conv_proj.weight':(64,256),
++    }
++    tensors=[]; expected={}
++    for index,(name,shape) in enumerate(shapes.items()):
++        if name in ('fc.weight','selector_hidden.weight','blk.0.ffn_gate.weight','blk.0.ffn_up.weight'):
++            # Q4_K: exactly 144 bytes per block of 256 represented values.
++            data=(np.arange(np.prod(shape)//256*144,dtype=np.uint8)+index).tobytes()
++            tensors.append((name,shape,12,data));expected[name]=data
++        else:
++            values=(torch.arange(np.prod(shape),dtype=torch.float32).reshape(shape)/257).to(torch.bfloat16)
++            tensors.append((name,shape,TYPE_BF16,values.view(torch.int16).numpy().tobytes()))
++            expected[name]=values.float().reshape(-1)
++    path=tmp_path/'draft.gguf';write_gguf(path,kv,tensors)
++    return path,expected
++
++
++def test_named_source_reads_metadata_and_partial_direct_values(tmp_path):
++    path,expected=fixture(tmp_path)
++    with _open_named_source('dflash2',path,frozenset({'gguf'})) as source:
++        assert isinstance(source,DraftSource)
++        target={'hidden_size':256,'vocab_size':32,'num_hidden_layers':8}
++        config=draft_config(source.config,target,'dflash2')
++        assert config['dflash_config']['target_layer_ids']==[1,5]
++        assert config['layer_types']==['sliding_attention'] and config['sliding_window']==2048
++        for name in ('selector_predecessor.weight','blk.0.attn_conv_base'):
++            torch.testing.assert_close(source.read_flat(name,7,29),expected[name][7:29],rtol=0,atol=0)
++
++
++def test_recipe_preserves_q4_blocks_and_runtime_fallbacks(tmp_path):
++    path,expected=fixture(tmp_path)
++    with DraftSource(path) as source:
++        target={'hidden_size':256,'vocab_size':32,'num_hidden_layers':8}
++        config=draft_config(source.config,target,'dflash2')
++        model=Model({'text':{'config':target},'dflash2':{'config':config,'target':'text'}})
++        _Builder(model).draft(source,config,target,'dflash2')
++        blocks=draft_blocks(model,source)
++        names={'dflash2/feature_projection':'fc.weight',
++               'dflash2/candidate_selector/hidden_projection':'selector_hidden.weight',
++               'dflash2/layers/0/mlp/gate':'blk.0.ffn_gate.weight',
++               'dflash2/layers/0/mlp/up':'blk.0.ffn_up.weight'}
++        for logical,tensor in names.items():
++            encoded=blocks[logical].read_encoded(0,blocks[logical].shape[0])
++            assert encoded.format=='gguf_q4_k'
++            assert encoded.codes.numpy().tobytes()==expected[tensor]
++        recipe=Recipe(model);_companions(model,recipe,{'dflash2':source})
++        prepared=recipe.prepare(device='cpu',rows_per_chunk=32)
++        formats={name:job.spec.format for job in prepared.weights for name in job.parameters}
++        assert formats['dflash2/feature_projection']=='gguf_q4_k'
++        assert formats['dflash2/layers/0/mlp/gate']=='gguf_q4_k'
++        assert formats['dflash2/layers/0/attention/query']=='q8_g32_fp16'
++        assert formats['dflash2/layers/0/mlp/down']=='q8_g32_fp16'
++        assert formats['dflash2/layers/0/attention_conv/kernel_projection']=='bf16'
++
++
++@pytest.mark.parametrize('overrides',[
++    {'general.architecture':'qwen35'}, {'dflash.attention.causal':True},
++    {'dflash.target_layers':[0,2]}, {'dflash.attention.sliding_window_pattern':[True,False]},
++])
++def test_refuses_incompatible_draft_metadata(tmp_path,overrides):
++    path,_=fixture(tmp_path,**overrides)
++    with pytest.raises(ValueError):DraftSource(path)
 diff --git a/tests/convert/test_gguf_blocks.py b/tests/convert/test_gguf_blocks.py
 index d0cd4786b0fa581867696ad2b2666cce4d4330f6..9dc6474b572b8d15630ec0c2bf9ed6b70b8eea41 100644
 --- a/tests/convert/test_gguf_blocks.py
@@ -18516,7 +18677,7 @@ index 982f4ec8969c36b08bac58727d230fe7f2ac1c18..7444638be6959fd867f6039233c34c28
      run_test("admission waits for Program boundary", test_admission_waits_for_program_boundary);
      run_test("session publication order", test_session_publication_order_controls_tied_source);
 diff --git a/tests/test_serve_options.cpp b/tests/test_serve_options.cpp
-index a257ca089f1634b494dc9229d33335aa3ac01f39..b30d7f5c0a4c1305647b8631b0d9400849c75cea 100644
+index a257ca089f1634b494dc9229d33335aa3ac01f39..574463bccad9eecce994b64d3bc38d5763142444 100644
 --- a/tests/test_serve_options.cpp
 +++ b/tests/test_serve_options.cpp
 @@ -2,9 +2,12 @@
@@ -18552,7 +18713,7 @@ index a257ca089f1634b494dc9229d33335aa3ac01f39..b30d7f5c0a4c1305647b8631b0d94008
      int failures = 0;
      failures += check(parse({"ninfer-serve", "model.ninfer"}).speculative.draft_min_p == 0,
                        "draft confidence must be opt-in");
-@@ -62,6 +70,507 @@ int main() {
+@@ -62,6 +70,529 @@ int main() {
                                   "--expert-dma-share", share}).hybrid_experts.dma_share == std::stof(share),
                            "server did not preserve an explicit hybrid DMA share");
      }
@@ -18751,6 +18912,28 @@ index a257ca089f1634b494dc9229d33335aa3ac01f39..b30d7f5c0a4c1305647b8631b0d94008
 +        failures += check(parsed.speculative.draft_tokens == drafts &&
 +            parsed.speculative.mtp_policy == ninfer::MtpDraftPolicy::Fixed,
 +            "KVMem fixed MTP draft count was not preserved");
++    }
++    for (const auto drafts : {1U, 3U, 15U}) {
++        for (const auto copies : {0U, 31U}) {
++            auto args = memory_args;
++            args.insert(args.end(), {"--spec", "dflash2", "--draft-tokens", std::to_string(drafts),
++                                     "--ngram-draft-tokens", std::to_string(copies), "--vision"});
++            const auto parsed = make_engine_options(parse(args));
++            failures += check(parsed.speculative.backend == ninfer::SpeculativeBackend::DFlash2 &&
++                parsed.speculative.draft_tokens == drafts && parsed.speculative.ngram_draft_tokens == copies &&
++                parsed.kvmem.device_tokens() == 512 && parsed.enable_vision,
++                "KVMem DFlash2 lost its draft, vision, or memory configuration");
++        }
++    }
++    for (const auto& extra : std::vector<std::vector<std::string>>{
++             {"--max-concurrency", "2"}, {"--devices", "0,1"},
++             {"--draft-tokens", "0"}, {"--draft-tokens", "16"}}) {
++        auto args = memory_args;
++        args.insert(args.end(), {"--spec", "dflash2", "--draft-tokens", "3", "--ngram-draft-tokens", "0"});
++        args.insert(args.end(), extra.begin(), extra.end());
++        bool rejected = false;
++        try { (void)parse(args); } catch (const std::invalid_argument&) { rejected = true; }
++        failures += check(rejected, "unsupported KVMem DFlash2 configuration accepted");
 +    }
 +    for (const auto& extra : std::vector<std::vector<std::string>>{
 +             {"--spec", "mtp", "--draft-tokens", "0"},
@@ -19060,7 +19243,7 @@ index a257ca089f1634b494dc9229d33335aa3ac01f39..b30d7f5c0a4c1305647b8631b0d94008
      const auto archive = parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens",
                                  "5", "--ngram-draft-tokens", "63", "--ngram-archive-mib", "512",
                                  "--ngram-session-mib", "128", "--ngram-native-sessions"});
-@@ -98,7 +607,6 @@ int main() {
+@@ -98,7 +629,6 @@ int main() {
      for (const auto& tail : std::vector<std::vector<std::string>>{
               {"--ngram-draft-tokens", "64"},
               {"--ngram-min-match", "3"},
@@ -19068,7 +19251,7 @@ index a257ca089f1634b494dc9229d33335aa3ac01f39..b30d7f5c0a4c1305647b8631b0d94008
               {"--spec", "none"}}) {
          std::vector<std::string> arguments{"ninfer-serve",
                                             "model.ninfer",
-@@ -134,15 +642,11 @@ int main() {
+@@ -134,15 +664,11 @@ int main() {
      }
      failures += check(parse({"ninfer-serve", "model.ninfer"}).speculative.ngram_draft_tokens == 0,
                        "ngram default needs a neural backend");
@@ -19089,7 +19272,7 @@ index a257ca089f1634b494dc9229d33335aa3ac01f39..b30d7f5c0a4c1305647b8631b0d94008
  
      const auto mtp_ngram = parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens",
                                    "3", "--ngram-draft-tokens", "15"});
-@@ -181,14 +685,12 @@ int main() {
+@@ -181,14 +707,12 @@ int main() {
              } catch (const std::invalid_argument&) { rejected = true; }
              failures += check(rejected, "unsupported neural/ngram pair admitted");
          }
@@ -19110,7 +19293,7 @@ index a257ca089f1634b494dc9229d33335aa3ac01f39..b30d7f5c0a4c1305647b8631b0d94008
          const auto wide_single =
              parse({"ninfer-serve", "model.ninfer", "--spec", backend, "--draft-tokens", "3",
                     "--ngram-draft-tokens", "63", "--max-concurrency", "1"});
-@@ -1647,3 +2149,11 @@ int main() {
+@@ -1647,3 +2171,11 @@ int main() {
  
      return failures == 0 ? 0 : 1;
  }
@@ -19777,8 +19960,434 @@ index 0000000000000000000000000000000000000000..17dca9333f81063c8435c7bc9ba4938b
 +Grammar JSONStringExcept(const std::vector<std::string>& excluded);
 +}  // namespace xgrammar
 +#endif
+diff --git a/tools/convert/__main__.py b/tools/convert/__main__.py
+index 08a9358be49a29994e8942360734a891db713648..aac03d81fb175dbd3e0b6ca9e3aac4c5478e94e7 100644
+--- a/tools/convert/__main__.py
++++ b/tools/convert/__main__.py
+@@ -33,6 +33,10 @@ def _open_named_source(name: str, path: Path, block_sources: frozenset[str]):
+         # The ternary and GGUF block recipes read their block formats themselves, without gguf-py.
+         if name in block_sources:
+             return GGUFFile(path)
++        if name == "dflash2":
++            from .dflash2_gguf import DraftSource
++
++            return DraftSource(path)
+         from .sources.gguf_source import GGUFSource
+ 
+         return GGUFSource(path)
+diff --git a/tools/convert/dflash2_gguf.py b/tools/convert/dflash2_gguf.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e271fc6cc4466cfe0cfb156d1a656b9c5b0e235
+--- /dev/null
++++ b/tools/convert/dflash2_gguf.py
+@@ -0,0 +1,405 @@
++"""A DFlash2 draft adapter kept as its own GGUF.
++
++The release ships the adapter both as a safetensors directory and as one ``-DFlash2`` GGUF
++whose tensors are already exported in the shapes and row order the artifact wants. This module
++reads that GGUF where the official recipes read the directory: the draft geometry is synthesised
++from the file's ``dflash.*`` keys and passed through ``draft_config``, every logical name of the
++adapter maps onto the ``fc``/``blk.*``/``selector_*`` tensor that holds it, and the projections
++whose consumer walks whole ggml blocks -- the feature projection, the merged gate/up MLP parent
++and the selector's hidden projection -- are imported byte for byte. Everything else takes the
++official fallback, because its consumer asks for a specific encoding there: the fused attention
++input projection (``prepare_attn_input_proj_weights``) and the two dynamic-convolution outputs
++(``linear_dynamic_grouped_conv_add``) require Q8, the convolution kernels and the codebooks are
++read as BF16, and the norms are direct tensors.
++
++The file carries no ``qwen3_5`` metadata, so the gguf-py ``GGUFSource`` cannot describe it; a
++small store wrapper presents the tensors under the names the adapter builder reads, which keeps
++the ordinary lazy ``matrix_source``/``tensor_source`` resolution working. A row of a carried
++block tensor is its own bytes, so only ``read_blocks`` and the ``gguf`` package's dequantiser
++are needed, and only values -- never the imported blocks -- pay for the latter.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from math import prod
++from pathlib import Path
++
++import numpy as np
++import torch
++
++from tools.artifact.formats import GGUF_FORMATS_BY_TYPE
++
++from .sources.gguf import (
++    GGUFFile,
++    TYPE_BF16,
++    TYPE_F16,
++    TYPE_F32,
++    TYPE_NAMES,
++    TensorInfo,
++)
++from .sources.logical import EncodedRows, LogicalSource
++
++_DIRECT_TYPES = (TYPE_F32, TYPE_F16, TYPE_BF16)
++_EMPTY_SCALES = torch.empty(0, dtype=torch.float16)
++
++# GGUF tensor name, the adapter's logical parameter and the checkpoint name the adapter builder
++# reads; ``{i}`` is the layer index. The three names are one-to-one, so one table serves both the
++# builder's store lookups and the recipe's block overrides.
++_TOP_TENSORS = (
++    ("fc.weight", "dflash2/feature_projection", "fc.weight"),
++    ("enc.output_norm.weight", "dflash2/context_norm", "hidden_norm.weight"),
++    ("output_norm.weight", "dflash2/final_norm", "norm.weight"),
++    (
++        "selector_hidden.weight",
++        "dflash2/candidate_selector/hidden_projection",
++        "candidate_selector.hidden_projection.weight",
++    ),
++    (
++        "selector_predecessor.weight",
++        "dflash2/candidate_selector/predecessor_codebook",
++        "candidate_selector.predecessor_codebook",
++    ),
++    (
++        "selector_successor.weight",
++        "dflash2/candidate_selector/successor_codebook",
++        "candidate_selector.successor_codebook",
++    ),
++)
++
++_LAYER_TENSORS = (
++    (
++        "blk.{i}.attn_norm.weight",
++        "dflash2/layers/{i}/input_norm",
++        "layers.{i}.input_layernorm.weight",
++    ),
++    (
++        "blk.{i}.ffn_norm.weight",
++        "dflash2/layers/{i}/post_attention_norm",
++        "layers.{i}.post_attention_layernorm.weight",
++    ),
++    (
++        "blk.{i}.attn_q.weight",
++        "dflash2/layers/{i}/attention/query",
++        "layers.{i}.self_attn.q_proj.weight",
++    ),
++    (
++        "blk.{i}.attn_k.weight",
++        "dflash2/layers/{i}/attention/key",
++        "layers.{i}.self_attn.k_proj.weight",
++    ),
++    (
++        "blk.{i}.attn_v.weight",
++        "dflash2/layers/{i}/attention/value",
++        "layers.{i}.self_attn.v_proj.weight",
++    ),
++    (
++        "blk.{i}.attn_output.weight",
++        "dflash2/layers/{i}/attention/output",
++        "layers.{i}.self_attn.o_proj.weight",
++    ),
++    (
++        "blk.{i}.attn_q_norm.weight",
++        "dflash2/layers/{i}/attention/query_norm",
++        "layers.{i}.self_attn.q_norm.weight",
++    ),
++    (
++        "blk.{i}.attn_k_norm.weight",
++        "dflash2/layers/{i}/attention/key_norm",
++        "layers.{i}.self_attn.k_norm.weight",
++    ),
++    (
++        "blk.{i}.ffn_gate.weight",
++        "dflash2/layers/{i}/mlp/gate",
++        "layers.{i}.mlp.gate_proj.weight",
++    ),
++    ("blk.{i}.ffn_up.weight", "dflash2/layers/{i}/mlp/up", "layers.{i}.mlp.up_proj.weight"),
++    (
++        "blk.{i}.ffn_down.weight",
++        "dflash2/layers/{i}/mlp/down",
++        "layers.{i}.mlp.down_proj.weight",
++    ),
++    (
++        "blk.{i}.attn_conv_base",
++        "dflash2/layers/{i}/attention_conv/base_kernel",
++        "layers.{i}.attention_conv.base_kernel",
++    ),
++    (
++        "blk.{i}.attn_conv_proj.weight",
++        "dflash2/layers/{i}/attention_conv/kernel_projection",
++        "layers.{i}.attention_conv.kernel_projection.weight",
++    ),
++    (
++        "blk.{i}.ffn_conv_base",
++        "dflash2/layers/{i}/mlp_conv/base_kernel",
++        "layers.{i}.mlp_conv.base_kernel",
++    ),
++    (
++        "blk.{i}.ffn_conv_proj.weight",
++        "dflash2/layers/{i}/mlp_conv/kernel_projection",
++        "layers.{i}.mlp_conv.kernel_projection.weight",
++    ),
++)
++
++# Adapter parameters whose consumer is a plain Linear over whole blocks, so a carried ggml type
++# is imported unchanged. The gate/up pair is decided per layer, because only one merged parent of
++# a single block type reaches gguf_swiglu's [gate; up] form.
++_BLOCK_ROLES = ("dflash2/feature_projection", "dflash2/candidate_selector/hidden_projection")
++
++
++def _aliases(layers: int) -> dict[str, str]:
++    """Every name a source lookup may use, mapped to the GGUF tensor that holds it."""
++
++    rows = list(_TOP_TENSORS)
++    for layer in range(layers):
++        rows.extend(tuple(item.format(i=layer) for item in entry) for entry in _LAYER_TENSORS)
++    table: dict[str, str] = {}
++    for tensor, logical, source in rows:
++        for alias in (tensor, logical, source):
++            table[alias] = tensor
++    return table
++
++
++def _integer(kv: dict, key: str, label: str) -> int:
++    value = kv.get(key)
++    if type(value) is not int:
++        raise ValueError(f"{label}: {key} must be an integer, got {value!r}")
++    return value
++
++
++def _real(kv: dict, key: str, label: str) -> float:
++    value = kv.get(key)
++    if type(value) not in (int, float):
++        raise ValueError(f"{label}: {key} must be a real number, got {value!r}")
++    return float(value)
++
++
++def validate(gguf: GGUFFile) -> tuple[dict, dict[str, str]]:
++    """Refuse a GGUF that is not a DFlash2 draft, and return its config and name aliases."""
++
++    label = str(gguf.path)
++    architecture = gguf.kv.get("general.architecture")
++    if architecture != "dflash":
++        raise ValueError(
++            f"{label}: general.architecture = {architecture!r}, expected 'dflash'"
++        )
++    if gguf.kv.get("dflash.attention.causal") is not False:
++        raise ValueError(f"{label}: the draft attention must be noncausal")
++    layers = _integer(gguf.kv, "dflash.block_count", label)
++    if layers <= 0:
++        raise ValueError(f"{label}: dflash.block_count must be positive")
++    tokens = gguf.kv.get("tokenizer.ggml.tokens")
++    if not isinstance(tokens, list) or not tokens:
++        raise ValueError(f"{label}: tokenizer.ggml.tokens is absent")
++    pattern = gguf.kv.get("dflash.attention.sliding_window_pattern")
++    if (
++        not isinstance(pattern, list)
++        or len(pattern) != layers
++        or any(type(value) is not bool for value in pattern)
++    ):
++        raise ValueError(f"{label}: dflash.attention.sliding_window_pattern is invalid")
++    taps = gguf.kv.get("dflash.target_layers")
++    if (
++        not isinstance(taps, list)
++        or not taps
++        or any(type(value) is not int or value <= 0 for value in taps)
++        or len(set(taps)) != len(taps)
++    ):
++        raise ValueError(f"{label}: dflash.target_layers is invalid")
++    head_dim = _integer(gguf.kv, "dflash.attention.key_length", label)
++    if _integer(gguf.kv, "dflash.attention.value_length", label) != head_dim:
++        raise ValueError(f"{label}: the draft key and value widths differ")
++    layer_types = [
++        "sliding_attention" if sliding else "full_attention" for sliding in pattern
++    ]
++    config = {
++        "architectures": ["DFlash2DraftModel"],
++        "model_type": "qwen3",
++        "hidden_act": "silu",
++        "attention_bias": False,
++        "is_causal": False,
++        "hidden_size": _integer(gguf.kv, "dflash.embedding_length", label),
++        "vocab_size": len(tokens),
++        "intermediate_size": _integer(gguf.kv, "dflash.feed_forward_length", label),
++        "num_attention_heads": _integer(gguf.kv, "dflash.attention.head_count", label),
++        "num_key_value_heads": _integer(gguf.kv, "dflash.attention.head_count_kv", label),
++        "head_dim": head_dim,
++        "num_hidden_layers": layers,
++        "max_position_embeddings": _integer(gguf.kv, "dflash.context_length", label),
++        "rms_norm_eps": _real(gguf.kv, "dflash.attention.layer_norm_rms_epsilon", label),
++        "rope_parameters": {
++            "rope_theta": _real(gguf.kv, "dflash.rope.freq_base", label)
++        },
++        "layer_types": layer_types,
++        "dflash_config": {
++            # The GGUF counts the target's layers from one, the checkpoint from zero.
++            "target_layer_ids": [index - 1 for index in taps],
++            "mask_token_id": _integer(gguf.kv, "tokenizer.ggml.mask_token_id", label),
++            "conv_kernel_size": _integer(gguf.kv, "dflash.conv_kernel_size", label),
++            "conv_group_size": _integer(gguf.kv, "dflash.conv_group_size", label),
++            "selector_rank": _integer(gguf.kv, "dflash.selector_rank", label),
++            "selector_top_k": _integer(gguf.kv, "dflash.selector_top_k", label),
++        },
++    }
++    if "sliding_attention" in layer_types:
++        config["sliding_window"] = _integer(
++            gguf.kv, "dflash.attention.sliding_window", label
++        )
++    names = _aliases(layers)
++    expected = set(names.values())
++    if set(gguf.tensors) != expected:
++        missing = sorted(expected - set(gguf.tensors))[:5]
++        extra = sorted(set(gguf.tensors) - expected)[:5]
++        raise ValueError(
++            f"{label}: tensor set mismatch (missing {missing}, extra {extra})"
++        )
++    end = max(info.offset + info.nbytes for info in gguf.tensors.values())
++    if gguf.data_bytes_available < end:
++        raise ValueError(f"{label}: the data section is truncated")
++    return config, names
++
++
++@dataclass(frozen=True, slots=True)
++class TensorSignature:
++    shape: tuple[int, ...]
++    dtype: str
++
++
++class DraftSource:
++    """A DFlash2 draft GGUF presented as a checkpoint directory.
++
++    ``has``/``describe``/``read_flat`` speak the names the adapter builder reads, so the ordinary
++    lazy source resolution works unchanged; ``importable`` returns the same tensor as its own
++    ggml blocks where the recipe is allowed to import it.
++    """
++
++    def __init__(self, path: str | Path) -> None:
++        self.gguf = GGUFFile(path)
++        self.path = self.gguf.path
++        self.config, self.names = validate(self.gguf)
++
++    def __enter__(self) -> "DraftSource":
++        return self
++
++    def __exit__(self, *exc) -> None:
++        self.gguf.__exit__(*exc)
++
++    def _tensor(self, name: str) -> TensorInfo:
++        try:
++            tensor = self.names[name]
++        except KeyError as error:
++            raise ValueError(f"{self.path}: missing source tensor {name!r}") from error
++        return self.gguf.info(tensor)
++
++    def has(self, name: str) -> bool:
++        return name in self.names
++
++    def describe(self, name: str) -> TensorSignature:
++        info = self._tensor(name)
++        return TensorSignature(info.shape, TYPE_NAMES[info.type_id])
++
++    def read_flat(
++        self, name: str, begin: int = 0, end: int | None = None
++    ) -> torch.Tensor:
++        """Float32 values of the named tensor's flat C-order range, as the stores return them."""
++
++        info = self._tensor(name)
++        elements = prod(info.shape)
++        end = elements if end is None else end
++        if not 0 <= begin <= end <= elements:
++            raise ValueError(
++                f"{info.name}: source element range [{begin},{end}) exceeds {info.shape}"
++            )
++        if begin == end:
++            return torch.empty(0, dtype=torch.float32)
++        if info.type_id in _DIRECT_TYPES:
++            flat = self.gguf.read_direct(info.name).reshape(-1)[begin:end]
++            return torch.from_numpy(np.ascontiguousarray(flat))
++        if len(info.shape) != 2:
++            raise ValueError(f"{info.name}: {info.type_name} is not a matrix")
++        columns = info.shape[1]
++        first, last = begin // columns, -(-end // columns)
++        values = self._dequantize(info, first, last).reshape(-1)
++        window = values[begin - first * columns : end - first * columns]
++        return torch.from_numpy(np.ascontiguousarray(window))
++
++    def _dequantize(self, info: TensorInfo, first: int, last: int) -> np.ndarray:
++        if info.type_id in _DIRECT_TYPES:
++            return self.gguf.read_direct(info.name).reshape(last - first, -1)
++        try:
++            from gguf import GGMLQuantizationType
++            from gguf.quants import dequantize
++        except ImportError as error:
++            raise ValueError(
++                "reading the values of a GGUF block matrix needs the `gguf` package; "
++                "importing its blocks does not"
++            ) from error
++        blocks = self.gguf.read_blocks(info.name, first, last)
++        kind = GGMLQuantizationType(info.type_id)
++        values = dequantize(np.ascontiguousarray(blocks), kind)
++        return np.ascontiguousarray(values, dtype=np.float32).reshape(last - first, -1)
++
++    def importable(self, name: str) -> LogicalSource | None:
++        """The tensor as its own ggml blocks, or None when the artifact cannot carry it."""
++
++        info = self._tensor(name)
++        if info.type_id not in GGUF_FORMATS_BY_TYPE:
++            return None
++        return self._block_source(info)
++
++    def pair_importable(
++        self, first: str, second: str
++    ) -> tuple[LogicalSource, LogicalSource] | None:
++        """Two tensors of one merged parent, imported only as a single carried block type."""
++
++        left, right = self._tensor(first), self._tensor(second)
++        if (
++            left.type_id != right.type_id
++            or left.shape != right.shape
++            or left.type_id not in GGUF_FORMATS_BY_TYPE
++        ):
++            return None
++        return self._block_source(left), self._block_source(right)
++
++    def _block_source(self, info: TensorInfo) -> LogicalSource:
++        if len(info.shape) != 2:
++            raise ValueError(f"{info.name}: a carried block tensor must be a matrix")
++        format = GGUF_FORMATS_BY_TYPE[info.type_id].name
++
++        def encoded(begin: int, end: int) -> EncodedRows:
++            blocks = self.gguf.read_blocks(info.name, begin, end)
++            return EncodedRows(
++                format, torch.from_numpy(np.array(blocks, copy=True, order="C")), _EMPTY_SCALES
++            )
++
++        return LogicalSource(
++            info.shape,
++            f"{info.name}[{format}]{list(info.shape)}",
++            lambda begin, end: self.read_flat(info.name, begin, end),
++            encoded,
++        )
++
++
++def draft_blocks(model, source) -> dict[str, LogicalSource]:
++    """The adapter parameters this source can supply as their own ggml blocks."""
++
++    if not isinstance(source, DraftSource):
++        return {}
++    blocks: dict[str, LogicalSource] = {}
++    for name, parameter in model.parameters.items():
++        if not parameter.projection:
++            continue
++        if name in _BLOCK_ROLES:
++            item = source.importable(name)
++            if item is not None:
++                blocks[name] = item
++    layers = model.components["dflash2"]["config"]["num_hidden_layers"]
++    for layer in range(layers):
++        prefix = f"dflash2/layers/{layer}/mlp/"
++        pair = source.pair_importable(prefix + "gate", prefix + "up")
++        if pair is not None:
++            blocks[prefix + "gate"], blocks[prefix + "up"] = pair
++    return blocks
++
++
++__all__ = ["DraftSource", "TensorSignature", "draft_blocks", "validate"]
 diff --git a/tools/convert/gguf_blocks.py b/tools/convert/gguf_blocks.py
-index 23174618a8c4fefb292d10f1247057cfbe4ceb28..445c51be0b8dd7941752a83c97eb2a0256832a62 100644
+index 23174618a8c4fefb292d10f1247057cfbe4ceb28..ae215687cc4b2396c09cbf20fff8bd0bdd5d8d50 100644
 --- a/tools/convert/gguf_blocks.py
 +++ b/tools/convert/gguf_blocks.py
 @@ -1,17 +1,19 @@
@@ -19804,8 +20413,12 @@ index 23174618a8c4fefb292d10f1247057cfbe4ceb28..445c51be0b8dd7941752a83c97eb2a02
  rounded to BF16: the one place a stored value changes.
  
  Vision comes from the release's ``mmproj`` GGUF (``--source vision=mmproj.gguf``) with the official
-@@ -30,7 +32,7 @@ from tools.artifact.formats import GGUF_FORMATS_BY_TYPE
+@@ -28,9 +30,11 @@ import torch
  
+ from tools.artifact.formats import GGUF_FORMATS_BY_TYPE
+ 
++from .dflash2_gguf import draft_blocks
++
  from .methods import AuxiliaryValue, cast_direct, grouped_absmax, import_encoded
  from .official_recipes import Q4, Q5, Q6, Q8
 -from .sources.gguf import GGUFFile
@@ -19813,7 +20426,7 @@ index 23174618a8c4fefb292d10f1247057cfbe4ceb28..445c51be0b8dd7941752a83c97eb2a02
  from .sources.logical import EncodedRows, LogicalSource, array_source
  from .ternary import (
      ATTENTION_HEAD_DIM,
-@@ -60,7 +62,7 @@ from .ternary import (
+@@ -60,7 +64,7 @@ from .ternary import (
  
  MTP_BLOCK = LAYERS
  # The storage the GDN controls may have (gdn_control_source).
@@ -19822,7 +20435,7 @@ index 23174618a8c4fefb292d10f1247057cfbe4ceb28..445c51be0b8dd7941752a83c97eb2a02
  
  EXPECTED_HEADER = {
      "general.architecture": "qwen35",
-@@ -166,7 +168,9 @@ def validate(gguf: GGUFFile) -> None:
+@@ -166,7 +170,9 @@ def validate(gguf: GGUFFile) -> None:
          if kind == "blocks":
              accepted = info.type_id in GGUF_FORMATS_BY_TYPE
          else:
@@ -19833,7 +20446,7 @@ index 23174618a8c4fefb292d10f1247057cfbe4ceb28..445c51be0b8dd7941752a83c97eb2a02
          if info.shape != shape or not accepted:
              raise ValueError(f"{gguf.path}: {name} is {info.type_name} {info.shape}")
      end = max(info.offset + info.nbytes for info in gguf.tensors.values())
-@@ -272,9 +276,9 @@ def block_source(
+@@ -272,9 +278,9 @@ def block_source(
  
  def gdn_control_source(gguf: GGUFFile, tensor: str) -> LogicalSource:
      """A GDN A/B control as its BF16 operand, its value heads in the grouped order: BF16 words
@@ -19845,7 +20458,7 @@ index 23174618a8c4fefb292d10f1247057cfbe4ceb28..445c51be0b8dd7941752a83c97eb2a02
          values = untile(_dequantize(gguf, tensor, 0, GDN_VALUE_HEADS).numpy(), 1)
          return array_source(
              torch.from_numpy(np.ascontiguousarray(values)).to(torch.bfloat16), tensor
-@@ -461,22 +465,39 @@ def text_sources(
+@@ -461,22 +467,39 @@ def text_sources(
          )
          direct[n + "norm"] = _norm(gguf, g + "ssm_norm.weight", False)
      if mtp:
@@ -19901,6 +20514,26 @@ index 23174618a8c4fefb292d10f1247057cfbe4ceb28..445c51be0b8dd7941752a83c97eb2a02
      return encoded, direct
  
  
+@@ -513,6 +536,7 @@ def _companions(model, recipe, sources) -> None:
+     """Vision from the mmproj GGUF in the official formats; DFlash2 as the official recipe."""
+ 
+     vision = _vision_source(model, sources) if "vision" in model.components else None
++    blocks = draft_blocks(model, sources["dflash2"]) if "dflash2" in model.components else {}
+     for name, parameter in model.parameters.items():
+         if name.startswith("vision/"):
+             source = model.source(name, vision)
+@@ -528,6 +552,11 @@ def _companions(model, recipe, sources) -> None:
+                     source=source,
+                 )
+         elif name.startswith(("dflash/", "dflash2/")) and parameter.projection:
++            if name in blocks:
++                source = blocks[name]
++                recipe.assign(name, format=source.read_encoded(0, 1).format,
++                              method=import_encoded, source=source, activation_policy="AllowA8")
++                continue
+             if name.endswith(
+                 (
+                     "/attention_conv/kernel_projection",
 diff --git a/tools/convert/ternary.py b/tools/convert/ternary.py
 index 204dda382192976fcdb89849ba9dcff701baa275..66a2c33803585445f82729fc32f2e4072d869e2b 100644
 --- a/tools/convert/ternary.py
