@@ -292,7 +292,14 @@ Feature switches disable only dependent controls. Disabled values stay in browse
 and personal templates but are omitted from preview/start payloads. SSD controls its path
 and budget; LRFU controls decay and candidate fraction, while score aggregation stays
 independent. Vision controls image budget and encoder placement; thinking-off disables
-the thinking budget. The MTP switch controls draft length, adaptive MTP and N-gram overrides;
+the thinking budget. NInfer also exposes default reasoning effort and preservation of
+closed-turn assistant reasoning. Thinking-off disables and omits the effort override
+while retaining its draft value; preserving past reasoning is independent of the current
+thinking switch. These two controls are currently NInfer-only. The JSON bridge preserves
+typed native arrays; its native-option allowlist is unchanged by the direct script's
+`WorkerArgsFile` support.
+
+The MTP switch controls draft length, adaptive MTP and N-gram overrides;
 turning it off preserves all of their values while omitting them from preview/start payloads.
 It is browser state only (`MtpEnabled`), so no new worker argument is needed. Existing
 drafts/templates without the switch infer its state from a positive `MtpDrafts` value.

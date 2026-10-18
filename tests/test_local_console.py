@@ -100,6 +100,26 @@ class ConsoleTests(unittest.TestCase):
             console.normalize(self.config, self.controller.backends)
 
     @unittest.skipUnless(os.name == 'nt', 'Windows canonical launcher')
+    def test_ninfer_thinking_and_native_array_survive_json_bridge(self):
+        worker = Path(self.tmp.name) / 'worker.exe'; worker.touch()
+        model = Path(self.tmp.name) / 'model with spaces.ninfer'; model.touch()
+        self.config['parameters'].update(Model=str(model), Worker=str(worker),
+            Gpu='GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29', ThinkingBudget=256,
+            ReasoningEffort='medium', PreserveThinking=True, WorkerArgs=['--threads', '2'])
+        argv = self.controller.plan(self.config)['argv']
+        self.assertEqual(argv[-2:], ['--threads', '2'])
+        self.assertEqual(argv[argv.index('--default-reasoning-effort') + 1], 'medium')
+        self.assertEqual(argv[argv.index('--default-thinking-budget') + 1], '256')
+        self.assertIn('--preserve-thinking', argv)
+        self.assertEqual(list(Path(self.tmp.name).glob('*.json')), [])
+        for overrides in ({'ReasoningEffort': 'bad'}, {'ThinkingMode': 'off'},
+                          {'Backend': 'llamacpp'}, {'PreserveThinking': 'true'}):
+            bad = json.loads(json.dumps(self.config))
+            bad['parameters'].update(overrides)
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                console.normalize(bad, self.controller.backends)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows canonical launcher')
     def test_registered_worker_default_and_explicit_override(self):
         model = Path(self.tmp.name) / 'test.ninfer'; model.touch()
         worker = Path(self.tmp.name) / 'installed worker.exe'; worker.touch()

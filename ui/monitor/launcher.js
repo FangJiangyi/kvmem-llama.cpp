@@ -241,6 +241,7 @@
     for(const key of ['LrfuLambda','LrfuTopFraction'])dependency(key,lrfu,tr('先开启 LRFU。','Enable LRFU first.'));
     for(const key of ['VisionTokens','VisionResidency'])dependency(key,vision,tr('先开启图像输入。','Enable vision input first.'));
     dependency('ThinkingBudget',get('ThinkingMode')?.value!=='off',tr('默认思考模式已关闭；重新开启或选择默认后可设置预算。','Default thinking is off. Select on or default to set a budget.'));
+    dependency('ReasoningEffort',get('ThinkingMode')?.value!=='off',tr('默认思考模式已关闭；选择默认后可设置思考强度。','Default thinking is off. Select default to set reasoning effort.'));
     const mtpEnabled=!!get('MtpEnabled')?.checked&&!get('MtpEnabled').disabled;
     dependency('MtpDrafts',mtpEnabled,tr('先开启 MTP。','Enable MTP first.'));
     if(get('MtpDrafts'))get('MtpDrafts').required=mtpEnabled;
@@ -627,6 +628,10 @@
     const thinking=field(panels[2],{ThinkingMode:'default',...p},'ThinkingMode','默认思考模式','Default thinking mode','text',[['default',tr('沿用引擎 / 模型默认','Use engine / model default')],['on',tr('开启','On')],['off',tr('关闭','Off')]],n?['NInfer 启动参数支持默认与关闭；显式开启由聊天请求选择，仍需模型支持。','NInfer supports default/off at startup; explicit thinking-on belongs to chat requests and requires model support.']:['llama.cpp 当前默认关闭；开启仍需模型与模板支持。聊天请求可以覆盖此默认值。','llama.cpp currently defaults to off. Enabling requires model/template support; chat requests can override this default.']);
     if(n){thinking.querySelector('[value=on]').disabled=true;thinking.querySelector('[value=on]').textContent=tr('开启 · 由聊天请求设置','On · Set by chat request');}
     field(panels[2],p,'ThinkingBudget','默认思考预算（可选）','Default thinking budget (optional)','number',null,['限制思考阶段的 token 数；留空使用引擎默认值','Limits thinking tokens; leave empty for the engine default'],!n);
+    field(panels[2],p,'ReasoningEffort','默认思考强度（可选）','Default reasoning effort (optional)','text',[
+      ['',tr('沿用引擎 / 模型默认','Use engine / model default')],...['none','minimal','low','medium','high','xhigh','max'].map(x=>[x,x])
+    ],['NInfer 的默认思考强度，具体支持取决于模型；与思考 token 预算分别设置。','NInfer default reasoning effort; supported levels depend on the model. Separate from the thinking-token budget.'],!n);
+    field(panels[2],p,'PreserveThinking','保留历史思考','Preserve previous reasoning','checkbox',null,['在后续提示中保留已结束轮次的 assistant 思考内容。','Retain closed-turn assistant reasoning in later prompts.'],!n);
     field(panels[3],p,'Vision','启用图像输入','Enable vision','checkbox',null,['需要模型及配套资源支持','Requires compatible model and resources'],l);
     field(panels[3],p,'VisionTokens','图像 token 上限（可选）','Image token limit (optional)','number',null,['开启图像输入时生效。','Applies when vision input is enabled.'],l);field(panels[3],{VisionResidency:'resident',...p},'VisionResidency','图像编码器存放位置','Vision encoder placement','text',[['resident','GPU'],['cpu','CPU']],['开启图像输入时生效；关闭后保留原选择。','Applies when vision input is enabled; the selection is retained when off.'],l);
     templateFileField(panels[3],p);

@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding=$false)]
 param(
     [Parameter(Mandatory)][ValidateSet('llamacpp', 'ninfer')][string]$Backend,
     [string]$Model,
@@ -13,6 +13,8 @@ param(
     [ValidateSet('off', 'error', 'warning', 'info', 'trace', 'debug')][string]$LogLevel,
     [string]$ChatTemplateFile,
     [ValidateSet('default', 'on', 'off')][string]$ThinkingMode = 'default',
+    [ValidateSet('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')][string]$ReasoningEffort,
+    [switch]$PreserveThinking,
     [ValidateRange(256, 2147483647)][int]$Context = 262144,
     [ValidateRange(128, 2147483647)][int]$Budget = 32768,
     [ValidateRange(64, 2147483647)][int]$Reserve = 1024,
@@ -42,13 +44,16 @@ param(
     [ValidateSet('mean', 'max')][string]$ScoreAggregation = 'max',
     [string]$DiskPath,
     [ValidateRange(0, 1048576)][int]$DiskMiB = 4096,
-    [string[]]$WorkerArgs = @(),
+    [AllowEmptyCollection()][AllowEmptyString()][string[]]$WorkerArgs = @(),
+    [string]$WorkerArgsFile,
     [switch]$Describe,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [Parameter(ValueFromRemainingArguments=$true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$WorkerArgsTail = @()
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'native-process.ps1')
+$WorkerArgs = Resolve-KVMemWorkerArgs $PSBoundParameters $WorkerArgsTail
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $capabilities = @{
     backend = $Backend; model_format = if ($Backend -eq 'ninfer') { '.ninfer' } else { '.gguf' }
@@ -97,6 +102,8 @@ foreach ($setting in @(
     @('LogLevel', '^(-lv|--verbosity|--log-verbosity|--log-level)(=|$)'),
     @('ChatTemplateFile', '^--chat-template(-file)?(=|$)'),
     @('ThinkingMode', '^--(enable-thinking|no-think(ing)?)(=|$)'),
+    @('ReasoningEffort', '^--default-reasoning-effort(=|$)'),
+    @('PreserveThinking', '^--preserve-thinking(=|$)'),
     @('Concurrency', '^(-np|--parallel|--max-concurrency)(=|$)')
 )) {
     if ($PSBoundParameters.ContainsKey($setting[0]) -and @($WorkerArgs | Where-Object { $_ -match $setting[1] }).Count) {
@@ -109,6 +116,10 @@ if ($ChatTemplateFile) {
 }
 if ($Backend -eq 'ninfer' -and $ThinkingMode -eq 'on') {
     throw 'NInfer has no native thinking-on startup override; use default or off (requests can select thinking)'
+}
+if ($Backend -eq 'ninfer' -and $ThinkingMode -eq 'off' -and
+    ($ReasoningEffort -or @($WorkerArgs | Where-Object { $_ -match '^--default-reasoning-effort(=|$)' }).Count)) {
+    throw 'ReasoningEffort conflicts with ThinkingMode off'
 }
 if (@($WorkerArgs | Where-Object { $_ -match '^--(no-)?kvmem($|-(budget|gen-reserve|host-mib|sessions|sink-tokens|recent-tokens|lrfu|lrfu-lambda|lrfu-top-frac|score-agg)(=|$))' }).Count) {
     throw 'KVMem common options are owned by the launcher; use its named parameters instead of WorkerArgs'
@@ -191,6 +202,8 @@ if ($Backend -eq 'ninfer') {
     if ($FastPrefill) { $nativeArgs += '--fast-prefill-kernel' }
     if ($Vision) { $nativeArgs += @('--vision', '--vision-residency', $VisionResidency, '--vision-max-merged', "$VisionTokens") }
     if ($ThinkingBudget -gt 0) { $nativeArgs += @('--default-thinking-budget', "$ThinkingBudget") }
+    if ($ReasoningEffort) { $nativeArgs += @('--default-reasoning-effort', $ReasoningEffort) }
+    if ($PreserveThinking) { $nativeArgs += '--preserve-thinking' }
 } else {
     # Legacy KvType still sets both sides. Explicit K/V values override that base;
     # emit separate native flags when either independent value was requested.
@@ -210,7 +223,7 @@ if ($Backend -eq 'ninfer') {
     }
     if ($Concurrency -gt 4) { throw 'llama.cpp Concurrency must be 1..4' }
     if ($Concurrency -gt 1 -and $DiskPath) { throw 'llama.cpp concurrent requests currently require SSD cache disabled' }
-    foreach ($name in @('StageLayers', 'MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'ThinkingBudget')) {
+    foreach ($name in @('StageLayers', 'MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'ThinkingBudget', 'ReasoningEffort', 'PreserveThinking')) {
         if ($PSBoundParameters.ContainsKey($name)) { throw "-$name configures ninfer; use llama native options in -WorkerArgs" }
     }
     $nativeArgs = @('-m', $Model, '--host', $ListenHost, '--port', "$Port", '-c', "$Context",

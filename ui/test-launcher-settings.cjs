@@ -16,7 +16,7 @@ module.exports = async function settingsChecks({browser,base,info}) {
   HostMiB:256,Prefill:128,MaxTokens:128,Port:18499,ListenHost:'127.0.0.1',SinkTokens:128,RecentTokens:64,
   RetainedSessions:1,KvType:'int8',DiskEnabled:true,DiskPath:'C:/cache/ui fixture',DiskMiB:512,
   NoLrfu:false,LrfuLambda:0.4,LrfuTopFraction:0.8,ScoreAggregation:'max',MtpDrafts:4,AdaptiveMtp:true,
-  NgramDrafts:8,NgramMinMatch:6,Vision:true,VisionTokens:512,VisionResidency:'cpu',ThinkingMode:'default',ThinkingBudget:512,
+  NgramDrafts:8,NgramMinMatch:6,Vision:true,VisionTokens:512,VisionResidency:'cpu',ThinkingMode:'default',ThinkingBudget:512,ReasoningEffort:'medium',PreserveThinking:true,
  }}};
  await page.route('**/api/launcher/info',route=>route.fulfill({json:fixture}));
  await page.route('**/api/launcher/status',route=>route.fulfill({json:{state:'stopped'}}));
@@ -98,7 +98,8 @@ module.exports = async function settingsChecks({browser,base,info}) {
   assert.equal(draft.parameters.AdaptiveMtp,true);assert.equal(draft.parameters.NgramDrafts,8);assert.equal(draft.parameters.FastPrefill,true);
   assert.equal(draft.parameters.MtpEnabled,false);assert.equal(draft.parameters.MtpDrafts,4);
   const inactive=await preview();
-  for(const key of ['DiskEnabled','DiskPath','DiskMiB','LrfuLambda','LrfuTopFraction','VisionTokens','VisionResidency','ThinkingBudget','MtpEnabled','MtpDrafts','AdaptiveMtp','NgramDrafts','NgramMinMatch','FastPrefill','StageLayers'])assert.equal(Object.hasOwn(inactive,key),false,'inactive override omitted: '+key);
+  for(const key of ['DiskEnabled','DiskPath','DiskMiB','LrfuLambda','LrfuTopFraction','VisionTokens','VisionResidency','ThinkingBudget','ReasoningEffort','MtpEnabled','MtpDrafts','AdaptiveMtp','NgramDrafts','NgramMinMatch','FastPrefill','StageLayers'])assert.equal(Object.hasOwn(inactive,key),false,'inactive override omitted: '+key);
+  assert.equal(inactive.PreserveThinking,true,'preserving past reasoning is independent of the current thinking switch');
   assert.equal(inactive.NoLrfu,true);assert.equal(inactive.ScoreAggregation,'max');assert.equal(inactive.ThinkingMode,'off');
   assert.equal(inactive.ApiKey,secret);assert.equal(inactive.ModelAlias,'UI friendly model');assert.equal(inactive.LogLevel,'debug');
   assert.equal(inactive.ChatTemplateFile,'C:/templates/ui fixture.jinja');assert.equal(inactive.RetainedSessions,1);
@@ -122,10 +123,12 @@ module.exports = async function settingsChecks({browser,base,info}) {
   await field('Backend').selectOption('llamacpp');
   await field('Model').fill('C:/models/ui fixture.gguf');await page.locator('[data-gpu-choice]').first().check();
   await disabled(['Vision','VisionTokens','VisionResidency','ThinkingBudget','MtpEnabled','MtpDrafts','AdaptiveMtp','StageLayers']);
+  await disabled(['ReasoningEffort','PreserveThinking']);
   await group(0);await field('DiskEnabled').check();await field('DiskPath').fill('C:/cache/llama fixture');await field('DiskMiB').fill('512');
   await group(4);await field('Concurrency').fill('2');await disabled(['DiskEnabled','DiskPath','DiskMiB']);
   assert.equal(await field('DiskEnabled').isChecked(),true,'incompatible concurrency preserves SSD choice');
   const parallel=await preview();assert.equal(parallel.Concurrency,2);assert.equal(Object.hasOwn(parallel,'DiskPath'),false);
+  assert.equal(Object.hasOwn(parallel,'ReasoningEffort'),false);assert.equal(Object.hasOwn(parallel,'PreserveThinking'),false);
   await field('Concurrency').fill('1');await disabled(['DiskEnabled','DiskPath','DiskMiB'],false);
   const serial=await preview();assert.equal(serial.DiskPath,'C:/cache/llama fixture');assert.equal(serial.DiskMiB,512);assert.equal(Object.hasOwn(serial,'DiskEnabled'),false);
   await field('Backend').selectOption('ninfer');await disabled(['DiskPath'],false);await disabled(['LrfuLambda','VisionTokens','ThinkingBudget','AdaptiveMtp']);
@@ -135,6 +138,7 @@ module.exports = async function settingsChecks({browser,base,info}) {
   await group(2);await field('ThinkingMode').selectOption('default');
   await group(3);await field('Vision').check();await disabled(['VisionTokens','VisionResidency','ThinkingBudget'],false);
   const active=await preview();
+  assert.equal(active.ReasoningEffort,'medium');assert.equal(active.PreserveThinking,true);
   assert.equal(active.MtpDrafts,4);assert.equal(Object.hasOwn(active,'MtpEnabled'),false,'the switch is browser state, not a new backend argument');
   for(const [key,value] of Object.entries({DiskMiB:512,LrfuLambda:0.4,LrfuTopFraction:0.8,VisionTokens:512,VisionResidency:'cpu',ThinkingBudget:512,AdaptiveMtp:true,NgramDrafts:8,NgramMinMatch:6,FastPrefill:true}))assert.equal(active[key],value,'reactivated '+key);
   assert.equal(Object.hasOwn(active,'NoLrfu'),false,'enabled LRFU uses the positive default');
