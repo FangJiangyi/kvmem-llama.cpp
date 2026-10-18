@@ -34,7 +34,7 @@ class WorkerArgsTests(unittest.TestCase):
                 '-Worker', sys.executable, '-Gpu', 'GPU-test']
         if entry == 'start-backend.ps1':
             args += ['-Backend', 'ninfer']
-        else:
+        elif entry == 'start-ninfer.ps1':
             args += ['-NoVision', '-MtpDrafts', '0']
         if dry:
             args += ['-DryRun']
@@ -108,6 +108,30 @@ class WorkerArgsTests(unittest.TestCase):
                     self.assertIn('--preserve-thinking', argv)
                     self.assertEqual(argv[argv.index('--model-id') + 1], 'two words')
                     self.assertNotIn('test-only-key', json.dumps(plan))
+
+    def test_dflash2_profile_reaches_the_child_without_mtp_adaptation(self):
+        expected = {
+            '--max-context': '262144', '--kvmem-budget': '36864',
+            '--kvmem-gen-reserve': '10240', '--kvmem-host-mib': '12288',
+            '--prefill-chunk': '256', '--draft-tokens': '5',
+            '--ngram-draft-tokens': '0', '--cuda-graph-allowance-mib': '64',
+            '--kv-dtype': 'int8', '--vision-residency': 'cpu',
+            '--vision-max-merged': '1024', '--max-concurrency': '1',
+        }
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                result = self.plan(self.run_launcher(shell, 'start-dflash2.ps1', [], dry=False))
+                argv = result['received']
+                for flag, value in expected.items():
+                    self.assertEqual(argv[argv.index(flag) + 1], value, flag)
+                spec = len(argv) - 1 - argv[::-1].index('--spec')
+                self.assertEqual(argv[spec + 1], 'dflash2')
+                self.assertIn('--gdn-state-fp16', argv)
+                self.assertNotIn('--adaptive-mtp', argv)
+                self.assertEqual(result['gpu'], 'GPU-test')
+                override = self.plan(self.run_launcher(shell, 'start-dflash2.ps1', ['-Context', '131072', '-Port', '18201']))
+                self.assertEqual(override['argv'][override['argv'].index('--max-context') + 1], '131072')
+                self.assertEqual(override['argv'][override['argv'].index('--port') + 1], '18201')
 
 
 if __name__ == '__main__':

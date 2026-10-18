@@ -77,4 +77,92 @@ dominated by roughly 17.3 seconds to the first long-text response token. Peak de
 Two repeats establish this Task 1 observation, not a general speedup. Different sampled output
 lengths affect short-answer and whole-conversation comparisons. The capped code output does not
 establish complete HTML correctness. Long-context selection/eviction, 256K recall and the
-contributor's wider performance claims remain unverified.
+contributor's wider performance claims remain unverified by Task 1.
+
+### Five-draft follow-up
+
+Two additional fresh processes each run one warmup and one measured Task 1 conversation at
+five drafts, with the same model, sampler and settings above. The measured long-text, image and
+capped-code rates are **73.09, 81.63 and 83.07 tok/s**. Relative to MTP3 these are +33.7%, +29.1%
+and +14.6%; the capped-code rate improves 10.4% over DFlash2-3. Both image answers identify all
+three shapes. Median conversation time is 27.86 seconds against MTP3's 29.32, with different
+sampled response lengths. Peak VRAM is 14673 MiB. Width five follows the three/seven campaign;
+this is not a fully interleaved width sweep.
+
+[Task 1 measurements](benchmarks/dflash2-task1-20261018.json) retain the per-stage samples,
+settings, model provenance and binary hashes. The five-draft binary differs from the earlier
+measurements only by a CLI help-text rebuild; inference arithmetic is unchanged.
+
+## Selected 16 GB startup profile
+
+The source and Windows worker packages provide `scripts/windows/start-dflash2.ps1`:
+
+```powershell
+.\scripts\windows\start-dflash2.ps1 -Model 'D:/models/iq3-dflash2.ninfer' `
+  -Gpu 'GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c' -DryRun
+```
+
+Omit `-DryRun` to start; source builds also supply `-Worker` for their `ninfer-serve.exe`.
+The artifact must contain the IQ3 target and imported DFlash2 companion. The profile selects
+logical context **262144**, history budget **36864**, generation reserve **10240**, five fixed
+DFlash2 drafts, no n-gram, INT8 KV, FP16 GDN, prefill 256, CPU Vision capped at 1024 merged tokens,
+one lane/session, 12 GiB host payload, LRFU lambda 0.5/top fraction 0.9/max aggregation,
+sink/recent 12288/1024, no SSD and a **64 MiB CUDA Graph planning allowance**. Startup output and
+thinking defaults remain 16384/8192. `-Context` can override the logical context.
+
+On the RTX 5060 Ti the short text and CPU image probes pass; graph capture actually consumes
+30 MiB. CPU image first-token latency is about **50.3 seconds**. This profile therefore does not
+retain Task 1's resident-GPU Vision latency. FP16 reduces the model's recurrent state by 72 MiB
+per state slot; increasing total physical KV from 44K to 46K adds 66 MiB, leaving the dedicated
+VRAM peak only about 6 MiB lower. Lowering the graph allowance from 128 to 64 MiB alone changes
+the admission budget, not the actual captured allocation. CUDA reports 198 MiB free after startup,
+which must not be confused with the larger difference between NVML usage and the card's capacity.
+These are launch-specific settings; the general `start-ninfer.ps1` defaults are unchanged.
+
+## Task 2 at 256K, 2026-10-18
+
+Both DFlash2 profiles replay the **same 33 saved RC3 Task 2 request payloads**, apart from the
+model alias and conversation ID. The RC3 run is the existing 2026-10-13 calibrated cohort;
+**RC3 was not rerun**. All three use the same RTX 5060 Ti UUID above, INT8 KV, no n-gram,
+one lane/session, seed 42, temperature 1, top-p 0.95/top-k 20, output cap 512 and thinking budget
+128. Both DFlash2 runs use the same executable SHA-256
+`c21de70477dc8381a064c48c1d02535db4e3cfb034e5d29e642693d3142d43c3`, built from the PR #150
+implementation (`1dd0a987a8c04fc206e876b926ebd50dc598c589` locally). Later backend merges were
+not part of these measurements. No filler was removed from either DFlash2 replay.
+
+| Measurement | RC3 MTP3 | DFlash2-5, 32K+12K / FP32 | DFlash2-5, 36K+10K / FP16 |
+|---|---:|---:|---:|
+| Completed requests / tool rounds with prefix hits | 33 / 32 | 33 / 32 | 33 / 32 |
+| Final input tokens | 261522 | 261411 | 261411 |
+| All-response output tokens | 15293 | 13785 | 15567 |
+| Tool aggregate decode, historical formula, tok/s | 53.24 | 61.62 | 62.07 |
+| Tool aggregate decode, interval formula, tok/s | 53.13 | 61.47 | 61.94 |
+| Last eight tool rounds, historical formula, tok/s | 56.54 | 59.49 | 56.14 |
+| Final response decode, tok/s | 44.87 | 84.32 | 67.52 |
+| Final first-token latency, seconds | 16.87 | 17.27 | 16.80 |
+| Sum of request wall time, seconds | 855.10 | 775.75 | 813.53 |
+| Peak dedicated VRAM, MiB | 14456 | 15187 | 15181 |
+| Minimum available system RAM, MiB | 8.78 | 344.21 | 286.31 |
+
+The historical aggregate is `sum(output_tokens) / sum(decode_seconds)` over the 32 tool rounds;
+the interval formula subtracts one output token per request for every cohort. The latest aggregate
+improves 16.6% over RC3 and 0.7% over the earlier DFlash2 configuration, while the last-eight-round
+aggregate regresses 0.7% against RC3 and 5.6% against the earlier DFlash2 configuration. Total time
+improves 4.9% over RC3 but regresses 4.9% against the earlier DFlash2 run; the latest run generates
+12.9% more output tokens than that earlier run. Each long-context profile has only one complete run.
+
+This is a configuration comparison. RC3 uses 36K+16K, prefill 512, FP16 GDN, resident GPU Vision
+and sink/recent 5120/5120, plus an older backend/frontend. The two DFlash2 profiles change B/R,
+GDN precision and graph planning allowance together. Different outputs and severe system RAM
+pressure affect wall time and decode rates; neither result isolates the effect of FP16 GDN.
+The Task 2 fixture contains text/tool results, so it does not measure CPU image encoding.
+
+**Operational completion is not completion of the requested code task.** All final responses hit
+the 512-token cap. RC3 starts a Python utility before truncation; both DFlash2 final responses
+remain in batch/checksum lists without reaching code. Some intermediate responses repeat prose.
+The final decode-rate difference is therefore not a speedup for equivalent generated code. No
+complete utility, 16K-token generation, or independent 256K recall/selection oracle was validated.
+
+[Task 2 records](benchmarks/dflash2-task2-256k-20261018.json) include all 99 request timing/usage
+rows, fixture hashes, binary/source provenance, per-context-band aggregates, settings and output
+observations. The historical baseline is retained as recorded.

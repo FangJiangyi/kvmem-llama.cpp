@@ -124,6 +124,25 @@ $env:CUDA_VISIBLE_DEVICES = '0'
   --enable-thinking --reasoning-budget 4096 --verbosity 3
 ```
 
+## NInfer DFlash2 16 GB profile / DFlash2 16 GB 配置
+
+`start-dflash2.ps1` selects the qualified IQ3_S + DFlash2 profile: 256K logical context,
+36K history + 10K generation reserve, five drafts, FP16 GDN state, INT8 KV, CPU Vision,
+no n-gram and a 64 MiB CUDA Graph planning allowance. Supply a `.ninfer` artifact containing
+the DFlash2 companion. The shared NInfer startup defaults are unchanged.
+
+`start-dflash2.ps1` 使用已验证的 IQ3_S + DFlash2 配置：256K 上下文、36K+10K、五草稿、
+FP16 GDN、INT8 KV、CPU 视觉、关闭 ngram、CUDA 图规划余量64 MiB。模型必须包含 DFlash2 草稿模块。
+
+```powershell
+.\scripts\windows\start-dflash2.ps1 -Model 'D:/models/iq3-dflash2.ninfer' `
+  -Gpu 'GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c' -DryRun
+```
+
+Omit `-DryRun` to start. Source builds can also pass `-Worker` with the path to `ninfer-serve.exe`.
+See [measurements and limits](../../docs/dflash2-kvmem-integration.md), including the capped Task 2
+output and CPU image-encoding latency.
+
 ## Requirements and validation / 环境与验证
 
 Windows x64, an NVIDIA driver compatible with the selected package, Microsoft Visual C++ x64 runtime,
