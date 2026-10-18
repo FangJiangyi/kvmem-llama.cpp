@@ -157,6 +157,7 @@ public:
     }
     size_t free_slot_count() const { return free_slots_.size(); }
     void truncate_cached(uint32_t n_past);
+    bool restore_checkpoint_tail();
     void occupy_in(llama_kv_cache * cache, uint32_t block_id);
     llama_pos model_pos(uint32_t logical_pos) const;
     bool remove_logical(llama_context * ctx, llama_pos begin, llama_pos end);

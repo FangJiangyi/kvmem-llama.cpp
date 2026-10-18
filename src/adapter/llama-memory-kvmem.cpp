@@ -1150,6 +1150,54 @@ void llama_memory_kvmem::truncate_cached(uint32_t n_past) {
     }
 }
 
+bool llama_memory_kvmem::restore_checkpoint_tail() {
+    if (!native_contract_supported()) return true;
+    const uint32_t rows = store_n_tokens();
+    if (rows % block_tokens_) {
+        const uint32_t id = rows / block_tokens_;
+        if (!gpu_kv_complete(id, kv_)) {
+            // An append only writes the new rows. Restore the old partial
+            // block before its length grows or its empty prefix looks live.
+            if (store().blocks()[id].gpu_slot >= 0 || !packed_complete(id, rows % block_tokens_)) return false;
+            run_native_transaction(store().pick_prefill_pressure_blocks({id}), NativePurpose::Pressure);
+            if (trace_) kvmem_diag("KVMEM_TRACE checkpoint_tail_restore row=%u block=%u\n", rows, id);
+        }
+    }
+    const auto view = attention_view(false);
+    if (view.valid) return true;
+    if (mtp_) {
+        std::vector<uint32_t> repair;
+        for (const auto & b : store().blocks()) {
+            if (b.gpu_slot < 0 || !b.n_tokens) continue;
+            if (!gpu_kv_complete(b.block_id, kv_)) return false;
+            if (!gpu_kv_complete(b.block_id, mtp_->get_kv())) {
+                if (!mtp_->checkpoint_block_packed(b.block_id, b.n_tokens)) return false;
+                repair.push_back(b.block_id);
+            }
+        }
+        for (uint32_t id : repair) {
+            if (!mtp_->restore_checkpoint_block(id)) return false;
+        }
+        if (attention_view(false).valid) return true;
+    }
+    if (!view.valid && trace_) {
+        uint32_t resident = 0;
+        for (const auto & b : store().blocks()) {
+            if (b.gpu_slot < 0 || !b.n_tokens) continue;
+            resident += b.n_tokens;
+            const bool target_ok = gpu_kv_complete(b.block_id, kv_);
+            const bool draft_ok = !mtp_ || gpu_kv_complete(b.block_id, mtp_->get_kv());
+            if (!target_ok || !draft_ok) kvmem_diag(
+                "KVMEM_TRACE checkpoint_gap row=%u block=%u slot=%d tokens=%u target_ok=%d draft_ok=%d draft_packed=%d\n",
+                rows, b.block_id, b.gpu_slot, b.n_tokens, int(target_ok), int(draft_ok),
+                int(mtp_ && mtp_->checkpoint_block_packed(b.block_id, b.n_tokens)));
+        }
+        kvmem_diag("KVMEM_TRACE checkpoint_gap_summary row=%u resident=%u target_used=%u draft_used=%u\n",
+            rows, resident, kv_->get_cells(0).get_used(), mtp_ ? mtp_->get_kv()->get_cells(0).get_used() : 0);
+    }
+    return view.valid;
+}
+
 void llama_memory_kvmem::set_replay(bool replay) {
     if (replay && !replay_) {
         harvest_flush();
@@ -5175,6 +5223,11 @@ void llama_kvmem_truncate_cached(uint32_t n_past) {
     if (llama_memory_kvmem * mem = kvmem_capture_active()) {
         mem->truncate_cached(n_past);
     }
+}
+
+bool llama_kvmem_restore_checkpoint_tail() {
+    if (auto * mem = kvmem_capture_active()) return mem->restore_checkpoint_tail();
+    return true;
 }
 
 llama_pos llama_kvmem_recr_pos_max(void) {

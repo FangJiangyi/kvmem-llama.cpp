@@ -77,6 +77,12 @@ public:
     // previous conversation's, so such a block is left out for as long as its
     // slot is tainted (see slot_tainted_ below).
     void follow_retrieval();
+    bool checkpoint_block_packed(uint32_t id, uint32_t tokens) const {
+        return raw_ && raw_->has_k_gpu(id, 0, tokens) && raw_->has_v_gpu(id, 0, tokens);
+    }
+    // Checkpoint recovery must have both packed planes. It cannot use the
+    // optional-context fallback in follow_retrieval().
+    bool restore_checkpoint_block(uint32_t block_id);
     void detach_target() { target_ = nullptr; }
 
     // Retrieval layout: keep native MTP GPU KV for blocks that still sit
