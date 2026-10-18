@@ -2,13 +2,12 @@
 """Build the lightweight or full UI from pinned llama.cpp sources."""
 import argparse
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
-import tarfile
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -20,7 +19,7 @@ def prepare_workspace(directory, root, full_ui):
     directory, root = directory.resolve(), root.resolve()
     if directory == root or directory in root.parents:
         raise ValueError('--build-dir must not be the repository or one of its parents')
-    for name in ('llama.cpp', 'src', 'tools', 'scripts', 'tests', 'ui', '.git'):
+    for name in ('backends', 'kvmem', 'src', 'tools', 'scripts', 'tests', 'ui', '.git'):
         source = root / name
         if directory == source or source in directory.parents:
             raise ValueError('--build-dir must not be inside source directories')
@@ -44,6 +43,15 @@ def remove_generated_directory(path, work):
         shutil.rmtree(path)
 
 
+def copy_monitor(output):
+    """Keep static monitoring assets identical for both serving backends."""
+    source = ROOT / 'ui/monitor'
+    shutil.copytree(source, output / 'monitor', dirs_exist_ok=True)
+    manifest = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in sorted(source.iterdir()) if p.is_file()}
+    (output / 'monitor-build.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--build-dir', type=Path, default=ROOT / 'build-ui')
@@ -51,23 +59,26 @@ def main():
     ap.add_argument('--full-ui', action='store_true',
                     help='build the complete upstream UI instead of the lightweight entry points')
     # 中文：--full-ui 构建完整上游 UI（含 PWA/manifest）；默认仅构建轻量级入口页面
+    ap.add_argument('--monitor-only', action='store_true',
+                    help='copy the monitor into an existing built UI; no Node.js required')
     args = ap.parse_args()
+    if args.monitor_only:
+        if args.full_ui:
+            ap.error('--monitor-only cannot be combined with --full-ui')
+        if not (args.output / 'index.html').is_file():
+            ap.error('--monitor-only requires an existing built UI with index.html')
+        copy_monitor(args.output)
+        print(args.output.resolve() / 'monitor')
+        return
     work = prepare_workspace(args.build_dir, ROOT, args.full_ui)
-    submodule_test = subprocess.run(['git', 'rev-parse', '--verify', 'HEAD:llama.cpp'], cwd=ROOT, capture_output=True)
-    if (ROOT / '.git').exists() and submodule_test.returncode == 0:
-        pin = subprocess.check_output(['git', 'rev-parse', 'HEAD:llama.cpp'], cwd=ROOT, text=True).strip()
-        data = subprocess.check_output(['git', 'archive', pin, 'tools/ui'], cwd=ROOT / 'llama.cpp')
-        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
-            for member in archive.getmembers():
-                if member.isfile():
-                    name = Path(member.name).relative_to('tools/ui')
-                    dest = work / name
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(archive.extractfile(member).read())
-    else:
-        pin = 'bundled-source'
-        shutil.copytree(ROOT / 'llama.cpp/tools/ui', work, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns('node_modules', 'dist', '.svelte-kit', '.git'))
+    subprocess.run([sys.executable, str(ROOT / 'scripts/prepare-backends.py'),
+                    '--backend', 'llamacpp'], check=True)
+    backend = ROOT / 'backends/llamacpp'
+    versions = json.loads((ROOT / 'backends/versions.json').read_text(encoding='utf-8'))
+    pin = versions['llamacpp']['base_commit']
+    # Copy prepared sources: git archive of the parent omits submodules and their patches.
+    shutil.copytree(backend / 'tools/ui', work, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns('node_modules', 'dist', '.svelte-kit', '.git'))
     if not args.full_ui:
         remove_generated_directory(work / 'src/routes', work)
         shutil.copytree(ROOT / 'ui/lightweight', work / 'src/routes')
@@ -99,7 +110,8 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     shutil.copytree(work / 'dist', output, dirs_exist_ok=True)
-    shutil.copy2(ROOT / 'llama.cpp/LICENSE', output / 'llama.cpp-LICENSE')
+    shutil.copy2(ROOT / 'backends/llamacpp/LICENSE', output / 'llama.cpp-LICENSE')
+    copy_monitor(output)
     if args.full_ui:
         # Full UI: hash upstream src/lib entry files so the manifest records whether the page is genuinely upstream-built.
         # 中文：full-ui 模式下对上游 src/lib 的 TS 入口文件做哈希，写入 manifest 以证明产物非轻量构建
@@ -110,7 +122,8 @@ def main():
         entry_files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                        for p in sorted((ROOT / 'ui/lightweight').iterdir()) if p.is_file()}
         mode = 'lightweight'
-    manifest = {'llama_commit': pin, 'mode': mode, 'entry_files': entry_files}
+    manifest = {'llama_commit': pin, 'backend_patch_sha256': versions['llamacpp']['patch_sha256'],
+                'mode': mode, 'entry_files': entry_files}
     (output / 'ui-build.json').write_text(json.dumps(manifest, indent=2) + '\n')
     print(output)
 

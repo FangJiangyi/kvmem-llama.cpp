@@ -73,8 +73,16 @@ inline bool kvmem_mount_ui(httplib::Server & server, const std::string & request
         try {
             public_paths->insert("/");
             for (const auto & entry : fs::recursive_directory_iterator(directory)) {
-                if (entry.is_regular_file())
+                if (entry.is_regular_file()) {
                     public_paths->insert("/" + entry.path().lexically_relative(directory).generic_string());
+                    if (entry.path().filename() == "index.html") {
+                        const auto relative = entry.path().parent_path().lexically_relative(directory).generic_string();
+                        if (relative != ".") {
+                            public_paths->insert("/" + relative + "/");
+                            public_paths->insert("/" + relative);
+                        }
+                    }
+                }
             }
         } catch (const fs::filesystem_error & e) {
             fprintf(stderr, "cannot enumerate UI assets: %s\n", e.what());

@@ -71,11 +71,11 @@ def main():
     shutil.copy2(args.cudart_license, package / 'licenses/NVIDIA-CUDA.txt')
     shutil.copy2(args.cublas_license, package / 'licenses/NVIDIA-cuBLAS.txt')
     shutil.copy2(args.apache_license, package / 'licenses/Apache-2.0.txt')
-    shutil.copy2(source / 'llama.cpp/LICENSE', package / 'licenses/llama.cpp-MIT.txt')
+    shutil.copy2(source / 'backends/llamacpp/LICENSE', package / 'licenses/llama.cpp-MIT.txt')
     # Retain vendored dependencies' license texts and embedded notices in the source archive.
-    for p in (source / 'llama.cpp/vendor').rglob('*'):
+    for p in (source / 'backends/llamacpp/vendor').rglob('*'):
         if p.is_file() and p.name.lower().startswith(('license', 'copying', 'notice')):
-            dest = package / 'licenses/vendor' / p.relative_to(source / 'llama.cpp/vendor')
+            dest = package / 'licenses/vendor' / p.relative_to(source / 'backends/llamacpp/vendor')
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(p, dest)
     (package / 'licenses/KVMem-NOTICE.txt').write_text(
@@ -84,7 +84,7 @@ def main():
         'Host glibc, libstdc++, libgcc, libgomp and NVIDIA driver are not redistributed.\n')
     shutil.copy2(args.source_manifest, package / 'provenance/source-manifest.json')
     cache = (build / 'CMakeCache.txt').read_text()
-    options = dict(re.findall(r'^((?:BUILD_SHARED_LIBS|CMAKE_(?:CUDA|CXX)_COMPILER|CMAKE_BUILD_TYPE|CMAKE_CUDA_ARCHITECTURES|GGML_NATIVE|GGML_AVX\w*|GGML_FMA|GGML_F16C|GGML_BMI2|GGML_CUDA_FA_ALL_QUANTS)):[^=]+=(.*)$', cache, re.M))
+    options = dict(re.findall(r'^((?:BUILD_SHARED_LIBS|CMAKE_(?:CUDA|CXX)_COMPILER|CMAKE_BUILD_TYPE|CMAKE_CUDA_ARCHITECTURES|GGML_NATIVE|GGML_AVX\w*|GGML_FMA|GGML_F16C|GGML_BMI2|GGML_CUDA_FA_QUANTS)):[^=]+=(.*)$', cache, re.M))
     info = {'status': 'experimental-build', 'version': (source / 'VERSION').read_text().strip(),
             'base_commit': manifest['base_commit'],
             'llama_commit': manifest['llama_commit'], 'source_archive_sha256': sha(args.source_archive),

@@ -8,6 +8,17 @@ builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 
 class BuilderTest(unittest.TestCase):
+    def test_monitor_packaging_preserves_chat_and_includes_licenses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            (output / 'index.html').write_text('existing chat')
+            builder.copy_monitor(output)
+            self.assertEqual((output / 'index.html').read_text(), 'existing chat')
+            for name in ('index.html', 'monitor.js', 'monitor.css', 'launcher.js', 'launcher.css', 'i18n.js', 'Strata-LICENSE.txt',
+                         'Outfit-OFL.txt', 'outfit-latin-wght.woff2'):
+                self.assertTrue((output / 'monitor' / name).is_file())
+            self.assertTrue((output / 'monitor-build.json').is_file())
+
     def test_platform_commands(self):
         self.assertEqual(builder.node_command('npm', 'posix'), 'npm')
         self.assertEqual(builder.node_command('npx', 'posix'), 'npx')
@@ -20,7 +31,8 @@ class BuilderTest(unittest.TestCase):
             root.mkdir()
             sentinel = root / 'keep.txt'
             sentinel.write_text('keep')
-            for path in [root, root.parent, root / 'llama.cpp/tools/ui', root / 'scripts/cache']:
+            for path in [root, root.parent, root / 'backends/llamacpp/tools/ui',
+                         root / 'backends/ninfer', root / 'kvmem/include', root / 'scripts/cache']:
                 with self.assertRaises(ValueError):
                     builder.prepare_workspace(path, root, True)
             unowned = root / 'build-ui/full'

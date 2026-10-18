@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <cmath>
 #include <stdexcept>
 #include <vector>
 
@@ -1128,7 +1130,57 @@ static void test_media_suffix_over_budget() {
     CHECK(threw);
 }
 
+static void test_lrfu_round_and_restore() {
+    KvMemStoreConfig cfg;
+    cfg.block_tokens = 64; cfg.select_budget = 192; cfg.sink_blocks = 1; cfg.recent_blocks = 1;
+    cfg.lrfu = true; cfg.lrfu_top_fraction = 1;
+    KvMemStore store(cfg); store.register_append(384);
+    store.begin_retrieval_round();
+    std::vector<double> scores(6, -0.2); scores[2] = 0.8; scores[3] = 0.6;
+    store.set_retrieval_scores(scores);
+    const auto chosen = store.pick_topk_blocks();
+    CHECK(chosen == std::vector<uint32_t>({0, 2, 5}));
+    CHECK(store.retrieval_checkpoint().scores->empty()); // Preview is not a committed update.
+    CHECK(store.commit_retrieval_round());
+    const auto first = store.retrieval_checkpoint();
+    store.begin_retrieval_round(); scores[2] = 0.1; scores[3] = 0.3;
+    store.set_retrieval_scores(scores); store.set_retrieval_scores(scores);
+    CHECK(std::abs(store.selection_score(2) - 0.5) < 1e-12);
+    CHECK(std::abs(store.selection_score(3) - 0.6) < 1e-12);
+    CHECK(store.commit_retrieval_round());
+    scores[2] = 100; store.set_retrieval_scores(scores);
+    const auto second = store.retrieval_checkpoint();
+    CHECK(store.pick_topk_blocks() == std::vector<uint32_t>({0, 3, 5}));
+    CHECK(!store.commit_retrieval_round());
+    store.restore_retrieval(first);
+    CHECK(store.pick_topk_blocks() == chosen); // Rollback removes rewards on surviving blocks too.
+    std::vector<uint8_t> bytes;
+    kvmem::SnapshotWriter out([&](const void* p, size_t n) {
+        const auto* first = static_cast<const uint8_t*>(p); bytes.insert(bytes.end(), first, first + n);
+    });
+    kvmem::write_lrfu(out, first);
+    const std::vector<kvmem::LrfuPoint> points{{384, first}, {512, second}};
+    CHECK(kvmem::lrfu_input_point(128, 64, first).state.scores->size() == 2);
+    CHECK(kvmem::lrfu_prefix_points(points, 384, 384) == 0);
+    CHECK(kvmem::lrfu_prefix_points(points, 512, 512) == 1);
+    CHECK(kvmem::lrfu_prefix_points(points, 500, 600) == 1);
+    CHECK(kvmem::lrfu_prefix_points(points, 600, 600) == 2);
+    kvmem::write_lrfu_points(out, points);
+    size_t offset = 0;
+    kvmem::SnapshotReader in([&](void* p, size_t n) { std::memcpy(p, bytes.data() + offset, n); offset += n; }, bytes.size());
+    store.restore_retrieval(kvmem::read_lrfu(in, 6));
+    const auto restored_points = kvmem::read_lrfu_points(in, 512, 64);
+    CHECK(restored_points.size() == 2 && restored_points.back().state.round == 2);
+    CHECK(*restored_points.front().state.scores == *first.scores);
+    scores[3] = 100; store.set_retrieval_scores(scores);
+    CHECK(store.pick_topk_blocks() == chosen); // Restored committed round cannot be rewarded twice.
+    store.register_append(64); CHECK(store.selection_score(6) == 0);
+    kvmem::LrfuHistory half(0, 0.5); half.begin_round(); half.preview({-3, -2, -1, -1}); half.commit();
+    CHECK(half.score(0) == 0 && half.score(1) == 0 && half.score(2) == -1 && half.score(3) == -1);
+}
+
 int main() {
+    test_lrfu_round_and_restore();
     test_media_suffix_over_budget();
     test_media_groups_with_shared_boundary();
     test_register_append();

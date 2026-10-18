@@ -1,0 +1,271 @@
+#Requires -Version 5.1
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)][ValidateSet('llamacpp', 'ninfer')][string]$Backend,
+    [string]$Model,
+    [string]$Worker,
+    [string]$Gpu = $env:CUDA_VISIBLE_DEVICES,
+    [uint32[]]$StageLayers = @(),
+    [ValidateRange(1, 65535)][int]$Port = 18200,
+    [string]$ListenHost = '127.0.0.1',
+    [ValidateLength(1, 512)][ValidatePattern('^[A-Za-z0-9._~+/-]+=*$')][string]$ApiKey,
+    [string]$ModelAlias,
+    [ValidateSet('off', 'error', 'warning', 'info', 'trace', 'debug')][string]$LogLevel,
+    [string]$ChatTemplateFile,
+    [ValidateSet('default', 'on', 'off')][string]$ThinkingMode = 'default',
+    [ValidateRange(256, 2147483647)][int]$Context = 262144,
+    [ValidateRange(128, 2147483647)][int]$Budget = 32768,
+    [ValidateRange(64, 2147483647)][int]$Reserve = 1024,
+    [ValidateRange(1, 1048576)][int]$HostMiB = 16384,
+    [ValidateRange(128, 2147483647)][int]$Prefill = 128,
+    [ValidateRange(1, 2147483647)][int]$MaxTokens = 1024,
+    [string]$KvType,
+    [string]$KvTypeK,
+    [string]$KvTypeV,
+    [ValidateRange(0, 15)][int]$MtpDrafts = 0,
+    [switch]$AdaptiveMtp,
+    [switch]$FastPrefill,
+    [ValidateRange(0, 63)][int]$NgramDrafts = 0,
+    [ValidateRange(4, 64)][int]$NgramMinMatch = 12,
+    [ValidateRange(1, 8)][int]$Concurrency = 1,
+    [ValidateRange(1, 16)][int]$RetainedSessions = 4,
+    [switch]$Vision,
+    [ValidateSet('resident', 'cpu')][string]$VisionResidency = 'resident',
+    [ValidateRange(1, 16384)][int]$VisionTokens = 1024,
+    [ValidateSet('off', 'auto')][string]$DeviceProfile = 'off',
+    [ValidateRange(0, 2147483647)][int]$ThinkingBudget = 0,
+    [ValidateRange(0, 2147483647)][int]$SinkTokens = 12288,
+    [ValidateRange(0, 2147483647)][int]$RecentTokens = 1024,
+    [switch]$NoLrfu,
+    [ValidateRange(0.0, 1.0)][double]$LrfuLambda = 0.5,
+    [ValidateScript({ $_ -gt 0 -and $_ -le 1 })][double]$LrfuTopFraction = 0.9,
+    [ValidateSet('mean', 'max')][string]$ScoreAggregation = 'max',
+    [string]$DiskPath,
+    [ValidateRange(0, 1048576)][int]$DiskMiB = 4096,
+    [string[]]$WorkerArgs = @(),
+    [switch]$Describe,
+    [switch]$DryRun
+)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'native-process.ps1')
+$root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
+$capabilities = @{
+    backend = $Backend; model_format = if ($Backend -eq 'ninfer') { '.ninfer' } else { '.gguf' }
+    text_chat = $true; streaming = $true; history_reuse = $true
+    speculative_decoding = $true; multimodal = $true
+    concurrent_requests = $true; disk_restore = $true
+    active_kv_tiering = $true; ssd_persistence = 'process'
+    cross_backend_kv_transfer = $false
+}
+if ($Backend -eq 'ninfer') {
+    $capabilities.disk_restore = $false
+    $capabilities.supported_combinations = @{
+        text = @{ kv = @('bf16', 'int8', 'fp8', 'nvfp4', 'k8v4', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8'); max_concurrency = 8; mtp_drafts = @(0..15) }
+        images = @{ kv = @('bf16', 'int8', 'fp8', 'nvfp4', 'k8v4', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8'); max_concurrency = 8; residency = @('resident', 'cpu') }
+        rk8v4 = @{ max_concurrency = 8; text_only = $false }
+        cold_disk = @{ enabled = $false; reason = 'replaced_by_process_local_tiering' }
+        active_disk = @{ enabled = $true; shared_active_idle_quota = $true; max_concurrency = 8 }
+        ngram = @{ max_concurrency = 8; text_only = $false; image_kv = @('bf16', 'int8', 'fp8', 'nvfp4', 'k8v4', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8'); requires_mtp = $true; max_drafts = 63; concurrent_max_drafts = 15; wide_max_concurrency = 1; concurrent_width_policy = 'clamp_to_15' }
+        lookup_ngram = @{ enabled = $false; reason = 'legacy_path_disabled'; replacement = '--ngram-draft-tokens --ngram-min-match' }
+        adaptive_mtp = @{ max_concurrency = 8; text_only = $false; ngram = $true; ngram_max_concurrency = 8; ngram_concurrent_max_drafts = 15; cold_disk = $false }
+        fast_prefill = @{ kv = @('int8', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8'); text_only = $false; max_concurrency = 8; residency = @('resident', 'cpu'); cold_disk = $false }
+        multi_gpu = @{ mode = 'layer'; max_devices = 8; vision_residency = @('resident', 'cpu'); mtp = $true; host_history = 'shared' }
+        video = $false
+    }
+    if (@($WorkerArgs | Where-Object { $_ -match '^--lookup-ngram(=|$)' }).Count) {
+        throw 'KVMem disables legacy --lookup-ngram; use -NgramDrafts and -NgramMinMatch'
+    }
+}
+if ($Describe) { $capabilities | ConvertTo-Json -Depth 4; return }
+if (@($WorkerArgs | Where-Object { $_ -match '^--kvmem-disk-(path|mib)(=|$)' }).Count) {
+    throw 'Use -DiskPath and -DiskMiB to configure shared active/idle SSD storage'
+}
+if (($PSBoundParameters.ContainsKey('DiskPath') -or ($PSBoundParameters.ContainsKey('DiskMiB') -and $DiskMiB -gt 0)) -and
+    [string]::IsNullOrWhiteSpace($DiskPath)) {
+    throw 'SSD storage requires a nonempty -DiskPath'
+}
+if ($DiskPath -and $DiskMiB -eq 0) { throw 'Omit -DiskPath when -DiskMiB is 0 (SSD disabled)' }
+if (@('KvType', 'KvTypeK', 'KvTypeV') | Where-Object { $PSBoundParameters.ContainsKey($_) }) {
+    if (@($WorkerArgs | Where-Object { $_ -match '^(--kv-dtype|--cache-type-[kv]|-ct[kv])(=|$)' }).Count) {
+        throw 'Use -KvType/-KvTypeK/-KvTypeV without conflicting KV options in WorkerArgs'
+    }
+}
+foreach ($setting in @(
+    @('ApiKey', '^--api-key(-file)?(=|$)'),
+    @('ModelAlias', '^(-a|--alias|--model-id)(=|$)'),
+    @('LogLevel', '^(-lv|--verbosity|--log-verbosity|--log-level)(=|$)'),
+    @('ChatTemplateFile', '^--chat-template(-file)?(=|$)'),
+    @('ThinkingMode', '^--(enable-thinking|no-think(ing)?)(=|$)'),
+    @('Concurrency', '^(-np|--parallel|--max-concurrency)(=|$)')
+)) {
+    if ($PSBoundParameters.ContainsKey($setting[0]) -and @($WorkerArgs | Where-Object { $_ -match $setting[1] }).Count) {
+        throw "Use -$($setting[0]) without a conflicting native option in WorkerArgs"
+    }
+}
+if ($ChatTemplateFile) {
+    if (!(Test-Path -LiteralPath $ChatTemplateFile -PathType Leaf)) { throw 'ChatTemplateFile must be an existing template file' }
+    $ChatTemplateFile = (Resolve-Path -LiteralPath $ChatTemplateFile).Path
+}
+if ($Backend -eq 'ninfer' -and $ThinkingMode -eq 'on') {
+    throw 'NInfer has no native thinking-on startup override; use default or off (requests can select thinking)'
+}
+if (@($WorkerArgs | Where-Object { $_ -match '^--(no-)?kvmem($|-(budget|gen-reserve|host-mib|sessions|sink-tokens|recent-tokens|lrfu|lrfu-lambda|lrfu-top-frac|score-agg)(=|$))' }).Count) {
+    throw 'KVMem common options are owned by the launcher; use its named parameters instead of WorkerArgs'
+}
+if (!$Worker) {
+    $file = if ($Backend -eq 'ninfer') { 'ninfer-kvmem-server.exe' } else { 'llama-kvmem-server.exe' }
+    $Worker = Join-Path $root "workers/$Backend/$file"
+}
+foreach ($entry in @(@('Worker', $Worker), @('Model', $Model))) {
+    if (!$entry[1] -or !(Test-Path -LiteralPath $entry[1] -PathType Leaf)) {
+        throw "Missing $($entry[0]) file: $($entry[1])"
+    }
+}
+$Worker = (Resolve-Path -LiteralPath $Worker).Path
+$Model = (Resolve-Path -LiteralPath $Model).Path
+if ([IO.Path]::GetExtension($Model) -ne $capabilities.model_format) {
+    throw "$Backend requires a $($capabilities.model_format) model"
+}
+if (!$Gpu -or $Gpu.Trim() -eq '-1') { throw 'Select a GPU UUID with -Gpu or CUDA_VISIBLE_DEVICES' }
+if ($Backend -eq 'ninfer') {
+    $gpuIds = @($Gpu.Split(',') | ForEach-Object { $_.Trim() })
+    if ($gpuIds.Count -gt 8 -or @($gpuIds | Where-Object { !$_ -or $_ -eq '-1' }).Count -or
+        @($gpuIds | Select-Object -Unique).Count -ne $gpuIds.Count) {
+        throw 'ninfer requires 1..8 distinct GPU UUIDs in -Gpu, in stage order'
+    }
+    $Gpu = $gpuIds -join ','
+    if ($StageLayers.Count -and ($gpuIds.Count -lt 2 -or $StageLayers.Count -ne $gpuIds.Count -or
+        @($StageLayers | Where-Object { $_ -eq 0 }).Count)) {
+        throw 'StageLayers requires one positive layer count per GPU and at least two GPUs'
+    }
+    if (@($WorkerArgs | Where-Object { $_ -match '^--(device|devices|stage-layers)(=|$)' }).Count) {
+        throw 'Use -Gpu and -StageLayers to configure ninfer devices'
+    }
+    if (@($WorkerArgs | Where-Object { $_ -match '^--default-thinking-budget(=|$)' }).Count) {
+        throw 'Use -ThinkingBudget to configure the ninfer thinking budget'
+    }
+}
+if (!$KvType) { $KvType = if ($Backend -eq 'ninfer') { 'int8' } else { 'q8_0' } }
+if ($Backend -eq 'ninfer') {
+    if ($PSBoundParameters.ContainsKey('KvTypeK') -or $PSBoundParameters.ContainsKey('KvTypeV')) {
+        throw 'KvTypeK and KvTypeV configure llama.cpp only; use KvType for ninfer'
+    }
+    $requestedNgramDrafts = $NgramDrafts
+    if ($Concurrency -gt 1 -and $NgramDrafts -gt 15) { $NgramDrafts = 15 }
+    if ($Budget % 64 -or $Reserve % 64 -or $Prefill % 128 -or $Prefill -gt $Reserve -or
+        ([long]$Budget + $Reserve) -gt $Context -or $KvType -notin @('bf16', 'int8', 'fp8', 'nvfp4', 'k8v4', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8')) {
+        throw 'ninfer requires B/R aligned to 64, prefill aligned to 128 and <= R, B+R <= Context, bf16/int8/fp8/nvfp4/k8v4/rk8v4/rk4v4/rk4v4-e8/rk2v4-e8'
+    }
+    if ($AdaptiveMtp -and !$MtpDrafts) {
+        throw 'Adaptive MTP requires MTP; image, ngram and disk limits still apply'
+    }
+    if ($FastPrefill -and ($KvType -notin @('int8', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8'))) {
+        throw 'Fast prefill requires INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8'
+    }
+    if ($VisionResidency -ne 'resident' -and !$Vision) { throw 'CPU Vision requires -Vision' }
+    if ($RecentTokens -lt 64) { throw 'ninfer -RecentTokens must be at least 64 to keep the newest append page' }
+    $sinkBlocks = if ($SinkTokens -lt 64) { 1 } else { [int][Math]::Floor($SinkTokens / 64) }
+    $recentBlocks = [int][Math]::Floor($RecentTokens / 64)
+    if (($sinkBlocks + $recentBlocks) * 64 -gt $Budget) {
+        throw 'ninfer sink and recent tokens exceed -Budget after rounding down to 64-token pages'
+    }
+    if ($NgramDrafts -and (!$MtpDrafts -or
+        ([Math]::Max($MtpDrafts, $NgramDrafts) + $MtpDrafts) -gt $Reserve)) {
+        throw 'ngram requires MTP and reserve >= max(MTP drafts, effective ngram drafts) + MTP drafts'
+    }
+    if ($requestedNgramDrafts -ne $NgramDrafts) {
+        Write-Warning "NgramDrafts reduced from $requestedNgramDrafts to $NgramDrafts for Concurrency $Concurrency"
+    }
+    $nativeArgs = @($Model, '--host', $ListenHost, '--port', "$Port", '--max-context', "$Context",
+        '--max-concurrency', "$Concurrency", '--prefill-chunk', "$Prefill", '--default-max-tokens', "$MaxTokens",
+        '--kvmem-budget', "$Budget", '--kvmem-gen-reserve', "$Reserve", '--kvmem-host-mib', "$HostMiB",
+        '--kvmem-sink-tokens', "$SinkTokens", '--kvmem-recent-tokens', "$RecentTokens",
+        '--kvmem-sessions', "$RetainedSessions", '--kv-dtype', $KvType, '--device-profile', $DeviceProfile)
+    if ($gpuIds.Count -gt 1) { $nativeArgs += @('--devices', ((0..($gpuIds.Count - 1)) -join ',')) }
+    else { $nativeArgs += @('--device', '0') }
+    if ($StageLayers.Count) { $nativeArgs += @('--stage-layers', ($StageLayers -join ',')) }
+    if ($MtpDrafts) { $nativeArgs += @('--spec', 'mtp', '--draft-tokens', "$MtpDrafts",
+        '--ngram-draft-tokens', "$NgramDrafts", '--ngram-min-match', "$NgramMinMatch") }
+    if ($AdaptiveMtp) { $nativeArgs += '--adaptive-mtp' }
+    if ($FastPrefill) { $nativeArgs += '--fast-prefill-kernel' }
+    if ($Vision) { $nativeArgs += @('--vision', '--vision-residency', $VisionResidency, '--vision-max-merged', "$VisionTokens") }
+    if ($ThinkingBudget -gt 0) { $nativeArgs += @('--default-thinking-budget', "$ThinkingBudget") }
+} else {
+    # Legacy KvType still sets both sides. Explicit K/V values override that base;
+    # emit separate native flags when either independent value was requested.
+    $separateKv = $PSBoundParameters.ContainsKey('KvTypeK') -or $PSBoundParameters.ContainsKey('KvTypeV')
+    $effectiveK = if ($KvTypeK) { $KvTypeK } else { $KvType }
+    $effectiveV = if ($KvTypeV) { $KvTypeV } else { $KvType }
+    $aliases = @{ fp16='f16'; fp32='f32'; q8='q8_0'; q5='q5_0'; q4='q4_0' }
+    if ($aliases.ContainsKey($effectiveK)) { $effectiveK = $aliases[$effectiveK] }
+    if ($aliases.ContainsKey($effectiveV)) { $effectiveV = $aliases[$effectiveV] }
+    $quantized = @('q8_0', 'q5_0', 'q4_0')
+    $supported = $quantized + @('f16', 'f32')
+    if ($effectiveK -cnotin $supported -or $effectiveV -cnotin $supported) {
+        throw 'llama.cpp K/V types must use q8_0, q5_0, q4_0, f16 or f32'
+    }
+    if (($effectiveK -in $quantized) -ne ($effectiveV -in $quantized)) {
+        throw 'llama.cpp cannot mix floating-point and quantized K/V; choose q8_0/q5_0/q4_0 for both, or f16/f32 for both'
+    }
+    if ($Concurrency -gt 4) { throw 'llama.cpp Concurrency must be 1..4' }
+    if ($Concurrency -gt 1 -and $DiskPath) { throw 'llama.cpp concurrent requests currently require SSD cache disabled' }
+    foreach ($name in @('StageLayers', 'MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'ThinkingBudget')) {
+        if ($PSBoundParameters.ContainsKey($name)) { throw "-$name configures ninfer; use llama native options in -WorkerArgs" }
+    }
+    $nativeArgs = @('-m', $Model, '--host', $ListenHost, '--port', "$Port", '-c', "$Context",
+        '-n', "$MaxTokens", '--kvmem-budget', "$Budget", '--kvmem-gen-reserve', "$Reserve",
+        '-b', "$Prefill", '-ub', "$Prefill",
+        '--kvmem-sink-tokens', "$SinkTokens", '--kvmem-recent-tokens', "$RecentTokens")
+    if ($separateKv) { $nativeArgs += @('--cache-type-k', $effectiveK, '--cache-type-v', $effectiveV) }
+    else { $nativeArgs += @('--kv-dtype', $KvType) }
+    $nativeArgs += @('--kvmem-host-mib', "$HostMiB", '--kvmem-sessions', "$RetainedSessions")
+    if ($PSBoundParameters.ContainsKey('Concurrency')) { $nativeArgs += @('--parallel', "$Concurrency") }
+}
+if ($ApiKey) { $nativeArgs += @('--api-key', $ApiKey) }
+if ($ModelAlias) { $nativeArgs += @($(if ($Backend -eq 'ninfer') { '--model-id' } else { '--alias' }), $ModelAlias) }
+if ($ChatTemplateFile) { $nativeArgs += @($(if ($Backend -eq 'ninfer') { '--chat-template' } else { '--chat-template-file' }), $ChatTemplateFile) }
+if ($LogLevel) {
+    if ($Backend -eq 'ninfer') { $nativeArgs += @('--log-level', $LogLevel) }
+    else { $nativeArgs += @('--verbosity', "$(@{off=0; error=1; warning=2; info=3; trace=4; debug=5}[$LogLevel])") }
+}
+if ($ThinkingMode -eq 'off') { $nativeArgs += $(if ($Backend -eq 'ninfer') { '--no-thinking' } else { '--no-think' }) }
+if ($ThinkingMode -eq 'on') { $nativeArgs += '--enable-thinking' }
+$nativeArgs += '--kvmem'
+if ($DiskPath) { $nativeArgs += @('--kvmem-disk-path', $DiskPath, '--kvmem-disk-mib', "$DiskMiB") }
+# Use invariant decimals because both native parsers expect a dot.
+if (!$NoLrfu) {
+    $nativeArgs += @('--kvmem-lrfu',
+        '--kvmem-lrfu-lambda', $LrfuLambda.ToString('R', [Globalization.CultureInfo]::InvariantCulture),
+        '--kvmem-lrfu-top-frac', $LrfuTopFraction.ToString('R', [Globalization.CultureInfo]::InvariantCulture))
+}
+if ($NoLrfu) { $nativeArgs += '--no-kvmem-lrfu' }
+$nativeArgs += @('--kvmem-score-agg', $ScoreAggregation)
+$nativeArgs += $WorkerArgs
+if ($DryRun) {
+    $displayArgs = @($nativeArgs)
+    for ($i = 0; $i -lt $displayArgs.Count; $i++) {
+        if ($displayArgs[$i] -eq '--api-key' -and $i + 1 -lt $displayArgs.Count) {
+            $i++; $displayArgs[$i] = '<redacted>'
+        } elseif ($displayArgs[$i] -match '^--api-key=') { $displayArgs[$i] = '--api-key=<redacted>' }
+    }
+    @{ backend = $Backend; argv = @($Worker) + $displayArgs; capabilities = $capabilities
+       environment = @{ CUDA_VISIBLE_DEVICES = $Gpu; CUDA_DEVICE_ORDER = 'PCI_BUS_ID' } } |
+        ConvertTo-Json -Depth 6
+    return
+}
+$info = New-KVMemProcessInfo $Worker $nativeArgs
+$info.EnvironmentVariables['CUDA_VISIBLE_DEVICES'] = $Gpu
+$info.EnvironmentVariables['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
+$child = New-Object System.Diagnostics.Process
+$child.StartInfo = $info
+$started = $false
+try {
+    Write-Host "Starting $Backend at http://$ListenHost`:$Port/ (Ctrl+C to stop)"
+    $started = $child.Start()
+    while (!$child.WaitForExit(250)) {}
+    if ($child.ExitCode -ne 0) { throw "$Backend exited with code $($child.ExitCode)" }
+} finally {
+    if ($started -and !$child.HasExited) { $child.Kill(); $child.WaitForExit() }
+    $child.Dispose()
+}

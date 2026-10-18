@@ -37,8 +37,7 @@ fi
 export PATH="${rocm_bin}:${PATH}"
 export ROCM_PATH="${rocm}"
 
-# Replay the cumulative integration and RDNA2 quantized-KV FA fix.
-"${root}/scripts/apply-patches.sh"
+"${PYTHON:-python3}" "${root}/scripts/prepare-backends.py" --backend llamacpp
 
 configure_args=()
 target_args=()

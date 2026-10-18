@@ -1,6 +1,6 @@
 # 轻量 Web UI 接入设计
 
-状态：首版已实现并完成本地验证。基于当前 llama.cpp pin `b81c99b` 的 `tools/ui` 和 KVMem 自定义服务。使用和测试命令见 [ui/README.md](../ui/README.md)。
+状态：首版已实现并完成本地验证；当时基于 llama.cpp pin `b81c99b` 的 `tools/ui` 和 KVMem 自定义服务。当前 master 已迁移到 llama.cpp `v0.5.0`。使用和测试命令见 [ui/README.md](../ui/README.md)。
 
 目标是让用户启动 IQ3/IQ4 后直接在浏览器测试文本、思考与图片。复用上游页面组件和静态构建，不移植上游 server 的调度器，也不实现完整 UI 的后端功能。
 
@@ -156,11 +156,11 @@
 ## 源码依据
 
 - `tools/llama-kvmem-server.cpp`：当前路由、请求解析、互斥锁、SSE、断线检查与生成计时。
-- `tools/kvmem-multimodal-server.h`：前缀/检查点复用、缓存未命中重建与回滚。
-- `llama.cpp/tools/ui/src/lib/services/props.service.ts`、`models.service.ts`：页面初始化信息。
-- `llama.cpp/tools/ui/src/lib/services/chat.service.ts`：参数映射、SSE、控制/续流等上游依赖。
-- `llama.cpp/tools/ui/src/lib/constants/reasoning-effort.constants.ts`：上游 effort 到 token 预算的映射。
-- `llama.cpp/tools/ui/svelte.config.js`、`tools/server/server-http.cpp`：静态产物/hash 路由及 cpp-httplib 托管。
+- `tools/llama-kvmem-driver.cpp`：前缀/检查点复用、缓存未命中重建与回滚。
+- `backends/llamacpp/tools/ui/src/lib/services/props.service.ts`、`models.service.ts`：页面初始化信息。
+- `backends/llamacpp/tools/ui/src/lib/services/chat.service.ts`：参数映射、SSE、控制/续流等上游依赖。
+- `backends/llamacpp/tools/ui/src/lib/constants/reasoning-effort.constants.ts`：上游 effort 到 token 预算的映射。
+- `backends/llamacpp/tools/ui/svelte.config.js`、`tools/server/server-http.cpp`：静态产物/hash 路由及 cpp-httplib 托管。
 
 ## 首版验证记录
 

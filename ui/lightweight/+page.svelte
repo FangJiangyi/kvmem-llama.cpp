@@ -172,7 +172,7 @@
   <main>
     <header>
       <div><strong>{props?.model_name ?? '正在连接...'}</strong><small>{props ? `${props.default_generation_settings.n_ctx.toLocaleString()} 上下文 · ${props.modalities.vision ? '支持图片' : '文本'}` : ''}</small></div>
-      <div class="actions"><Button variant="outline" onclick={()=>settingsOpen=!settingsOpen}>参数</Button>{#if active}<Button variant="ghost" disabled={busy || loadingHistory} onclick={removeConversation}>删除对话</Button>{/if}</div>
+      <div class="actions"><a class="monitor-link" href="./monitor/" target="_blank" rel="noopener">监控 ↗</a><Button variant="outline" onclick={()=>settingsOpen=!settingsOpen}>参数</Button>{#if active}<Button variant="ghost" disabled={busy || loadingHistory} onclick={removeConversation}>删除对话</Button>{/if}</div>
     </header>
     {#if settingsOpen}
       <section class="settings" aria-label="生成参数">
@@ -218,6 +218,7 @@
 </div>
 
 <style>
+  .monitor-link{display:inline-flex;align-items:center;padding:0 10px;font-size:13px;color:#3267d6;white-space:nowrap}
   :global(body){margin:0;background:#f7f8fa;color:#20252e;font-family:system-ui,sans-serif}
   .shell{display:grid;grid-template-columns:240px minmax(0,1fr);min-height:100dvh}
   aside{padding:24px 16px;border-right:1px solid #e3e6eb;background:#eef1f5;display:flex;flex-direction:column;gap:20px;position:sticky;top:0;height:100dvh}

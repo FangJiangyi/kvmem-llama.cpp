@@ -1,0 +1,371 @@
+#Requires -Version 5.1
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$launcher = Join-Path $PSScriptRoot 'start-backend.ps1'
+$tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+$testDir = Join-Path $tempRoot ('kvmem-backend-test-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $testDir
+try {
+    foreach ($name in 'worker.exe', 'model with spaces.ninfer', 'model.gguf') {
+        [IO.File]::WriteAllText((Join-Path $testDir $name), 'dry-run fixture')
+    }
+    $common = @{ Worker = (Join-Path $testDir 'worker.exe'); Gpu = 'GPU-test'; DryRun = $true; WarningAction = 'SilentlyContinue' }
+    $template = Join-Path $testDir 'chat template.jinja'
+    [IO.File]::WriteAllText($template, 'test template')
+    foreach ($backend in 'llamacpp', 'ninfer') {
+        $model = Join-Path $testDir $(if ($backend -eq 'ninfer') { 'model with spaces.ninfer' } else { 'model.gguf' })
+        $plan = & $launcher @common -Backend $backend -Model $model -ApiKey 'test-key-123' `
+            -ModelAlias 'Friendly model' -ChatTemplateFile $template -LogLevel debug -ThinkingMode off -Concurrency 2 | ConvertFrom-Json
+        $aliasFlag = if ($backend -eq 'ninfer') { '--model-id' } else { '--alias' }
+        $templateFlag = if ($backend -eq 'ninfer') { '--chat-template' } else { '--chat-template-file' }
+        $parallelFlag = if ($backend -eq 'ninfer') { '--max-concurrency' } else { '--parallel' }
+        $thinkingFlag = if ($backend -eq 'ninfer') { '--no-thinking' } else { '--no-think' }
+        foreach ($pair in @(@($aliasFlag, 'Friendly model'), @($templateFlag, $template), @($parallelFlag, '2'), @('--api-key', '<redacted>'))) {
+            if ($plan.argv[[array]::IndexOf($plan.argv, $pair[0]) + 1] -ne $pair[1]) { throw 'Common UI field lost its native mapping' }
+        }
+        if ($plan.argv -notcontains $thinkingFlag -or $plan.argv -contains 'test-key-123') { throw 'Thinking mapping or preview redaction failed' }
+        foreach ($level in 'off', 'error', 'warning', 'info', 'trace', 'debug') {
+            $levels = & $launcher @common -Backend $backend -Model $model -LogLevel $level | ConvertFrom-Json
+            $flag = if ($backend -eq 'ninfer') { '--log-level' } else { '--verbosity' }
+            $expected = if ($backend -eq 'ninfer') { $level } else { "$(@{off=0; error=1; warning=2; info=3; trace=4; debug=5}[$level])" }
+            if ($levels.argv[[array]::IndexOf($levels.argv, $flag) + 1] -ne $expected) { throw 'Log level mapping changed native levels' }
+        }
+        $defaults = & $launcher @common -Backend $backend -Model $model -ThinkingMode default | ConvertFrom-Json
+        if (@($defaults.argv | Where-Object { $_ -match '^--(enable-thinking|no-think(ing)?)$' }).Count) { throw 'Default thinking must inherit the native default' }
+        foreach ($case in @(@{Concurrency=9}, @{ApiKey='two,keys'}, @{ChatTemplateFile=(Join-Path $testDir 'missing.jinja')},
+            @{ModelAlias='name'; WorkerArgs=@($aliasFlag, 'duplicate')})) {
+            $rejected = $false
+            try { $null = & $launcher @common -Backend $backend -Model $model @case } catch { $rejected = $true }
+            if (!$rejected) { throw 'Invalid or conflicting new service setting accepted' }
+        }
+    }
+    $thinkingOn = & $launcher @common -Backend llamacpp -Model (Join-Path $testDir 'model.gguf') -ThinkingMode on -Concurrency 4 | ConvertFrom-Json
+    if ($thinkingOn.argv -notcontains '--enable-thinking') { throw 'llama thinking-on mapping failed' }
+    $splitKv = & $launcher @common -Backend llamacpp -Model (Join-Path $testDir 'model.gguf') -KvTypeK q8_0 -KvTypeV q4_0 | ConvertFrom-Json
+    if ($splitKv.argv -contains '--kv-dtype' -or
+        $splitKv.argv[[array]::IndexOf($splitKv.argv, '--cache-type-k') + 1] -ne 'q8_0' -or
+        $splitKv.argv[[array]::IndexOf($splitKv.argv, '--cache-type-v') + 1] -ne 'q4_0') {
+        throw 'Independent K/V settings lost their separate native flags'
+    }
+    foreach ($case in @(
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); ThinkingMode='on'},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvTypeK='q8_0'},
+        @{Backend='llamacpp'; Model=(Join-Path $testDir 'model.gguf'); KvTypeK='q8_0'; KvTypeV='f16'},
+        @{Backend='llamacpp'; Model=(Join-Path $testDir 'model.gguf'); KvTypeK='q8_0'; WorkerArgs=@('--cache-type-v', 'q5_0')},
+        @{Backend='llamacpp'; Model=(Join-Path $testDir 'model.gguf'); Concurrency=5},
+        @{Backend='llamacpp'; Model=(Join-Path $testDir 'model.gguf'); Concurrency=2; DiskPath='cache'}
+    )) {
+        $rejected = $false
+        try { $null = & $launcher @common @case } catch { $rejected = $true }
+        if (!$rejected) { throw 'Unsupported thinking or concurrent SSD combination accepted' }
+    }
+    $native = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -WorkerArgs @('--chat-template', 'template with spaces.jinja') | ConvertFrom-Json
+    if ($native.backend -ne 'ninfer' -or $native.argv[1] -ne (Join-Path $testDir 'model with spaces.ninfer') -or
+        $native.argv[-1] -ne 'template with spaces.jinja' -or
+        $native.environment.CUDA_VISIBLE_DEVICES -ne 'GPU-test' -or !$native.capabilities.multimodal) {
+        throw 'ninfer dry-run lost model, argv, device or capability boundaries'
+    }
+    if ($native.capabilities.disk_restore -or $native.capabilities.supported_combinations.cold_disk.enabled -or
+        $native.capabilities.supported_combinations.adaptive_mtp.cold_disk -or
+        $native.argv -contains '--kvmem-disk-path' -or $native.argv -contains '--kvmem-disk-mib') {
+        throw 'ninfer advertised or enabled disabled cold snapshots'
+    }
+    if ($native.capabilities.supported_combinations.lookup_ngram.enabled -or
+        $native.capabilities.supported_combinations.lookup_ngram.reason -ne 'legacy_path_disabled') {
+        throw 'ninfer advertised disabled legacy lookup drafting'
+    }
+    foreach ($lookupArgs in @(
+        @('--lookup-ngram', '4'), @('--lookup-ngram=4'),
+        @('--lookup-ngram', '0'), @('--lookup-ngram=0'), @('--lookup-ngram')
+    )) {
+        foreach ($drafts in @(0, 3)) {
+            $disabled = $false
+            try {
+                $null = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+                    -MtpDrafts $drafts -NgramDrafts $(if ($drafts) { 15 } else { 0 }) -WorkerArgs $lookupArgs
+            } catch {
+                $disabled = $_.Exception.Message -match 'disables legacy --lookup-ngram.*-NgramDrafts'
+            }
+            if (!$disabled) { throw 'Launcher allowed disabled legacy lookup drafting' }
+        }
+    }
+    $dualArgs = $common.Clone()
+    $dualArgs.Gpu = ' GPU-second , GPU-first '
+    $dual = & $launcher @dualArgs -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -StageLayers 30,34 -Vision -VisionResidency cpu -MtpDrafts 3 | ConvertFrom-Json
+    if ($dual.environment.CUDA_VISIBLE_DEVICES -ne 'GPU-second,GPU-first' -or
+        $dual.argv -contains '--device' -or
+        $dual.argv[[array]::IndexOf($dual.argv, '--devices') + 1] -ne '0,1' -or
+        $dual.argv[[array]::IndexOf($dual.argv, '--stage-layers') + 1] -ne '30,34' -or
+        $dual.capabilities.supported_combinations.multi_gpu.mode -ne 'layer') {
+        throw 'Multi-GPU launcher lost UUID order, stage split or capability'
+    }
+    foreach ($badGpu in @('GPU-test,GPU-test', 'GPU-test,', ',GPU-test', '-1,GPU-test', '0,1,2,3,4,5,6,7,8')) {
+        $argsBad = $common.Clone(); $argsBad.Gpu = $badGpu
+        $rejected = $false
+        try { $null = & $launcher @argsBad -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') }
+        catch { $rejected = $_.Exception.Message -match 'distinct GPU UUIDs' }
+        if (!$rejected) { throw 'Invalid multi-GPU list accepted' }
+    }
+    foreach ($badSplit in @(@(64), @(0,64), @(20,20,24))) {
+        $rejected = $false
+        try { $null = & $launcher @dualArgs -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') -StageLayers $badSplit }
+        catch { $rejected = $_.Exception.Message -match 'one positive layer count per GPU' }
+        if (!$rejected) { throw 'Invalid stage layer counts accepted' }
+    }
+    foreach ($diskCase in @(
+        @{DiskPath=''}, @{DiskMiB=4096},
+        @{WorkerArgs=@('--kvmem-disk-path', 'cache')},
+        @{WorkerArgs=@('--kvmem-disk-mib', '0')},
+        @{WorkerArgs=@('--kvmem-disk-path=cache')}
+    )) {
+        $disabled = $false
+        try { $null = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') @diskCase }
+        catch { $disabled = $_.Exception.Message -match 'DiskPath|DiskMiB' }
+        if (!$disabled) { throw 'Launcher allowed ambiguous SSD configuration' }
+    }
+    foreach ($backend in 'ninfer', 'llamacpp') {
+        $model = if ($backend -eq 'ninfer') { 'model with spaces.ninfer' } else { 'model.gguf' }
+        $disk = & $launcher @common -Backend $backend -Model (Join-Path $testDir $model) `
+            -DiskPath 'cache with spaces' -DiskMiB 1024 -HostMiB 512 | ConvertFrom-Json
+        if ($disk.argv[[array]::IndexOf($disk.argv, '--kvmem-disk-path') + 1] -ne 'cache with spaces' -or
+            $disk.argv[[array]::IndexOf($disk.argv, '--kvmem-disk-mib') + 1] -ne '1024' -or
+            $disk.argv[[array]::IndexOf($disk.argv, '--kvmem-host-mib') + 1] -ne '512' -or
+            !$disk.capabilities.active_kv_tiering -or $disk.capabilities.ssd_persistence -ne 'process') {
+            throw 'Shared H/D launcher mapping changed ownership or path boundaries'
+        }
+    }
+    $fastDisk = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -FastPrefill -DiskPath 'cache' -MtpDrafts 3 -AdaptiveMtp | ConvertFrom-Json
+    if ($fastDisk.argv -notcontains '--kvmem-disk-path' -or $fastDisk.argv -notcontains '--fast-prefill-kernel') {
+        throw 'SSD mapping incorrectly rejected independent prefill configuration'
+    }
+    $mtp = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -MtpDrafts 3 -Concurrency 2 -RetainedSessions 8 | ConvertFrom-Json
+    if ($mtp.argv -notcontains '--ngram-draft-tokens' -or $mtp.argv -notcontains '--kvmem-sessions' -or
+        $mtp.capabilities.supported_combinations.text.max_concurrency -ne 8) { throw 'MTP/concurrency mapping failed' }
+    foreach ($drafts in @(1, 4, 5, 15)) {
+        $fixed = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+            -MtpDrafts $drafts | ConvertFrom-Json
+        if ($fixed.argv[[array]::IndexOf($fixed.argv, '--draft-tokens') + 1] -ne "$drafts" -or
+            $fixed.capabilities.supported_combinations.text.mtp_drafts -notcontains $drafts) {
+            throw 'Fixed MTP draft count mapping failed'
+        }
+    }
+    $adaptive = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -MtpDrafts 15 -AdaptiveMtp | ConvertFrom-Json
+    if ($adaptive.argv -notcontains '--adaptive-mtp') { throw 'Adaptive MTP mapping failed' }
+    $fast = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -KvType rk8v4 -Concurrency 4 -FastPrefill -MtpDrafts 15 -AdaptiveMtp | ConvertFrom-Json
+    if ($fast.argv -notcontains '--fast-prefill-kernel') { throw 'Fast RK8V4 concurrency mapping failed' }
+    foreach ($format in 'int8', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8') {
+        foreach ($lanes in 1..8) {
+            foreach ($residency in 'resident', 'cpu') {
+                $fastImage = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+                    -KvType $format -Concurrency $lanes -FastPrefill -Vision -VisionResidency $residency `
+                    -MtpDrafts 3 -AdaptiveMtp -NgramDrafts 31 | ConvertFrom-Json
+                if ($fastImage.argv -notcontains '--fast-prefill-kernel' -or
+                    $fastImage.argv -notcontains '--vision' -or
+                    $fastImage.argv[[array]::IndexOf($fastImage.argv, '--kv-dtype') + 1] -ne $format -or
+                    $fastImage.argv[[array]::IndexOf($fastImage.argv, '--ngram-draft-tokens') + 1] -ne "$(if($lanes -gt 1){15}else{31})" -or
+                    $fastImage.capabilities.supported_combinations.fast_prefill.text_only -or
+                    $fastImage.capabilities.supported_combinations.fast_prefill.max_concurrency -ne 8 -or
+                    $fastImage.capabilities.supported_combinations.fast_prefill.kv -notcontains $format) {
+                    throw 'Fast image/concurrency/ngram mapping or capability failed'
+                }
+            }
+        }
+    }
+    $cpu = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -KvType rk8v4 -Vision -VisionResidency cpu -MtpDrafts 15 -AdaptiveMtp | ConvertFrom-Json
+    if ($cpu.argv[[array]::IndexOf($cpu.argv, '--vision-residency') + 1] -ne 'cpu') { throw 'CPU Vision mapping failed' }
+    foreach ($residency in 'resident', 'cpu') {
+        foreach ($lanes in 1..8) {
+            $imageLanes = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+                -Vision -VisionResidency $residency -Concurrency $lanes -MtpDrafts 3 -AdaptiveMtp | ConvertFrom-Json
+            if ($imageLanes.argv[[array]::IndexOf($imageLanes.argv, '--max-concurrency') + 1] -ne "$lanes" -or
+                $imageLanes.argv[[array]::IndexOf($imageLanes.argv, '--vision-max-merged') + 1] -ne '1024' -or
+                $imageLanes.argv[[array]::IndexOf($imageLanes.argv, '--ngram-draft-tokens') + 1] -ne '0' -or
+                $imageLanes.capabilities.supported_combinations.images.max_concurrency -ne 8) {
+                throw 'Concurrent Vision mapping or default preprocessing limit failed'
+            }
+        }
+    }
+    $copy = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -MtpDrafts 3 -NgramDrafts 31 -KvType rk8v4 | ConvertFrom-Json
+    if ($copy.argv[[array]::IndexOf($copy.argv, '--ngram-draft-tokens') + 1] -ne '31') {
+        throw 'ngram mapping failed'
+    }
+    if ($copy.argv -contains '--default-thinking-budget') { throw 'thinking budget was enabled by default' }
+    $budget = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -ThinkingBudget 8192 | ConvertFrom-Json
+    if ($budget.argv[[array]::IndexOf($budget.argv, '--default-thinking-budget') + 1] -ne '8192') {
+        throw 'thinking budget mapping failed'
+    }
+    $budgetRejected = $false
+    try {
+        $null = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+            -WorkerArgs @('--default-thinking-budget', '8192')
+    } catch {
+        $budgetRejected = $_.Exception.Message -match 'Use -ThinkingBudget'
+    }
+    if (!$budgetRejected) { throw 'native thinking-budget argument was accepted' }
+    if ($copy.argv[[array]::IndexOf($copy.argv, '--kvmem-sink-tokens') + 1] -ne '12288' -or
+        $copy.argv[[array]::IndexOf($copy.argv, '--kvmem-recent-tokens') + 1] -ne '1024') {
+        throw 'default sink/recent windows were not 12288/1024 tokens'
+    }
+    $windows = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -SinkTokens 128 -RecentTokens 127 | ConvertFrom-Json
+    if ($windows.argv[[array]::IndexOf($windows.argv, '--kvmem-sink-tokens') + 1] -ne '128' -or
+        $windows.argv[[array]::IndexOf($windows.argv, '--kvmem-recent-tokens') + 1] -ne '127') {
+        throw 'sink/recent mapping failed'
+    }
+    foreach ($recent in @(0, 1, 63)) {
+        $recentRejected = $false
+        try {
+            $null = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+                -RecentTokens $recent
+        } catch { $recentRejected = $true }
+        if (!$recentRejected) { throw 'recent smaller than one 64-token page was accepted' }
+    }
+    $windowsRejected = $false
+    try {
+        $null = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+            -WorkerArgs @('--kvmem-recent-tokens', '128')
+    } catch {
+        $windowsRejected = $_.Exception.Message -match 'KVMem common options are owned by the launcher'
+    }
+    if (!$windowsRejected) { throw 'native sink/recent argument was accepted' }
+    $windowsFit = $false
+    try {
+        $null = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+            -Budget 128 -RecentTokens 128
+    } catch {
+        $windowsFit = $_.Exception.Message -match 'exceed -Budget'
+    }
+    if (!$windowsFit) { throw 'sink plus recent larger than the budget was accepted' }
+    $llama = & $launcher @common -Backend llamacpp -Model (Join-Path $testDir 'model.gguf') `
+        -WorkerArgs @('--spec-type', 'draft-mtp') | ConvertFrom-Json
+    if ($llama.argv -notcontains 'draft-mtp' -or !$llama.capabilities.speculative_decoding -or
+        !$llama.capabilities.disk_restore -or $llama.argv -notcontains '--kvmem-host-mib') { throw 'llama native options changed' }
+    foreach ($backend in 'ninfer', 'llamacpp') {
+        $model = if ($backend -eq 'ninfer') { 'model with spaces.ninfer' } else { 'model.gguf' }
+        $disabled = & $launcher @common -Backend $backend -Model (Join-Path $testDir $model) `
+            -RetainedSessions 2 -NoLrfu -DiskMiB 0 | ConvertFrom-Json
+        if ($disabled.argv -notcontains '--kvmem' -or $disabled.argv -notcontains '--no-kvmem-lrfu' -or
+            $disabled.argv -contains '--kvmem-lrfu' -or $disabled.argv -contains '--kvmem-disk-path' -or
+            $disabled.argv[[array]::IndexOf($disabled.argv, '--kvmem-sessions') + 1] -ne '2') {
+            throw 'Common KVMem enablement, sessions or off switches were not exported consistently'
+        }
+        foreach ($flag in '--kvmem', '--no-kvmem', '--kvmem-budget', '--kvmem-sessions', '--no-kvmem-lrfu') {
+            $rejected = $false
+            try { $null = & $launcher @common -Backend $backend -Model (Join-Path $testDir $model) -WorkerArgs @($flag) }
+            catch { $rejected = $_.Exception.Message -match 'KVMem common options' }
+            if (!$rejected) { throw 'Duplicate common KVMem argument accepted' }
+        }
+    }
+    foreach ($residency in 'resident', 'cpu') {
+        foreach ($adaptive in $false, $true) {
+            $imageCopy = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+                -MtpDrafts 4 -AdaptiveMtp:$adaptive -NgramDrafts 31 -Vision -VisionResidency $residency | ConvertFrom-Json
+            if ($imageCopy.argv -notcontains '--vision' -or
+                $imageCopy.capabilities.supported_combinations.ngram.text_only -or
+                $imageCopy.capabilities.supported_combinations.ngram.image_kv -notcontains 'k8v4' -or
+                $imageCopy.capabilities.supported_combinations.ngram.image_kv -notcontains 'bf16' -or
+                $imageCopy.capabilities.supported_combinations.ngram.image_kv -notcontains 'rk8v4' -or
+                $imageCopy.capabilities.supported_combinations.ngram.image_kv -notcontains 'int8' -or
+                $imageCopy.capabilities.supported_combinations.ngram.image_kv -notcontains 'nvfp4' -or
+                $imageCopy.argv[[array]::IndexOf($imageCopy.argv, '--vision-residency') + 1] -ne $residency -or
+                $imageCopy.argv[[array]::IndexOf($imageCopy.argv, '--ngram-draft-tokens') + 1] -ne '31' -or
+                (($imageCopy.argv -contains '--adaptive-mtp') -ne $adaptive)) { throw 'Image/ngram mapping failed' }
+        }
+    }
+    foreach ($format in 'nvfp4', 'k8v4') {
+        foreach ($drafts in 0..4) {
+            foreach ($lanes in 1..4) {
+                $nvfp4 = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+                    -KvType $format -MtpDrafts $drafts -Concurrency $lanes | ConvertFrom-Json
+                if ($nvfp4.argv[[array]::IndexOf($nvfp4.argv, '--kv-dtype') + 1] -ne $format -or
+                    $nvfp4.capabilities.supported_combinations.text.kv -notcontains $format -or
+                    ($drafts -and $nvfp4.argv[[array]::IndexOf($nvfp4.argv, '--ngram-draft-tokens') + 1] -ne '0')) {
+                    throw 'NVFP4/K8V4 text/MTP mapping or disabled ngram settings failed'
+                }
+            }
+            $image = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+                -KvType $format -MtpDrafts $drafts -Vision | ConvertFrom-Json
+            if ($image.argv -notcontains '--vision' -or $image.capabilities.supported_combinations.images.kv -notcontains $format) {
+                throw 'NVFP4/K8V4 resident-image mapping failed'
+            }
+        }
+    }
+    foreach ($lanes in 2..8) {
+        foreach ($kv in 'bf16', 'int8', 'fp8', 'nvfp4', 'k8v4', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8') {
+            foreach ($width in 0, 1, 15, 16, 31, 63) {
+                foreach ($adaptive in $false, $true) {
+                    $copyLanes = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+                        -Concurrency $lanes -KvType $kv -MtpDrafts 3 -AdaptiveMtp:$adaptive -NgramDrafts $width | ConvertFrom-Json
+                    if ($copyLanes.argv[[array]::IndexOf($copyLanes.argv, '--ngram-draft-tokens') + 1] -ne "$([Math]::Min($width, 15))" -or
+                        $copyLanes.capabilities.supported_combinations.ngram.max_concurrency -ne 8 -or
+                        $copyLanes.capabilities.supported_combinations.ngram.concurrent_max_drafts -ne 15 -or
+                        $copyLanes.capabilities.supported_combinations.ngram.concurrent_width_policy -ne 'clamp_to_15') {
+                        throw 'Concurrent ngram mapping or capability failed'
+                    }
+                    foreach ($residency in 'resident', 'cpu') {
+                        $image = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+                            -Concurrency $lanes -KvType $kv -MtpDrafts 3 -AdaptiveMtp:$adaptive -NgramDrafts $width `
+                            -Vision -VisionResidency $residency | ConvertFrom-Json
+                        if ($image.argv[[array]::IndexOf($image.argv, '--kv-dtype') + 1] -ne $kv -or
+                            $image.argv[[array]::IndexOf($image.argv, '--ngram-draft-tokens') + 1] -ne "$([Math]::Min($width, 15))" -or
+                            $image.capabilities.supported_combinations.ngram.image_kv -notcontains $kv) {
+                            throw 'Concurrent image/ngram KV mapping failed'
+                        }
+                    }
+                }
+            }
+        }
+    }
+    $clamped = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -MtpDrafts 3 -NgramDrafts 31 -Concurrency 8 -WarningVariable normalizationWarnings | ConvertFrom-Json
+    if ($clamped.argv[[array]::IndexOf($clamped.argv, '--ngram-draft-tokens') + 1] -ne '15' -or
+        $normalizationWarnings.Count -ne 1 -or
+        "$($normalizationWarnings[0])" -notmatch '31 to 15.*Concurrency 8') {
+        throw 'Concurrent ngram clamp must report the requested and effective widths once'
+    }
+    $bad = @(
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); MtpDrafts=16},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); MtpDrafts=-1},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model.gguf')},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); Budget=385},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); Reserve=64},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); Vision=$true; Concurrency=9},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); AdaptiveMtp=$true; MtpDrafts=0},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); FastPrefill=$true; KvType='k8v4'},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); FastPrefill=$true; KvType='bf16'; Vision=$true},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); FastPrefill=$true; KvType='fp8'},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); FastPrefill=$true; KvType='nvfp4'},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='nvfp4'; Vision=$true; Concurrency=9},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='nvfp4'; NgramDrafts=31},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='unknown-kv'},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='nvpf4'},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); NgramDrafts=31},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); MtpDrafts=3; NgramDrafts=64; Concurrency=2},
+        @{Backend='llamacpp'; Model=(Join-Path $testDir 'model.gguf'); DiskMiB=1024}
+    )
+    foreach ($argsCase in $bad) {
+        $rejected = $false
+        try { $null = & $launcher @common @argsCase } catch { $rejected = $true }
+        if (!$rejected) { throw 'Invalid backend configuration was accepted' }
+    }
+    foreach ($backend in 'ninfer', 'llamacpp') {
+        $description = & $launcher -Backend $backend -Describe | ConvertFrom-Json
+        if ($description.backend -ne $backend -or !$description.text_chat) { throw 'Capability query failed' }
+    }
+    Write-Output 'Backend launcher PASS (argv, paths, capability selection, invalid combinations)'
+} finally {
+    $resolved = [IO.Path]::GetFullPath($testDir)
+    if (!$resolved.StartsWith($tempRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($resolved) -notlike 'kvmem-backend-test-*') { throw 'Unexpected fixture directory' }
+    Get-ChildItem -LiteralPath $resolved -File | ForEach-Object { Remove-Item -LiteralPath $_.FullName }
+    Remove-Item -LiteralPath $resolved
+}

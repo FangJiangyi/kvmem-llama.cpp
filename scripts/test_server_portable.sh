@@ -6,10 +6,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 out=${1:-build/portable}
 mkdir -p "$out"
-includes=(-Itools -Ikvmem/include -Isrc/adapter -Illama.cpp/include -Illama.cpp/ggml/include
-          -Illama.cpp/common -Illama.cpp/vendor -Illama.cpp/vendor/cpp-httplib
-          -Illama.cpp/tools/server -Illama.cpp/tools/mtmd)
-for test in server-options-test server-progress-test output-limit-test; do
+# Match the server CMake target: monitor model metadata needs llama's private headers.
+includes=(-Itools -Ikvmem/include -Isrc/adapter -Ibackends/llamacpp/src -Ibackends/llamacpp/include -Ibackends/llamacpp/ggml/include
+          -Ibackends/llamacpp/common -Ibackends/llamacpp/vendor -Ibackends/llamacpp/vendor/cpp-httplib
+          -Ibackends/llamacpp/tools/server -Ibackends/llamacpp/tools/mtmd)
+for test in server-options-test server-progress-test output-limit-test lane-pool-test; do
   "${CXX:-g++}" -std=c++17 -O2 -pthread "${includes[@]}" "tests/$test.cpp" -o "$out/$test"
   "$out/$test"
 done

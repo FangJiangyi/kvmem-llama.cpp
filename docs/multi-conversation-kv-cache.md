@@ -1,13 +1,14 @@
 # Multi-conversation KV cache
 
 For the optional RAM/NVMe extension, capacity admission and disk restore, see
-[Session disk cache](session-disk-cache.md). The policy below describes the
-original RAM-only mode unless stated otherwise.
+[Session disk cache](session-disk-cache.md). For dynamic scheduling across multiple lanes, see [Multi-lane conversations](multi-lane-conversations.md).
+The policy below describes the original single-lane RAM-only mode unless stated otherwise.
 
 `--kvmem-conversations N` lets the server hold N conversations' KV in host RAM
 at the same time and switch between them. With the flag absent, or set to `1`,
 the server behaves exactly as before: a request that does not continue the
-stored conversation discards it. Host RAM is the abundant resource and GPU VRAM
+stored conversation discards it. This section describes `--parallel 1`; with
+`--parallel P` (P=2..4), N is global and automatically raised to at least P. Host RAM is the abundant resource and GPU VRAM
 is the scarce one, so the design is one `llama_context`, one GPU working set,
 N host stores, time-multiplexed. Requests are still served one at a time.
 
@@ -48,8 +49,8 @@ checkpoint and truncates the stored tail.
 
 | Formula | Source |
 |---|---|
-| `keep_cap = min({lcp, live_row, eval_end - (spec_ok ? 0 : 1)})` | [`tools/kvmem-multimodal-server.h`](../tools/kvmem-multimodal-server.h), `keep` in `run_prefill_multimodal` |
-| `found, keep` = the largest checkpoint row `<= keep_cap` | [`tools/kvmem-multimodal-server.h`](../tools/kvmem-multimodal-server.h), the `st.mm_checkpoints` scan that follows it |
+| `keep_cap = min({lcp, live_row, eval_end - (spec_ok ? 0 : 1)})` | [`tools/llama-kvmem-driver.cpp`](../tools/llama-kvmem-driver.cpp), `keep` in `run_prefill_multimodal` |
+| `found, keep` = the largest checkpoint row `<= keep_cap` | [`tools/llama-kvmem-driver.cpp`](../tools/llama-kvmem-driver.cpp), the `st.mm_checkpoints` scan that follows it |
 | `continuation = (rows - lcp) <= max(0, last_n_gen) + 64` | [`tools/llama-kvmem-server.cpp`](../tools/llama-kvmem-server.cpp), `suffix_slack` in `run_prefill_retrieval` |
 
 `lcp` is the longest common prefix of the incoming prompt against a stored

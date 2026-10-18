@@ -22,12 +22,14 @@ fi
 BUILD="${BUILD_DIR:-$ROOT/build}"
 TYPE="${CMAKE_BUILD_TYPE:-Release}"
 
+"${PYTHON:-python3}" "$ROOT/scripts/prepare-backends.py" --backend llamacpp
+
 "$CMAKE" -S "$ROOT" -B "$BUILD" \
     -DCMAKE_BUILD_TYPE="$TYPE" \
     -DCMAKE_CUDA_COMPILER="$CMAKE_CUDA_COMPILER" \
     -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES:-120a-real}" \
     -DGGML_CUDA=ON \
-    -DGGML_CUDA_FA_ALL_QUANTS=ON \
+    -DGGML_CUDA_FA_QUANTS=all \
     -DKVMEM_BUILD_LLAMA=ON \
     -DLLAMA_KVMEM=ON \
     -DLLAMA_KVMEM_ROOT="$ROOT"

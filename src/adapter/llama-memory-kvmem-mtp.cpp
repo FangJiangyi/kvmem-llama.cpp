@@ -6,6 +6,7 @@
 #include "llama-impl.h"
 #include "llama-kvmem-capture.h"
 #include "llama-kvmem-hooks.h"
+#include "llama-kvmem-execution.h"
 #include "llama-kvmem-stagein.h"
 #include "llama-kvmem-transfer.h"
 #include "llama-model.h"
@@ -144,6 +145,7 @@ llama_memory_kvmem_mtp::llama_memory_kvmem_mtp(
     // Kept as a member so a sibling mirror for another conversation is
     // configured identically.
     kvmem::RawKvStoreConfig & rcfg = raw_cfg_;
+    rcfg.payload_storage = kvmem_execution_payload_storage();
     rcfg.n_layer = std::max(1u, model.hparams.n_layer_nextn);
     rcfg.n_embd_k = n_embd_k_;
     rcfg.n_embd_v = n_embd_v_;
@@ -455,7 +457,11 @@ bool llama_memory_kvmem_mtp::slot_holds(int32_t slot, uint32_t orig_pos) const {
     return cells.ext_get(idx).logical_pos == (llama_pos) orig_pos;
 }
 
-bool llama_memory_kvmem_mtp::layout_d2d(const LayoutMove * moves, size_t n_moves) {
+size_t llama_memory_kvmem_mtp::layout_scratch_bytes(size_t n_moves) const {
+    return n_moves * block_tokens_ * (ggml_row_size(type_k_, n_embd_k_) + ggml_row_size(type_v_, n_embd_v_));
+}
+
+bool llama_memory_kvmem_mtp::layout_d2d(const LayoutMove * moves, size_t n_moves, uint8_t * prepared_scratch) {
     if (!kv_ || !moves || n_moves == 0) {
         return true;
     }
@@ -474,9 +480,9 @@ bool llama_memory_kvmem_mtp::layout_d2d(const LayoutMove * moves, size_t n_moves
     const uint64_t kspan = (uint64_t) block_tokens_ * krow;
     const uint64_t vspan = (uint64_t) block_tokens_ * vrow;
     const uint64_t stride = kspan + vspan;
-    uint8_t * scratch = nullptr;
+    uint8_t * scratch = prepared_scratch;
     const size_t scratch_bytes = n_moves * (size_t) stride;
-    const cudaError_t alloc_error = cudaMalloc(reinterpret_cast<void **>(&scratch), scratch_bytes);
+    const cudaError_t alloc_error = scratch ? cudaSuccess : cudaMalloc(reinterpret_cast<void **>(&scratch), scratch_bytes);
     if (alloc_error != cudaSuccess) {
         if (alloc_error == cudaErrorMemoryAllocation) {
             // The caller restores packed host KV; do not leak this handled OOM to the next kernel.
@@ -548,7 +554,7 @@ bool llama_memory_kvmem_mtp::layout_d2d(const LayoutMove * moves, size_t n_moves
     if (ok && cudaDeviceSynchronize() != cudaSuccess) {
         ok = false;
     }
-    cudaFree(scratch);
+    if (!prepared_scratch) cudaFree(scratch);
     return ok;
 }
 

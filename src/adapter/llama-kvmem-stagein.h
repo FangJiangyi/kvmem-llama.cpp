@@ -9,6 +9,11 @@
 #include <cstddef>
 #include <cstdint>
 
+struct kvmem_gpu_state;
+kvmem_gpu_state * kvmem_gpu_state_create();
+// The owning execution state must be active while destroying GPU scratch.
+void kvmem_gpu_state_free(kvmem_gpu_state * state);
+
 bool kvmem_stagein_gpu_ready(size_t n_f32, size_t n_packed = 0);
 void kvmem_stagein_gpu_free();
 
@@ -25,6 +30,7 @@ bool kvmem_stagein_fwht(int64_t n_rows, int64_t n_embd, int nrot);
 bool kvmem_stagein_quantize(ggml_type ty, void * gpu_dst, int64_t n_rows, int64_t n_embd);
 bool kvmem_stagein_h2d_bytes(void * gpu_dst, const void * host, size_t n);
 void kvmem_stagein_sync();
+bool kvmem_stagein_sync_checked();
 
 // 32 MiB packed host+GPU slab. Enqueue (block,layer) rows; flush does one H2D
 // then dequant/RoPE/Hadamard/quant (K) or D2D (packed V). Extra VRAM = 32 MiB.

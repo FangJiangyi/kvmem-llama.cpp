@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llama.h"
+#include "kvmem/cli_options.h"
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -60,12 +61,13 @@ inline int kvmem_cli_gpu_layers(const char * option, const char * value) {
     return kvmem_cli_int(option, value);
 }
 
-struct kvmem_server_options {
-    int sink_tokens = 0; // Zero keeps one block; positive values round down to whole blocks.
+struct kvmem_server_options : kvmem::CliOptions {
+    int parallel = 1;
     // Live host KV stores, time-multiplexed on one GPU working set. One
     // reproduces the single-store server, where a different conversation
     // discards the previous one.
     int conversations = 1;
+    bool legacy_conversations = false;
     uint64_t conversation_bytes = 0; // Accounted host store bytes; zero = count cap only.
     uint64_t session_disk_bytes = 0;
     std::string session_cache_dir;
@@ -159,10 +161,10 @@ struct kvmem_server_options {
 
     template<typename Need>
     bool parse(const std::string & arg, const Need & need) {
-        if (arg == "--kvmem-sink-tokens") {
-            sink_tokens = kvmem_cli_int(arg.c_str(), need(arg.c_str()));
-        } else if (arg == "--kvmem-conversations") {
+        if (kvmem::CliOptions::parse(arg, need)) return true;
+        if (arg == "--kvmem-conversations") {
             conversations = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1);
+            legacy_conversations = true;
         } else if (arg == "--kvmem-conversations-gb" || arg == "--kvmem-session-ram-gb") {
             const double gb = kvmem_cli_real(arg.c_str(), need(arg.c_str()), 0, 1048576);
             conversation_bytes = gb <= 0.0 ? 0
@@ -222,8 +224,7 @@ struct kvmem_server_options {
         } else if (arg == "--api-key-file") {
             add_key_file(need(arg.c_str()));
         } else if (arg == "-np" || arg == "--parallel") {
-            if (kvmem_cli_int(arg.c_str(), need(arg.c_str())) != 1)
-                throw std::invalid_argument("KVMem supports --parallel 1 only; automatic/multiple slots are not implemented");
+            parallel = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1, 4);
         } else if (arg == "--mmap" || arg == "--no-mmap") {
             load_mode = arg == "--mmap" ? LLAMA_LOAD_MODE_MMAP : LLAMA_LOAD_MODE_NONE;
         } else if (arg == "--mlock") {

@@ -39,7 +39,7 @@ establish a stable speed ranking. See the benchmark tables in
 
 ## Relationship to PR #54
 
-[PR #54](https://github.com/kvmem/kvmem-llama.cpp/pull/54) also proposes
+[PR #54](https://github.com/kvmem/kvmem/pull/54) also proposes
 CUDA layer split and per-device GDN replay, bundled with TurboQuant KV codecs.
 This branch keeps the KVMem multi-GPU work isolated, adds unequal layer
 proportions and per-device KV-pool validation, and records local MTP and

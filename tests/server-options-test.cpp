@@ -11,6 +11,39 @@ static void rejects(const std::function<void()> & fn) {
     throw std::runtime_error("expected invalid_argument");
 }
 int main() {
+    // Both EXEs use this resolver; omission, zero, disable conflicts and
+    // overrides are part of the public contract, independent of GPU geometry.
+    {
+        kvmem::CliOptions defaults;
+        defaults.resolve();
+        check(!defaults.enabled && defaults.budget == 0 && defaults.payload_host_bytes == 0);
+        auto parse_memory = [](kvmem::CliOptions & config, const char * flag, const char * value = "") {
+            check(config.parse(flag, [&](const char *) { return value; }));
+        };
+        parse_memory(defaults, "--kvmem"); defaults.resolve();
+        check(defaults.enabled && defaults.budget == 32768 && defaults.gen_reserve == 1024 &&
+              defaults.payload_host_bytes == (16384ULL << 20) && defaults.sessions == 4);
+        for (const char * flag : {"--kvmem-budget", "--kvmem-gen-reserve", "--kvmem-host-mib", "--kvmem-sessions"})
+            for (const char * value : {"0", "-1", "1.5", "1x", " 1", "9999999999999999999999999"})
+                rejects([&] { kvmem::CliOptions c; parse_memory(c, flag, value); });
+        kvmem::CliOptions old_budget;
+        parse_memory(old_budget, "--kvmem-budget", "384");
+        parse_memory(old_budget, "--kvmem-lrfu");
+        parse_memory(old_budget, "--no-kvmem-lrfu");
+        parse_memory(old_budget, "--kvmem-disk-mib", "0");
+        old_budget.resolve(); check(old_budget.enabled && !old_budget.lrfu && !old_budget.payload_disk_bytes);
+        parse_memory(old_budget, "--no-kvmem");
+        rejects([&] { old_budget.resolve(); });
+        kvmem::CliOptions off;
+        parse_memory(off, "--no-kvmem"); parse_memory(off, "--no-kvmem-lrfu");
+        parse_memory(off, "--kvmem-disk-mib", "0"); off.resolve(); check(!off.enabled);
+        kvmem::CliOptions spill;
+        parse_memory(spill, "--kvmem"); parse_memory(spill, "--kvmem-disk-path", "directory with spaces");
+        rejects([&] { spill.resolve(); });
+        parse_memory(spill, "--kvmem-disk-mib", "128"); spill.resolve();
+        check(spill.payload_disk_bytes == (128ULL << 20));
+        parse_memory(spill, "--kvmem-disk-mib", "0"); rejects([&] { spill.resolve(); });
+    }
     check(kvmem_cli_gpu_layers("-ngl", "all") == -2);
     check(kvmem_cli_gpu_layers("-ngl", "0") == 0);
     for (const char * value : {"auto", "-1", "1x", "999999999999", "-3", " 1"})
@@ -22,6 +55,18 @@ int main() {
         check(o.parse(flag, [&](const char *) { return value; }));
     };
     check(o.sink_tokens == 0);
+    check(o.payload_host_bytes == 0 && o.payload_disk_bytes == 0 && o.payload_disk_dir.empty());
+    parse("--kvmem-host-mib", "64"); parse("--kvmem-disk-mib", "256");
+    parse("--kvmem-disk-path", "spill directory");
+    check(o.payload_host_bytes == (64ULL << 20) && o.payload_disk_bytes == (256ULL << 20));
+    check(o.payload_disk_dir == "spill directory");
+    for (const char * bad : {"-1", "1.5", "1x", "2147483648"}) {
+        rejects([&] { parse("--kvmem-host-mib", bad); });
+        rejects([&] { parse("--kvmem-disk-mib", bad); });
+    }
+    rejects([&] { parse("--kvmem-host-mib", "0"); });
+    parse("--kvmem-disk-mib", "0"); check(o.payload_disk_bytes == 0);
+    rejects([&] { parse("--kvmem-disk-path", ""); });
     for (const char * value : {"0", "1", "128", "129", "1024", "2147483647"}) {
         parse("--kvmem-sink-tokens", value);
         check(o.sink_tokens == std::stoi(value));
@@ -44,7 +89,11 @@ int main() {
     parse("-fa", "on"); check(o.flash_attn == LLAMA_FLASH_ATTN_TYPE_ENABLED);
     parse("-fa", "auto"); check(o.flash_attn == LLAMA_FLASH_ATTN_TYPE_AUTO);
     parse("-np", "1");
-    rejects([&] { parse("-np", "2"); });
+    parse("-np", "2"); check(o.parallel == 2);
+    rejects([&] { parse("-np", "0"); });
+    parse("-np", "3"); check(o.parallel == 3);
+    parse("-np", "4"); check(o.parallel == 4);
+    rejects([&] { parse("-np", "5"); });
     rejects([&] { parse("-ub", "0"); });
     rejects([&] { parse("-fa", "invalid"); });
     parse("--load-mode", "mmap+mlock"); check(o.load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK);
@@ -120,21 +169,16 @@ int main() {
     }); });
     check(kvmem_config_key("--kvmem-conversations") == "--kvmem-conversations");
     check(kvmem_config_key("--kvmem-conversations-gb") == "--kvmem-conversations-gb");
-    // Request-independent stderr on the default path must stay what
-    // v0.16.0-rc3 printed. The -np rejection is the one message this feature
-    // was tempted to extend; the pointer to --kvmem-conversations belongs in
-    // print_usage, where changed output is expected.
+    // Both parallel aliases accept exactly the supported lane counts.
     for (const char * flag : {"-np", "--parallel"}) {
-        bool threw = false;
-        try {
-            o.parse(flag, [](const char *) { return "2"; });
-        } catch (const std::invalid_argument & e) {
-            threw = true;
-            check(std::string(e.what()) ==
-                  "KVMem supports --parallel 1 only; automatic/multiple slots are not implemented");
+        for (const char * value : {"2", "3", "4"}) {
+            parse(flag, value);
+            check(o.parallel == std::stoi(value));
         }
-        check(threw);
+        rejects([&] { parse(flag, "0"); });
+        rejects([&] { parse(flag, "5"); });
         parse(flag, "1");
+        check(o.parallel == 1);
     }
     std::puts("server options: passed");
 }
