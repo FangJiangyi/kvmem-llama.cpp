@@ -1,0 +1,435 @@
+{
+  "date": "2026-10-18",
+  "baseline_kvmem_commit": "8a5843e84a0e03969580f143ca91a6fa689c896a",
+  "gpu_uuid": "GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c",
+  "gpu_model": "NVIDIA GeForce RTX 5060 Ti",
+  "toolchain": {
+    "os": "Windows",
+    "compiler": "MSVC 19.44",
+    "cuda": "13.2",
+    "configuration": "Release; CUDA graphs"
+  },
+  "common_workload": {
+    "budget": 36864,
+    "reserve": 16384,
+    "prompt_tokens": 36864,
+    "requested_decode_workload": 256,
+    "warmups": 1
+  },
+  "llama": {
+    "upstream_commit": "620d2225cc436ab0b001e3200e590e3b286ef9ab",
+    "model": "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+    "batch": 512,
+    "ubatch": 512,
+    "target_kv": "q8_0",
+    "draft_kv": "f16",
+    "mtp": 3,
+    "block_tokens": 128,
+    "adapter_ctx": 131072,
+    "off_ctx": 53248,
+    "timing": "255 tokens / wall time between first and last of 256 outputs",
+    "driver": "tests/llama-backend-perf.cpp with temporary CPU phase timers; same driver for before, after and off",
+    "control": "same executable and libraries; KVMEM_GDN_FOLD_SYNC=1 vs 0"
+  },
+  "ninfer": {
+    "upstream_commit": "08fd7019925f43b4b42539400afd461b70f7144a",
+    "model": "Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer",
+    "prefill_chunk": 256,
+    "kv": "int8",
+    "mtp": 4,
+    "ngram": 0,
+    "ctx": 53248,
+    "host_mib": 12288,
+    "lrfu": true,
+    "score_agg": "max",
+    "sink_tokens": 12288,
+    "recent_tokens": 1024,
+    "timing": "256 tokens / generation_wall_seconds; 257 total outputs including seed",
+    "control": "same 78 runtime objects except rebuilt prefill.cpp; no other source or flags changed"
+  },
+  "cases": {
+    "llama-before": {
+      "generation_tps": [
+        37.428769748629854,
+        37.3764269367072
+      ],
+      "prefill_tps": [
+        561.1322828714964,
+        559.8759233305327
+      ],
+      "commit_ms": [
+        84.1,
+        84.242
+      ],
+      "drafted": [
+        232,
+        232
+      ],
+      "accepted": [
+        178,
+        178
+      ],
+      "raw_run": "llama-before",
+      "generation_tps_mean": 37.402598342668526,
+      "prefill_tps_mean": 560.5041031010146,
+      "repetitions": 2,
+      "phase_ms_mean": {
+        "commit": 84.17099999999999,
+        "draft": 827.4325,
+        "draft_catchup": 153.4025,
+        "draft_remove_after": 5.035500000000001,
+        "draft_remove_before": 5.063,
+        "sample": 107.225,
+        "target_process": 5617.9115,
+        "target_remove": 5.5585,
+        "truncate": 10.6975
+      },
+      "generation_ms_mean": 6817.711499999999,
+      "library_sha256": {
+        "llama.dll": "d8d793d2526fc42414f1f07b179fccae74dedde248e30bbcd18144c33bf41ab0",
+        "ggml-cuda.dll": "dea3e0870ab34182861f24679f0c7834b9370d7a0893b1dad5d733fb9520dd86",
+        "llama-common.dll": "7c41e3c035decfe1519248dbb64c571b6d18b56a2cf3dcc066330a8cdb6ec478"
+      },
+      "peak_gpu_mib": 14391.0,
+      "busy_clock_mhz_median": 1777.0,
+      "busy_temperature_c_range": [
+        43.0,
+        72.0
+      ]
+    },
+    "llama-after": {
+      "generation_tps": [
+        37.6111409214228,
+        37.518384008164006
+      ],
+      "prefill_tps": [
+        560.9094157768736,
+        559.9538572745911
+      ],
+      "commit_ms": [
+        12.711,
+        13.883
+      ],
+      "drafted": [
+        232,
+        232
+      ],
+      "accepted": [
+        178,
+        178
+      ],
+      "raw_run": "llama-after",
+      "generation_tps_mean": 37.564762464793404,
+      "prefill_tps_mean": 560.4316365257323,
+      "repetitions": 2,
+      "phase_ms_mean": {
+        "commit": 13.297,
+        "draft": 853.9784999999999,
+        "draft_catchup": 155.6575,
+        "draft_remove_after": 4.884,
+        "draft_remove_before": 5.327999999999999,
+        "sample": 105.59299999999999,
+        "target_process": 5630.637000000001,
+        "target_remove": 5.124499999999999,
+        "truncate": 11.845500000000001
+      },
+      "generation_ms_mean": 6788.287,
+      "library_sha256": {
+        "llama.dll": "d8d793d2526fc42414f1f07b179fccae74dedde248e30bbcd18144c33bf41ab0",
+        "ggml-cuda.dll": "dea3e0870ab34182861f24679f0c7834b9370d7a0893b1dad5d733fb9520dd86",
+        "llama-common.dll": "7c41e3c035decfe1519248dbb64c571b6d18b56a2cf3dcc066330a8cdb6ec478"
+      },
+      "peak_gpu_mib": 14391.0,
+      "busy_clock_mhz_median": 1777.0,
+      "busy_temperature_c_range": [
+        50.0,
+        72.0
+      ]
+    },
+    "llama-off": {
+      "generation_tps": [
+        37.83037601168439
+      ],
+      "prefill_tps": [
+        567.5458721599229
+      ],
+      "commit_ms": [
+        0.001
+      ],
+      "drafted": [
+        232
+      ],
+      "accepted": [
+        178
+      ],
+      "raw_run": "llama-off",
+      "generation_tps_mean": 37.83037601168439,
+      "prefill_tps_mean": 567.5458721599229,
+      "repetitions": 1,
+      "phase_ms_mean": {
+        "commit": 0.001,
+        "draft": 844.766,
+        "draft_catchup": 5642.379,
+        "draft_remove_after": 2.496,
+        "draft_remove_before": 2.557,
+        "sample": 108.995,
+        "target_process": 135.748,
+        "target_remove": 2.662,
+        "truncate": 0.003
+      },
+      "generation_ms_mean": 6740.615,
+      "library_sha256": {
+        "llama.dll": "d8d793d2526fc42414f1f07b179fccae74dedde248e30bbcd18144c33bf41ab0",
+        "ggml-cuda.dll": "dea3e0870ab34182861f24679f0c7834b9370d7a0893b1dad5d733fb9520dd86",
+        "llama-common.dll": "7c41e3c035decfe1519248dbb64c571b6d18b56a2cf3dcc066330a8cdb6ec478"
+      },
+      "peak_gpu_mib": 14703.0,
+      "busy_clock_mhz_median": 1777.0,
+      "busy_temperature_c_range": [
+        65.0,
+        73.0
+      ]
+    },
+    "ninfer-before": {
+      "generation_tps": [
+        79.87204498393574,
+        79.93935850226117
+      ],
+      "prefill_tps": [
+        663.5068114705008,
+        663.203487760948
+      ],
+      "program_decode_seconds": [
+        3.134936,
+        3.134435
+      ],
+      "raw_run": "ninfer-before-idle",
+      "generation_tps_mean": 79.90570174309846,
+      "prefill_tps_mean": 663.3551496157244,
+      "repetitions": 2,
+      "generation_ms_mean": 3203.7769500000004,
+      "speculative": [
+        {
+          "backend": "mtp",
+          "enabled": true,
+          "draft_window": 4,
+          "rounds": 56,
+          "drafted_tokens": 221,
+          "accepted_tokens": 200,
+          "fallback_steps": 0,
+          "ngram_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_accepted_tokens": 0,
+          "acceptance_rate": 0.9049773756,
+          "acceptance_length": 4.571428571,
+          "accepted_per_position": [
+            55,
+            50,
+            48,
+            47
+          ]
+        },
+        {
+          "backend": "mtp",
+          "enabled": true,
+          "draft_window": 4,
+          "rounds": 56,
+          "drafted_tokens": 221,
+          "accepted_tokens": 200,
+          "fallback_steps": 0,
+          "ngram_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_accepted_tokens": 0,
+          "acceptance_rate": 0.9049773756,
+          "acceptance_length": 4.571428571,
+          "accepted_per_position": [
+            55,
+            50,
+            48,
+            47
+          ]
+        }
+      ],
+      "peak_gpu_mib": 14169.0,
+      "busy_clock_mhz_median": 1777.0,
+      "busy_temperature_c_range": [
+        48.0,
+        72.0
+      ]
+    },
+    "ninfer-after": {
+      "generation_tps": [
+        80.63368501169094,
+        80.5465840854423
+      ],
+      "prefill_tps": [
+        665.6945030086804,
+        663.0301937788297
+      ],
+      "program_decode_seconds": [
+        3.1615688,
+        3.1657557
+      ],
+      "raw_run": "ninfer-after-idle",
+      "generation_tps_mean": 80.59013454856662,
+      "prefill_tps_mean": 664.362348393755,
+      "repetitions": 2,
+      "generation_ms_mean": 3176.5684,
+      "speculative": [
+        {
+          "backend": "mtp",
+          "enabled": true,
+          "draft_window": 4,
+          "rounds": 56,
+          "drafted_tokens": 221,
+          "accepted_tokens": 200,
+          "fallback_steps": 0,
+          "ngram_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_accepted_tokens": 0,
+          "acceptance_rate": 0.9049773756,
+          "acceptance_length": 4.571428571,
+          "accepted_per_position": [
+            55,
+            50,
+            48,
+            47
+          ]
+        },
+        {
+          "backend": "mtp",
+          "enabled": true,
+          "draft_window": 4,
+          "rounds": 56,
+          "drafted_tokens": 221,
+          "accepted_tokens": 200,
+          "fallback_steps": 0,
+          "ngram_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_accepted_tokens": 0,
+          "acceptance_rate": 0.9049773756,
+          "acceptance_length": 4.571428571,
+          "accepted_per_position": [
+            55,
+            50,
+            48,
+            47
+          ]
+        }
+      ],
+      "peak_gpu_mib": 14169.0,
+      "busy_clock_mhz_median": 1781.0,
+      "busy_temperature_c_range": [
+        39.0,
+        71.0
+      ]
+    }
+  },
+  "validation": {
+    "llama_recorded_outputs_identical": true,
+    "llama_generation_delta_percent": 0.4335637878395193,
+    "llama_prefill_delta_percent": -0.012928821552127268,
+    "ninfer_recorded_outputs_identical": true,
+    "ninfer_generation_delta_percent": 0.8565506472475004,
+    "ninfer_prefill_delta_percent": 0.15183401811444952,
+    "mtp_counts_match_within_each_backend": true,
+    "llama_after_vs_patched_off_percent": -0.7021171209319998,
+    "llama_immediate_checkpoint_restore": true,
+    "gdn_event_consumer_and_fp64_reference": true,
+    "llama_product_server": {
+      "plain_chat": true,
+      "mtp": true,
+      "streamed_empty_tool_arguments": true,
+      "tool": {
+        "id": "call_9fe6895c02b4113349fd5b1d881038a2_1_1",
+        "name": "ping",
+        "arguments": "{}"
+      }
+    },
+    "ninfer_prefix_ssd_cancel_recovery": true
+  },
+  "excluded_attempts": [
+    {
+      "run": "ninfer-after",
+      "reason": "startup failed before prefill: other development used the GPU; available runtime memory was zero; retained raw log"
+    },
+    {
+      "run": "ninfer-before",
+      "reason": "concurrent development confirmed by user; GPU monitor shows about 1.8 GiB extra memory during the run; excluded even though run succeeded"
+    }
+  ],
+  "limitations": [
+    "Windows/CUDA only; no Linux, HIP or multi-GPU qualification.",
+    "One model/workload per engine; two measured repetitions before and after.",
+    "Patched-off reference has one measured repetition; it is not a fresh pure-upstream run.",
+    "No claim about 256K tools or retrieval beyond B+R; do not compare absolute speeds across engines.",
+    "Commit phase is CPU submit/wait time, not GPU Fold execution duration.",
+    "NInfer candidate-statistics read now occurs inside the native tail timing interval; program decode_seconds includes this read after the change and is not used for throughput comparison."
+  ],
+  "merge_validation": {
+    "master_commit": "1723b27e111d2f6fc5909bb2a4ad8eab2c7c3e9a",
+    "gpu_uuid": "GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29",
+    "results": {
+      "gpu_uuid": "GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29",
+      "cases": {
+        "ninfer-fixture": {
+          "command": [
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\ninfer-merge-validation\\ninfer_p4_history_5050.exe",
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\ninfer-pin-window-20261018\\four-layer-test.ninfer",
+            "bf16",
+            "graph",
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\overlap-merge-validation-retry\\ninfer-fixture\\tokens.txt",
+            "3",
+            "prefix-anchor-ssd",
+            "0"
+          ],
+          "exit_code": 0
+        },
+        "llama-prefix": {
+          "command": [
+            "C:\\Users\\leyew\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe",
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\kvmem\\tests\\prefix-reuse-regression.py",
+            "--exe",
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\build\\bin\\llama-kvmem-server.exe",
+            "--model",
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\models\\gguf\\Qwen3.5-0.8B-Q8_0\\Qwen3.5-0.8B-Q8_0.gguf",
+            "--gpu",
+            "GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29",
+            "--out",
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\overlap-merge-validation-retry\\llama-prefix"
+          ],
+          "exit_code": 0
+        },
+        "core-contract": {
+          "command": [
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\build\\bin\\memory_contract_test.exe"
+          ],
+          "exit_code": 0
+        },
+        "prefix-checkpoint": {
+          "command": [
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\build\\bin\\prefix_checkpoint_test.exe"
+          ],
+          "exit_code": 0
+        }
+      }
+    },
+    "gdn_event_fp64_passed": true,
+    "ninfer_fixture": {
+      "text_layers": 4,
+      "gdn_layers": 3,
+      "attention_layers": 1,
+      "mtp": 3,
+      "kv": "bf16",
+      "cuda_graph": true,
+      "host_mib": 12,
+      "ssd_read_bytes": 33419264,
+      "ssd_written_bytes": 117288960,
+      "payload_and_state_exact": true,
+      "purpose": "execution and state validation only; not model answer quality or throughput"
+    },
+    "initial_fixture_attempt": "64MiB Host did not trigger SSD; coverage assertion failed; retained log; repeated with 12MiB and unchanged assertions",
+    "full_27b_and_performance_rerun_after_master_sync": false,
+    "preserves_master_pin_staging": true
+  }
+}

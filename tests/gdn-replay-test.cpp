@@ -2,6 +2,11 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml-cuda.h"
+#include "llama-kvmem-gpu-order.h"
+#ifdef KVMEM_TEST_CUDA
+#include "ggml-backend-impl.h"
+#include <cuda_runtime.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -9,6 +14,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -90,7 +96,42 @@ static std::vector<float> snapshot(ggml_backend_t backend, int tokens) {
     return result;
 }
 
-static void check_replay(ggml_backend_t backend, int tokens, int rounds, bool fold = true, int capacity = 0) {
+#ifdef KVMEM_TEST_CUDA
+struct FoldCompletion {
+    cudaStream_t stream = nullptr;
+    ggml_backend_event_t event = nullptr;
+    ggml_backend_t cpu = nullptr;
+    ggml_backend_sched_t scheduler = nullptr;
+    ggml_backend_dev_t device = nullptr;
+
+    explicit FoldCompletion(ggml_backend_t backend) : device(ggml_backend_get_device(backend)) {
+        cpu = ggml_backend_dev_init(ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU), nullptr);
+        ggml_backend_t backends[] = {backend, cpu};
+        scheduler = ggml_backend_sched_new(backends, nullptr, 2, 64, false, false);
+        event = ggml_backend_event_new(device);
+        require(event && cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) == cudaSuccess,
+                "completion stream allocation failed");
+        require(!kvmem_order_completion(nullptr, device, event), "missing scheduler must use synchronous completion");
+        require(!kvmem_order_completion(scheduler, device, nullptr), "missing event must use synchronous completion");
+    }
+    void order() {
+        require(cudaEventRecord(static_cast<cudaEvent_t>(event->context), stream) == cudaSuccess,
+                "completion record failed");
+        require(kvmem_order_completion(scheduler, device, event), "consumer wait was not queued");
+    }
+    ~FoldCompletion() {
+        ggml_backend_sched_synchronize(scheduler);
+        cudaStreamSynchronize(stream);
+        ggml_backend_sched_free(scheduler);
+        ggml_backend_event_free(event);
+        cudaStreamDestroy(stream);
+        ggml_backend_free(cpu);
+    }
+};
+#endif
+
+static void check_replay(ggml_backend_t backend, int tokens, int rounds, bool fold = true, int capacity = 0,
+                         bool async = false) {
     if (capacity == 0) capacity = tokens;
     auto * ctx = ggml_init({2 * 1024 * 1024, nullptr, true});
     require(ctx != nullptr, "replay context allocation failed");
@@ -110,6 +151,9 @@ static void check_replay(ggml_backend_t backend, int tokens, int rounds, bool fo
     auto * descriptor = ggml_new_tensor_1d(ctx, GGML_TYPE_I8, sizeof(ggml_cuda_gdn_replay_layer));
     auto * reference = ggml_gated_delta_net(ctx, q, k, v, g, b, s, tokens);
     auto * recorded = ggml_gated_delta_net(ctx, q, k, v, g, b, s, 0);
+    auto * observed = ggml_dup_tensor(ctx, s);
+    auto * consumer = ggml_new_graph(ctx);
+    ggml_build_forward_expand(consumer, ggml_cpy(ctx, s, observed));
     auto * graph = ggml_new_graph(ctx);
     for (int i = 0; i < 5; ++i) {
         ggml_build_forward_expand(graph, ggml_cpy(ctx, inputs[i],
@@ -139,6 +183,10 @@ static void check_replay(ggml_backend_t backend, int tokens, int rounds, bool fo
     const auto original_value = get(v);
     const auto columns = get(conv_input);
     require(ggml_backend_cuda_gdn_fold(nullptr, 0, 0, 0, nullptr), "zero Fold must not access descriptors");
+#ifdef KVMEM_TEST_CUDA
+    std::unique_ptr<FoldCompletion> completion;
+    if (async) completion = std::make_unique<FoldCompletion>(backend);
+#endif
     for (int round = 0; round < rounds; ++round) {
         ggml_backend_tensor_set(k, original_key.data(), 0, ggml_nbytes(k));
         const auto initial = get(s);
@@ -167,9 +215,20 @@ static void check_replay(ggml_backend_t backend, int tokens, int rounds, bool fo
                 std::fill(data.begin() + keep * widths[i], data.end(), std::numeric_limits<float>::quiet_NaN());
                 ggml_backend_tensor_set(records[i], data.data(), 0, ggml_nbytes(records[i]));
             }
+            void * stream = nullptr;
+#ifdef KVMEM_TEST_CUDA
+            if (completion) stream = completion->stream;
+#endif
             require(ggml_backend_cuda_gdn_fold(static_cast<const ggml_cuda_gdn_replay_layer *>(descriptor->data),
-                        1, keep, capacity, nullptr), "Fold launch failed");
-            const auto actual = get(s);
+                        1, keep, capacity, stream), "Fold launch failed");
+#ifdef KVMEM_TEST_CUDA
+            if (completion) completion->order();
+#endif
+            if (async) {
+                require(ggml_backend_graph_compute(backend, consumer) == GGML_STATUS_SUCCESS,
+                        "consumer graph did not wait for Fold");
+            }
+            const auto actual = get(async ? observed : s);
             const float * expected = keep == 0 ? initial.data()
                 : snapshots.data() + output.size() + (tokens - keep) * initial.size();
             require(std::memcmp(expected, actual.data(), ggml_nbytes(s)) == 0, "Fold state differs from accepted snapshot");
@@ -190,9 +249,12 @@ static void check_replay(ggml_backend_t backend, int tokens, int rounds, bool fo
             }
         }
     }
+#ifdef KVMEM_TEST_CUDA
+    completion.reset();
+#endif
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);
-    std::printf("PASS %s: width=%d capacity=%d rounds=%d\n", fold ? "Record/Fold (all prefixes, rejected NaNs, nonzero state)" : "CPU Record", tokens, capacity, rounds);
+    std::printf("PASS %s: width=%d capacity=%d rounds=%d async=%d\n", fold ? "Record/Fold (all prefixes, rejected NaNs, nonzero state)" : "CPU Record", tokens, capacity, rounds, async);
 }
 
 static void check_multilayer(ggml_backend_t backend) {
@@ -280,6 +342,16 @@ int main(int argc, char ** argv) {
             if (!cpu) {
                 check_multilayer(backend);
                 check_replay(backend, 6, 1000);
+#ifdef KVMEM_TEST_CUDA
+                auto * event = ggml_backend_event_new(device);
+                if (event) {
+                    ggml_backend_event_free(event);
+                    check_replay(backend, 4, 1, true, 6, true);
+                    check_replay(backend, 6, 250, true, 6, true);
+                } else {
+                    std::puts("SKIP asynchronous Fold: backend events unavailable; synchronous tests passed");
+                }
+#endif
             }
             ggml_backend_free(backend);
             return 0;
