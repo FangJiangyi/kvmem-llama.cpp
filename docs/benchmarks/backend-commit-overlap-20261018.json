@@ -365,5 +365,71 @@
     "No claim about 256K tools or retrieval beyond B+R; do not compare absolute speeds across engines.",
     "Commit phase is CPU submit/wait time, not GPU Fold execution duration.",
     "NInfer candidate-statistics read now occurs inside the native tail timing interval; program decode_seconds includes this read after the change and is not used for throughput comparison."
-  ]
+  ],
+  "merge_validation": {
+    "master_commit": "1723b27e111d2f6fc5909bb2a4ad8eab2c7c3e9a",
+    "gpu_uuid": "GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29",
+    "results": {
+      "gpu_uuid": "GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29",
+      "cases": {
+        "ninfer-fixture": {
+          "command": [
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\ninfer-merge-validation\\ninfer_p4_history_5050.exe",
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\ninfer-pin-window-20261018\\four-layer-test.ninfer",
+            "bf16",
+            "graph",
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\overlap-merge-validation-retry\\ninfer-fixture\\tokens.txt",
+            "3",
+            "prefix-anchor-ssd",
+            "0"
+          ],
+          "exit_code": 0
+        },
+        "llama-prefix": {
+          "command": [
+            "C:\\Users\\leyew\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe",
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\kvmem\\tests\\prefix-reuse-regression.py",
+            "--exe",
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\build\\bin\\llama-kvmem-server.exe",
+            "--model",
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\models\\gguf\\Qwen3.5-0.8B-Q8_0\\Qwen3.5-0.8B-Q8_0.gguf",
+            "--gpu",
+            "GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29",
+            "--out",
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\overlap-merge-validation-retry\\llama-prefix"
+          ],
+          "exit_code": 0
+        },
+        "core-contract": {
+          "command": [
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\build\\bin\\memory_contract_test.exe"
+          ],
+          "exit_code": 0
+        },
+        "prefix-checkpoint": {
+          "command": [
+            "C:\\Users\\leyew\\AppData\\Local\\KVMem\\llama-v070-integration-20261018\\build\\bin\\prefix_checkpoint_test.exe"
+          ],
+          "exit_code": 0
+        }
+      }
+    },
+    "gdn_event_fp64_passed": true,
+    "ninfer_fixture": {
+      "text_layers": 4,
+      "gdn_layers": 3,
+      "attention_layers": 1,
+      "mtp": 3,
+      "kv": "bf16",
+      "cuda_graph": true,
+      "host_mib": 12,
+      "ssd_read_bytes": 33419264,
+      "ssd_written_bytes": 117288960,
+      "payload_and_state_exact": true,
+      "purpose": "execution and state validation only; not model answer quality or throughput"
+    },
+    "initial_fixture_attempt": "64MiB Host did not trigger SSD; coverage assertion failed; retained log; repeated with 12MiB and unchanged assertions",
+    "full_27b_and_performance_rerun_after_master_sync": false,
+    "preserves_master_pin_staging": true
+  }
 }

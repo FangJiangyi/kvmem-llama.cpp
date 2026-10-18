@@ -358,7 +358,12 @@ if (KVMEM_BUILD_LLAMA)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/prefix-reuse-regression.py
                 --exe $<TARGET_FILE:llama-kvmem-server>
                 --out ${CMAKE_CURRENT_BINARY_DIR}/prefix-reuse-regression)
-        set_tests_properties(kvmem-prefix-reuse-regression PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+        add_test(NAME kvmem-prefix-reuse-mtp-regression
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/prefix-reuse-regression.py
+                --exe $<TARGET_FILE:llama-kvmem-server> --mtp --sessions 1 --turns 12
+                --out ${CMAKE_CURRENT_BINARY_DIR}/prefix-reuse-mtp-regression)
+        set_tests_properties(kvmem-prefix-reuse-regression kvmem-prefix-reuse-mtp-regression
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 RUN_SERIAL TRUE)
     endif()
 
     add_executable(kvmem-gdn-replay-test tests/gdn-replay-test.cpp)

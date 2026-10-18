@@ -6301,10 +6301,10 @@ index 9085edcc7beaa3649711d7695784d2494dea7755..3bb9c685bd99416a7d9ba5539fc8229a
      sequence.dflash_context_frontier = 0;
 diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..14ca80b328b295ee8d96b188bc1561272bfef5cb
+index 0000000000000000000000000000000000000000..8fe6e0c12628476532f6850ef3b0ccf41adef8a3
 --- /dev/null
 +++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
-@@ -0,0 +1,1491 @@
+@@ -0,0 +1,1521 @@
 +#include "models/qwen3_5/program/program_impl.h"
 +#include "models/qwen3_5/program/context.h"
 +#include "models/qwen3_5/program/context_work.h"
@@ -6316,6 +6316,7 @@ index 0000000000000000000000000000000000000000..14ca80b328b295ee8d96b188bc156127
 +namespace ninfer::models::qwen3_5::detail {
 +namespace {
 +constexpr std::uint32_t page_tokens = 64;
++constexpr std::size_t transfer_staging_limit = 64ULL << 20;
 +std::atomic<std::uint64_t> next_window_session{1};
 +
 +std::uint32_t valid_columns(std::uint32_t logical_page, std::uint32_t frontier) {
@@ -6443,7 +6444,8 @@ index 0000000000000000000000000000000000000000..14ca80b328b295ee8d96b188bc156127
 +public:
 +    WindowMemoryTransfer(WindowMemoryBackend& backend, const kvmem::WorkingSetPlan& plan,
 +                         bool verify_restore = true)
-+        : backend(backend), plan(plan), asynchronous(backend.program.memory_io && verify_restore && !backend.resident_native) {
++        : backend(backend), plan(plan), restore_enabled(verify_restore),
++          asynchronous(backend.program.memory_io && verify_restore && !backend.resident_native) {
 +        auto& seq = backend.sequence;
 +        auto& p = backend.program;
 +        const auto count = kv_pages_for_tokens(seq.text_kv_valid);
@@ -6486,66 +6488,41 @@ index 0000000000000000000000000000000000000000..14ca80b328b295ee8d96b188bc156127
 +            (selected.empty() || selected.back() != seq.text_kv_valid / page_tokens)) {
 +            throw std::logic_error("KVMem partial append page must remain the last selected page");
 +        }
-+        const auto rows = std::max(spill_ids.size(), selected.size());
++        const auto rows = std::max(spill_ids.size(), restore_enabled ? selected.size() : 0U);
 +        if (rows > p.kvmem_window_tokens / page_tokens) {
 +            throw std::logic_error("KVMem staging exceeds its physical window");
 +        }
-+        const auto staging_bytes = rows * backend.page_bytes;
-+        if (staging_bytes && (!p.memory_kv_staging || p.memory_kv_staging->size() < staging_bytes)) {
-+            p.memory_kv_staging = std::make_unique<PinnedHostBuffer>(staging_bytes);
++        // One Program-owned buffer is shared by every batch and lane. Transfers
++        // synchronize before returning, so no pointer survives a scheduler yield.
++        // Grow only to the batch limit. Small captures need no fixed 64 MiB floor.
++        if (rows) {
++            const auto pages = std::min<std::size_t>(rows,
++                std::max<std::size_t>(1, transfer_staging_limit / backend.page_bytes));
++            const auto bytes = pages * backend.page_bytes;
++            if (!p.memory_kv_staging || p.memory_kv_staging->size() < bytes) {
++                // No batch is in flight here. Drop old pin before allocation so
++                // growth never temporarily charges both capacities to the driver.
++                p.memory_kv_staging.reset();
++                p.memory_kv_staging = std::make_unique<PinnedHostBuffer>(bytes);
++            }
 +        }
-+        // Only this bounded buffer participates in CUDA host transfers. Archive
-+        // records are byte-preserving pageable RAM and are never CUDA-registered.
-+        auto* staging = p.memory_kv_staging
-+            ? static_cast<std::byte*>(p.memory_kv_staging->data()) : nullptr;
-+        for (std::size_t i = 0; i < spill_ids.size(); ++i)
-+            spill_records.push_back(staging + i * backend.page_bytes);
-+        for (std::size_t i = 0; i < selected.size(); ++i)
-+            restore_records.push_back(staging + i * backend.page_bytes);
 +        if (verify_restore && p.kvmem_options.verify_transfers) {
 +            const auto bytes_state = p.state_images->host_layout().image_bytes;
 +            before = std::make_unique<PinnedHostBuffer>(bytes_state);
 +            after = std::make_unique<PinnedHostBuffer>(bytes_state);
-+            checked = std::make_unique<PinnedHostBuffer>(selected.size() * backend.page_bytes);
 +            std::memset(before->data(), 0, bytes_state);
 +            std::memset(after->data(), 0, bytes_state);
-+            std::memset(checked->data(), 0, selected.size() * backend.page_bytes);
 +        }
 +    }
 +
 +    void start_spill() override {
 +        auto& p = backend.program;
 +        auto& seq = backend.sequence;
-+        bind_staging();
-+        if (!spill_ids.empty())
-+            std::memset(p.memory_kv_staging->data(), 0, spill_ids.size() * backend.page_bytes);
 +        if (before) {
 +            std::array<std::byte*, 1> rows{static_cast<std::byte*>(before->data())};
 +            p.state_images->copy_to_host_segments(p.state_store->physical_slot(seq.state.write),
 +                rows, p.state_images->host_layout().image_bytes, p.compute_streams);
-+        }
-+        p.text_kv_pages->physical_pool().copy_to_host_records(sources, spill_records,
-+            spill_ids, backend.layout, p.compute_streams);
-+        if (backend.mtp_layout) {
-+            std::vector<std::byte*> mtp_records;
-+            for (auto* record : spill_records) mtp_records.push_back(record + backend.layout.page_stride);
-+            p.backend_kv_pages->physical_pool().copy_to_host_records(mtp_sources, mtp_records,
-+                spill_ids, *backend.mtp_layout, p.compute_streams);
-+        }
-+        p.device.synchronize();
-+        for (std::size_t i = 0; i < spill_ids.size(); ++i) {
-+            if (source_epochs[i] != p.text_kv_addresses->content_epoch(seq.kv->text, spill_slots[i])) {
-+                throw std::logic_error("KVMem source epoch changed during spill");
-+            }
-+            if (backend.mtp_layout && mtp_source_epochs[i] !=
-+                p.backend_kv_addresses->content_epoch(*seq.kv->backend, spill_slots[i])) {
-+                throw std::logic_error("KVMem MTP source epoch changed during spill");
-+            }
-+            if (!asynchronous) {
-+                auto* destination = record(spill_ids[i]);
-+                destination->write(0, spill_records[i], backend.page_bytes);
-+                if (valid_columns(spill_ids[i], seq.text_kv_valid) == page_tokens) destination->seal();
-+            }
++            p.device.synchronize(); // Also complete verification capture when no page needs spilling.
 +        }
 +        if (asynchronous) {
 +            storage_work = std::make_shared<StorageWork>(p.memory_payload_storage, backend.page_bytes);
@@ -6557,12 +6534,46 @@ index 0000000000000000000000000000000000000000..14ca80b328b295ee8d96b188bc156127
 +            auto scratch = p.memory_transfer_storage.reserve((spill_ids.size() + selected.size()) * backend.page_bytes);
 +            work.captured = scratch.allocate(spill_ids.size() * backend.page_bytes);
 +            work.restored = scratch.allocate(selected.size() * backend.page_bytes);
-+            for (std::size_t i = 0; i < spill_ids.size(); ++i) {
-+                std::memcpy(work.captured.writable_data() + i * backend.page_bytes, spill_records[i], backend.page_bytes);
-+                // Old partial pages remain recoverable until publication, but
-+                // their storage tier may change while the new copy is prepared.
-+                if (auto* old = record(spill_ids[i])) old->seal();
++        }
++        // Finish every D2H batch before touching its host bytes or reusing pin.
++        // No Device page is unmapped until all source pages have durable copies.
++        for (std::size_t begin = 0; begin < spill_ids.size();) {
++            const auto count = std::min(batch_pages(), spill_ids.size() - begin);
++            auto rows = staging_records(count);
++            std::memset(rows.front(), 0, count * backend.page_bytes);
++            const auto ids = std::span(spill_ids).subspan(begin, count);
++            p.text_kv_pages->physical_pool().copy_to_host_records(
++                std::span(sources).subspan(begin, count), rows, ids, backend.layout, p.compute_streams);
++            if (backend.mtp_layout) {
++                auto mtp_rows = rows;
++                for (auto& row : mtp_rows) row += backend.layout.page_stride;
++                p.backend_kv_pages->physical_pool().copy_to_host_records(
++                    std::span(mtp_sources).subspan(begin, count), mtp_rows,
++                    ids, *backend.mtp_layout, p.compute_streams);
 +            }
++            p.device.synchronize();
++            for (std::size_t i = 0; i < count; ++i) {
++                const auto index = begin + i;
++                if (source_epochs[index] != p.text_kv_addresses->content_epoch(seq.kv->text, spill_slots[index]))
++                    throw std::logic_error("KVMem source epoch changed during spill");
++                if (backend.mtp_layout && mtp_source_epochs[index] !=
++                    p.backend_kv_addresses->content_epoch(*seq.kv->backend, spill_slots[index]))
++                    throw std::logic_error("KVMem MTP source epoch changed during spill");
++                if (asynchronous) {
++                    std::memcpy(storage_work->captured.writable_data() + index * backend.page_bytes,
++                        rows[i], backend.page_bytes);
++                } else {
++                    auto* destination = record(spill_ids[index]);
++                    destination->write(0, rows[i], backend.page_bytes);
++                    if (valid_columns(spill_ids[index], seq.text_kv_valid) == page_tokens) destination->seal();
++                }
++            }
++            begin += count;
++        }
++        if (asynchronous) {
++            auto& work = *storage_work;
++            for (auto id : spill_ids)
++                if (auto* old = record(id)) old->seal();
 +            for (std::size_t i = 0; i < selected.size(); ++i) {
 +                if (std::find(spill_ids.begin(), spill_ids.end(), selected[i]) != spill_ids.end()) continue;
 +                auto* source = record(selected[i]);
@@ -6616,15 +6627,20 @@ index 0000000000000000000000000000000000000000..14ca80b328b295ee8d96b188bc156127
 +    void start_restore() override {
 +        auto& p = backend.program;
 +        auto& seq = backend.sequence;
-+        bind_staging();
-+        if (asynchronous) {
-+            if (!host_published) throw std::logic_error("KVMem restored before storage completion");
-+            if (storage_work->restored.size())
-+                std::memcpy(p.memory_kv_staging->data(), storage_work->restored.data(), storage_work->restored.size());
-+        } else {
-+            for (std::size_t i = 0; i < selected.size(); ++i) {
-+                record(selected[i])->read(0,
-+                    static_cast<std::byte*>(p.memory_kv_staging->data()) + i * backend.page_bytes, backend.page_bytes);
++        if (!restore_enabled) throw std::logic_error("KVMem archive-only transfer cannot restore");
++        if (asynchronous && !host_published)
++            throw std::logic_error("KVMem restored before storage completion");
++        // Synchronous restores use RAM-only history or materialization's resident
++        // records. Retain and validate those leases before destroying the old
++        // view, so batching cannot move a fallible disk read past this boundary.
++        std::vector<kvmem::HostKvLease> resident;
++        if (!asynchronous) {
++            resident.reserve(selected.size());
++            for (const auto id : selected) {
++                auto lease = record(id)->lease();
++                if (!lease.data() || lease.size() != backend.page_bytes)
++                    throw std::logic_error("KVMem synchronous restore requires a complete resident page");
++                resident.push_back(std::move(lease));
 +            }
 +        }
 +        destructive = true;
@@ -6635,48 +6651,57 @@ index 0000000000000000000000000000000000000000..14ca80b328b295ee8d96b188bc156127
 +            p.backend_kv_addresses->destructive_truncate(*seq.kv->backend, 0);
 +            p.backend_kv_addresses->ensure_mapped_to_tokens(*seq.kv->backend, compact_end, p.compute_streams);
 +        }
-+        std::vector<DeviceKVPageHandle> destinations;
-+        for (std::uint32_t i = 0; i < selected.size(); ++i) {
-+            destinations.push_back(p.text_kv_addresses->physical_page(seq.kv->text, i));
-+        }
-+        auto& pool = p.text_kv_pages->physical_pool();
-+        pool.copy_from_host_records(restore_records, selected, destinations, backend.layout, p.compute_streams);
-+        std::vector<DeviceKVPageHandle> mtp_destinations;
-+        if (backend.mtp_layout) {
-+            std::vector<const std::byte*> mtp_records;
-+            for (std::size_t i = 0; i < selected.size(); ++i) {
-+                mtp_destinations.push_back(p.backend_kv_addresses->physical_page(*seq.kv->backend,
-+                    static_cast<std::uint32_t>(i)));
-+                mtp_records.push_back(restore_records[i] + backend.layout.page_stride);
++        std::vector<std::byte> expected;
++        for (std::size_t begin = 0; begin < selected.size();) {
++            const auto count = std::min(batch_pages(), selected.size() - begin);
++            auto rows = staging_records(count);
++            for (std::size_t i = 0; i < count; ++i) {
++                if (asynchronous)
++                    std::memcpy(rows[i], storage_work->restored.data() + (begin + i) * backend.page_bytes,
++                        backend.page_bytes);
++                else std::memcpy(rows[i], resident[begin + i].data(), backend.page_bytes);
 +            }
-+            p.backend_kv_pages->physical_pool().copy_from_host_records(mtp_records, selected,
-+                mtp_destinations, *backend.mtp_layout, p.compute_streams);
-+        }
-+        p.device.synchronize();
-+        if (checked) {
-+            std::vector<std::byte*> rows;
-+            for (std::size_t i = 0; i < selected.size(); ++i) {
-+                rows.push_back(static_cast<std::byte*>(checked->data()) + i * backend.page_bytes);
-+            }
-+            pool.copy_to_host_records(destinations, rows, {}, backend.layout, p.compute_streams);
++            if (before) expected.assign(rows.front(), rows.front() + count * backend.page_bytes);
++            const std::vector<const std::byte*> input(rows.begin(), rows.end());
++            const auto ids = std::span(selected).subspan(begin, count);
++            std::vector<DeviceKVPageHandle> destinations, mtp_destinations;
++            for (std::size_t i = 0; i < count; ++i)
++                destinations.push_back(p.text_kv_addresses->physical_page(seq.kv->text,
++                    static_cast<std::uint32_t>(begin + i)));
++            auto& pool = p.text_kv_pages->physical_pool();
++            pool.copy_from_host_records(input, ids, destinations, backend.layout, p.compute_streams);
 +            if (backend.mtp_layout) {
-+                std::vector<std::byte*> mtp_rows;
-+                for (auto* record : rows) mtp_rows.push_back(record + backend.layout.page_stride);
-+                p.backend_kv_pages->physical_pool().copy_to_host_records(mtp_destinations, mtp_rows,
-+                    {}, *backend.mtp_layout, p.compute_streams);
++                auto mtp_input = input;
++                for (auto& row : mtp_input) row += backend.layout.page_stride;
++                for (std::size_t i = 0; i < count; ++i)
++                    mtp_destinations.push_back(p.backend_kv_addresses->physical_page(*seq.kv->backend,
++                        static_cast<std::uint32_t>(begin + i)));
++                p.backend_kv_pages->physical_pool().copy_from_host_records(mtp_input, ids,
++                    mtp_destinations, *backend.mtp_layout, p.compute_streams);
 +            }
++            p.device.synchronize();
++            if (before) {
++                // Verify through the same pin window; expected bytes stay in pageable RAM.
++                pool.copy_to_host_records(destinations, rows, {}, backend.layout, p.compute_streams);
++                if (backend.mtp_layout) {
++                    auto mtp_rows = rows;
++                    for (auto& row : mtp_rows) row += backend.layout.page_stride;
++                    p.backend_kv_pages->physical_pool().copy_to_host_records(mtp_destinations, mtp_rows,
++                        {}, *backend.mtp_layout, p.compute_streams);
++                }
++                p.device.synchronize();
++                if (std::memcmp(rows.front(), expected.data(), expected.size()))
++                    throw std::logic_error("KVMem native payload changed during restore");
++            }
++            begin += count;
++        }
++        if (before) {
 +            std::array<std::byte*, 1> state{static_cast<std::byte*>(after->data())};
 +            p.state_images->copy_to_host_segments(p.state_store->physical_slot(seq.state.write),
 +                state, p.state_images->host_layout().image_bytes, p.compute_streams);
 +            p.device.synchronize();
-+            for (std::size_t i = 0; i < rows.size(); ++i) {
-+                if (std::memcmp(rows[i], restore_records[i], backend.page_bytes)) {
-+                    throw std::logic_error("KVMem native payload changed during restore");
-+                }
-+            }
-+            if (std::memcmp(before->data(), after->data(), p.state_images->host_layout().image_bytes)) {
++            if (std::memcmp(before->data(), after->data(), p.state_images->host_layout().image_bytes))
 +                throw std::logic_error("KVMem page transfer changed recurrent state");
-+            }
 +        }
 +        seq.window.restored_bytes += selected.size() * backend.page_bytes;
 +    }
@@ -6731,12 +6756,18 @@ index 0000000000000000000000000000000000000000..14ca80b328b295ee8d96b188bc156127
 +        std::vector<kvmem::HostKvSource> sources;
 +        KvmemHostRecord captured, restored;
 +    };
-+    void bind_staging() {
-+        auto* staging = backend.program.memory_kv_staging
-+            ? static_cast<std::byte*>(backend.program.memory_kv_staging->data()) : nullptr;
-+        spill_records.clear(); restore_records.clear();
-+        for (std::size_t i = 0; i < spill_ids.size(); ++i) spill_records.push_back(staging + i * backend.page_bytes);
-+        for (std::size_t i = 0; i < selected.size(); ++i) restore_records.push_back(staging + i * backend.page_bytes);
++    std::size_t batch_pages() const {
++        const auto& buffer = backend.program.memory_kv_staging;
++        if (!buffer || buffer->size() < backend.page_bytes)
++            throw std::logic_error("KVMem transfer staging cannot hold one native page");
++        return buffer->size() / backend.page_bytes;
++    }
++    std::vector<std::byte*> staging_records(std::size_t count) const {
++        auto* staging = static_cast<std::byte*>(backend.program.memory_kv_staging->data());
++        std::vector<std::byte*> records;
++        records.reserve(count);
++        for (std::size_t i = 0; i < count; ++i) records.push_back(staging + i * backend.page_bytes);
++        return records;
 +    }
 +    KvmemHostRecord* record(std::uint32_t id) {
 +        if (pending.at(id)) return &pending[id];
@@ -6750,10 +6781,9 @@ index 0000000000000000000000000000000000000000..14ca80b328b295ee8d96b188bc156127
 +    std::vector<DeviceKVPageHandle> sources, mtp_sources;
 +    std::vector<std::uint64_t> mtp_source_epochs;
 +    std::vector<std::uint64_t> source_epochs;
-+    std::vector<std::byte*> spill_records;
-+    std::vector<const std::byte*> restore_records;
-+    std::unique_ptr<PinnedHostBuffer> before, after, checked;
++    std::unique_ptr<PinnedHostBuffer> before, after;
 +    std::uint64_t prepared_payload_bytes = 0;
++    const bool restore_enabled;
 +    const bool asynchronous;
 +    bool host_published = false;
 +    std::shared_ptr<StorageWork> storage_work;
