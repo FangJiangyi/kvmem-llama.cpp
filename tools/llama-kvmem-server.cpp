@@ -1,6 +1,5 @@
 #include "llama-kvmem-diag.h"
 #include "llama.h"
-#include "llama-model.h"
 #include "llama-ext.h"
 #include "llama-kvmem-hooks.h"
 #include "llama-kvmem-execution.h"
@@ -390,15 +389,13 @@ static common_params_sampling make_chat_sampling(
 
 static common_chat_msg parse_assistant_output(
         const std::string & content,
-        const common_chat_params & chat,
-        bool parse_tools) {
+        const common_chat_params & chat) {
     try {
         common_chat_parser_params pp(chat);
-        pp.parse_tool_calls = parse_tools;
         if (!chat.parser.empty()) {
-            pp.parser.load(chat.parser);
+            pp.parser = chat.parser;
         }
-        common_chat_msg msg = common_chat_parse(content, false, pp);
+        common_chat_msg msg = common_chat_parse(common_chat_input(content), false, pp);
         if (msg.role.empty()) {
             msg.role = "assistant";
         }
@@ -511,12 +508,11 @@ struct ResponsesStreamOut {
 
     common_chat_parser_params pp;
 
-    ResponsesStreamOut(const common_chat_params & chat, bool parse_tools, const std::string & id)
+    ResponsesStreamOut(const common_chat_params & chat, const std::string & id)
         : request_id(id) {
         pp = common_chat_parser_params(chat);
-        pp.parse_tool_calls = parse_tools;
         if (!chat.parser.empty()) {
-            pp.parser.load(chat.parser);
+            pp.parser = chat.parser;
         }
     }
 
@@ -524,7 +520,7 @@ struct ResponsesStreamOut {
         acc = text;
         std::vector<std::string> events;
         try {
-            common_chat_msg msg = common_chat_parse(acc, partial, pp);
+            common_chat_msg msg = common_chat_parse(common_chat_input(acc), partial, pp);
             if (msg.empty() && partial) {
                 return events;
             }
@@ -559,11 +555,10 @@ struct StreamChatOut {
     int n_id = 0;
     int n_tc_delta = 0;
 
-    StreamChatOut(const common_chat_params & chat, bool parse_tools, const std::string & id) : request_id(id) {
+    StreamChatOut(const common_chat_params & chat, const std::string & id) : request_id(id) {
         pp = common_chat_parser_params(chat);
-        pp.parse_tool_calls = parse_tools;
         if (!chat.parser.empty()) {
-            pp.parser.load(chat.parser);
+            pp.parser = chat.parser;
         }
     }
 
@@ -571,7 +566,7 @@ struct StreamChatOut {
         acc = text;
         std::vector<json> chunks;
         try {
-            common_chat_msg msg = common_chat_parse(acc, partial, pp);
+            common_chat_msg msg = common_chat_parse(common_chat_input(acc), partial, pp);
             if (msg.empty() && partial) {
                 return chunks;
             }
@@ -1625,8 +1620,8 @@ int main(int argc, char ** argv) {
         for (int i = 0; i < llama_model_n_devices(st.model); ++i)
             add_monitor_device(llama_model_get_device(st.model, i));
     } else {
-        for (int i = 0; i < llama_model_n_layer(st.model); ++i) add_monitor_device(st.model->dev_layer(i));
-        add_monitor_device(st.model->dev_output());
+        for (int i = 0; i < llama_model_n_layer(st.model); ++i) add_monitor_device(kvmem_model_layer_device(st.model, i));
+        add_monitor_device(kvmem_model_layer_device(st.model, -1));
     }
     props["execution"] = {{"monitor_devices", monitor_devices},
         {"mode", monitor_devices.size() < 2 ? "single" : mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR ? "tensor" : "layer"}};
@@ -1869,7 +1864,7 @@ int main(int argc, char ** argv) {
             res.set_content(json{{"error", std::string("chat template: ") + e.what()}}.dump(), "application/json");
             return;
         }
-        const std::string & prompt = formatted.prompt;
+        const std::string prompt = formatted.prompt.str();
         std::shared_ptr<kvmem_prompt> parsed_prompt;
         try {
             parsed_prompt = media_files.empty()
@@ -2077,9 +2072,6 @@ int main(int argc, char ** argv) {
                 sparams.reasoning_budget_start.size(),
                 sparams.reasoning_budget_end.size(),
                 sparams.reasoning_budget_forced.size());
-        const bool parse_tools = !cr.tools.empty() &&
-                cr.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
-
         json request_params = default_params;
         request_params["n_predict"] = cr.max_tokens;
         request_params["max_tokens"] = cr.max_tokens;
@@ -2139,7 +2131,7 @@ int main(int argc, char ** argv) {
 
         int n_cache_hit = 0;
         auto emit_json = [&](const std::string & content, int n_gen, bool hit_limit) {
-            common_chat_msg msg = parse_assistant_output(content, formatted, parse_tools);
+            common_chat_msg msg = parse_assistant_output(content, formatted);
             std::vector<std::string> tc_ids;
             int n_id = 0;
             msg.set_tool_call_ids(tc_ids, [&n_id, &request_id]() {
@@ -2208,7 +2200,7 @@ int main(int argc, char ** argv) {
             res.set_header("X-Accel-Buffering", "no");
             auto monitor_error = std::make_shared<std::atomic<bool>>(false);
             res.set_chunked_content_provider("text/event-stream",
-                [slot, &st, &req, toks, cid, request_id, created, max_tokens, sparams, parse_tools, formatted, stops,
+                [slot, &st, &req, toks, cid, request_id, created, max_tokens, sparams, formatted, stops,
                  spec_stream, ctx, vocab, make_emit_gen_wall, timings, is_responses, monitor_error](size_t, httplib::DataSink & sink) mutable {
                     kvmem_execution_scope execution(st.execution.get());
                     StreamIo io;
@@ -2235,7 +2227,7 @@ int main(int argc, char ** argv) {
                     };
                     std::optional<ResponsesStreamOut> responses;
                     if (is_responses) {
-                        responses.emplace(formatted, parse_tools, request_id);
+                        responses.emplace(formatted, request_id);
                     }
                     const bool stream_open = is_responses
                         ? [&] {
@@ -2279,7 +2271,7 @@ int main(int argc, char ** argv) {
 
                     std::vector<llama_token> gen;
                     std::string content;
-                    StreamChatOut sco(formatted, parse_tools, request_id);
+                    StreamChatOut sco(formatted, request_id);
                     bool aborted = false;
                     if (spec_stream) {
                         const auto gst = kvmem_spec_generate(st.ctx, st.model, st.spec, toks, max_tokens, sparams,

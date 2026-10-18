@@ -293,6 +293,14 @@ if (KVMEM_BUILD_LLAMA)
     target_link_libraries(llama-kvmem-cli PRIVATE llama llama-common kvmem)
     target_compile_features(llama-kvmem-cli PRIVATE cxx_std_17)
 
+    option(KVMEM_BUILD_PERF_TOOLS "Build manual fixed-token backend comparison driver" OFF)
+    if (KVMEM_BUILD_PERF_TOOLS)
+        add_executable(kvmem-llama-backend-perf tests/llama-backend-perf.cpp)
+        target_include_directories(kvmem-llama-backend-perf PRIVATE src/adapter)
+        target_compile_definitions(kvmem-llama-backend-perf PRIVATE KVMEM_BENCH_ADAPTER=1)
+        target_link_libraries(kvmem-llama-backend-perf PRIVATE llama llama-common kvmem)
+    endif()
+
     add_executable(llama-kvmem-server tools/llama-kvmem-server.cpp tools/llama-kvmem-driver.cpp tools/kvmem-spec.cpp
         tools/kvmem-vision.cpp tools/kvmem-responses.cpp tools/kvmem-responses-stream.cpp
         backends/llamacpp/tools/server/server-common.cpp

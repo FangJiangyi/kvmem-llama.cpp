@@ -55,6 +55,9 @@ bool kvmem_spec_start(kvmem_spec_session & sess,
 
 void kvmem_spec_stop(kvmem_spec_session & sess);
 
+// Bridge existing adapter batches to upstream's state-aware batch interface.
+bool kvmem_spec_process(common_speculative * spec, llama_context * ctx, const llama_batch & batch);
+
 // decode_span / spec_decode_span: client disconnected mid-prefill.
 constexpr int KVMEM_DECODE_ABORT = -100;
 

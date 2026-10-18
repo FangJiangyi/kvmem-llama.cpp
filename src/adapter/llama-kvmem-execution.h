@@ -28,4 +28,8 @@ struct llama_kvmem_execution_state {
 
 llama_kvmem_execution_state & kvmem_current_execution();
 std::shared_ptr<kvmem::HostKvStorage> kvmem_execution_payload_storage();
-std::shared_ptr<kvmem::SpillFile> kvmem_execution_spill_file(const llama_kvmem_execution_state * state);
+LLAMA_API std::shared_ptr<kvmem::SpillFile> kvmem_execution_spill_file(const llama_kvmem_execution_state * state);
+
+// Keep the server independent of unexported native model internals. layer < 0
+// selects the output layer; tensor-split enumeration uses llama's public API.
+LLAMA_API ggml_backend_dev_t kvmem_model_layer_device(const llama_model * model, int layer);
