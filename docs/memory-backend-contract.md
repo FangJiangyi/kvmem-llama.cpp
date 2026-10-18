@@ -81,6 +81,12 @@ Linux 目前只有公共层 WSL/GCC 证据，没有原生 Linux CUDA 推理验�
 
 ## LCP 与前缀 checkpoint
 
+尾部用户消息改写导致反复全量 prefill 的问题定位、LCP 边界留点方案和最初的三轮回归
+由 [Iscream132](https://github.com/Iscream132) 在 [#101](https://github.com/kvmem/kvmem/issues/101)
+与 [#102](https://github.com/kvmem/kvmem/pull/102) 中贡献。当前共享实现通过
+[#137](https://github.com/kvmem/kvmem/pull/137) 合入主线；原始贡献及证据更正见
+[贡献记录](prefix-reuse-checkpoint-validation-2026-10-03.md)。
+
 主线的公共前缀恢复核心来自 `9d88c5c`，接入 llama.cpp 和 NInfer。
 `prefix_checkpoint.hpp` 统一恢复边界、留点规划与 `CheckpointCatalog`，不解释原生状态字节。
 适配器仍须证明 token、媒体、位置、KV/统计及执行状态在同一已提交边界有效。
@@ -103,6 +109,8 @@ LCP，作为重新计算时捕获复用锚点的提示。`prefix_anchor` 将提�
 
 验证入口：公共层 `prefix_checkpoint_test`；llama 的 `kvmem-prefix-reuse-regression` 在没有
 `KVMEM_TEST_MODEL`/`KVMEM_TEST_GPU` 时以 77 跳过，有模型时运行六轮尾部改写 HTTP 回归；
+`kvmem-prefix-reuse-mtp-regression` 使用 `KVMEM_TEST_MTP_MODEL`（含 MTP 的模型）与同一 GPU UUID，
+运行单会话、MTP3 的十二轮回归，要求第三轮起持续复用并确实产生 draft 验证；缺少模型或 GPU 时也以 77 跳过。
 NInfer 的 `ninfer_p4_history` 提供 `prefix-anchor` 与 `prefix-anchor-ssd` 模式，检查原生状态、
 复用进度和取消恢复。SSD 模式还要求实际发生冷 KV 读写，不能用仅开启参数代替验收。
 
