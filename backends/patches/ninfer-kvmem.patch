@@ -17226,7 +17226,7 @@ index 5f1825d18b97fbbaeb04ce2ab210b1046bf07c5e..243780fc47b756b56d8c023b6aeb4d95
                       "--wide-only|--parallel-tiles-only|--quantized-depth-only]\n";
          return 2;
 diff --git a/tests/ops/test_sliding_window_attention.cpp b/tests/ops/test_sliding_window_attention.cpp
-index af68951e0f7ad4863bcd59b4428057578b70048a..50e6148002cb6f1a53e5f2717a45b3848aa1119c 100644
+index af68951e0f7ad4863bcd59b4428057578b70048a..347038b6b60ce9e5e1f3b7d2d739c8918dbecf67 100644
 --- a/tests/ops/test_sliding_window_attention.cpp
 +++ b/tests/ops/test_sliding_window_attention.cpp
 @@ -23,7 +23,7 @@ namespace {
@@ -17391,7 +17391,7 @@ index af68951e0f7ad4863bcd59b4428057578b70048a..50e6148002cb6f1a53e5f2717a45b384
                                    envelope, workspace, out_tensor, nullptr);
      cuda_synchronize();
  
-@@ -371,6 +405,15 @@ int main() {
+@@ -371,6 +405,16 @@ int main() {
      failures += run_case(8, 65, InputProfile::Random, 96, 0);
      failures += run_case(8, 4096, InputProfile::Random, 4096, 0);
      failures += run_batch_case();
@@ -17400,6 +17400,7 @@ index af68951e0f7ad4863bcd59b4428057578b70048a..50e6148002cb6f1a53e5f2717a45b384
 +    // suffixes, empty context, and device floor changes under a captured CUDA Graph.
 +    for (int window : {4096, 2048}) {
 +        kWindow = window;
++        failures += run_case(4, 65, InputProfile::Random, 96, 4, 63, true);
 +        failures += run_case(4, 8194, InputProfile::Random, 262144, 4, 8178, true);
 +        failures += run_case(16, 8194, InputProfile::Random, 262144, 16, 8194);
 +        failures += run_case(8, 8194, InputProfile::Random, 262144, 0, 8194);
