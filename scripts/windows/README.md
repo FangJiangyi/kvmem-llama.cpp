@@ -1,5 +1,54 @@
 # KVMem Windows rc3 runtime / Windows rc3 运行包
 
+## Multi-backend launchers / 多后端启动入口
+
+The current launch UI calls `start-backend.ps1` internally with typed JSON settings.
+NInfer exposes default/off thinking mode, thinking-token budget, reasoning effort
+and preservation of prior assistant reasoning. Effort levels depend on the model.
+The UI's additional native arguments remain a small allowlist; direct launchers and
+worker EXEs remain available for advanced options.
+
+当前启动 UI 通过 JSON 结构化设置调用内部 `start-backend.ps1`。NInfer 可设置默认/关闭思考、
+思考预算、思考强度和保留历史思考；具体强度由模型决定。UI 的附加原生参数仍有白名单，
+完整高级选项可用脚本或直接调用后端 EXE。
+
+The source and newly built packages share `start-ninfer.ps1`, including `-Model`,
+`-NoVision`, `-ThinkingBudget`, `-ReasoningEffort` and `-PreserveThinking`.
+Its 0.18 recipe differs from the unified launcher's defaults. Older ZIPs retain their
+original scripts. In a PowerShell session, pass an array; for an external `-File`
+invocation put native options last after `-WorkerArgs`:
+
+源码和新运行包使用同一份 NInfer 快捷入口；旧 ZIP 仍使用原脚本。
+PowerShell 内直接调用使用数组；外部 `-File` 调用时将原生参数放在最后：
+
+```powershell
+& .\scripts\windows\start-ninfer.ps1 -Model 'D:\models\model.ninfer' `
+  -ThinkingBudget 8192 -WorkerArgs @('--default-reasoning-effort', 'medium', '--preserve-thinking')
+
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\start-ninfer.ps1 `
+  -Model 'D:\models\model.ninfer' -ThinkingBudget 8192 `
+  -WorkerArgs --default-reasoning-effort medium --preserve-thinking
+```
+
+For exact argument boundaries across shells, save a UTF-8 JSON array in `worker-args.json`
+and pass `-WorkerArgsFile .\worker-args.json`. This preserves empty strings,
+embedded quotes and paths ending in a backslash. Both launchers accept this setting.
+It is mutually exclusive with `-WorkerArgs`; the file contains only native arguments,
+not launcher settings or executable paths. Arrays are never evaluated as code or split
+on spaces. Named thinking settings must not duplicate the corresponding native options.
+
+跨 shell 传递复杂值时，将 UTF-8 JSON 数组保存为 `worker-args.json`，使用
+`-WorkerArgsFile .\worker-args.json`。空字符串、引号和路径末尾反斜杠均完整保留。
+此选项与 `-WorkerArgs` 互斥；文件只写原生参数，不写启动器设置或 EXE 路径。
+命名思考设置与对应原生参数不能重复指定。
+
+```json
+["--default-reasoning-effort", "medium", "--preserve-thinking"]
+```
+
+The following sections describe the older rc3 IQ3/IQ4-specific scripts.
+以下章节描述旧 rc3 的 IQ3/IQ4 专用脚本。
+
 ## Quick start / 快速启动
 
 Choose either the CUDA 13.2.86 or 12.9.86 runtime ZIP and extract the entire package.

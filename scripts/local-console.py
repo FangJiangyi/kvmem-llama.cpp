@@ -33,11 +33,11 @@ DEFAULTS = dict(Backend='ninfer', Model='', Worker='', Gpu='', Context=262144,
 STRINGS = {'Backend', 'Model', 'Worker', 'Gpu', 'ListenHost', 'KvType', 'KvTypeK', 'KvTypeV', 'DiskPath',
            'VisionResidency',
            'DeviceProfile', 'ScoreAggregation', 'ApiKey', 'ModelAlias', 'LogLevel',
-           'ChatTemplateFile', 'ThinkingMode'}
+           'ChatTemplateFile', 'ThinkingMode', 'ReasoningEffort'}
 INTEGERS = {'Context', 'Budget', 'Reserve', 'HostMiB', 'Prefill', 'MaxTokens', 'Port',
             'MtpDrafts', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions',
             'VisionTokens', 'ThinkingBudget', 'SinkTokens', 'RecentTokens', 'DiskMiB'}
-BOOLEANS = {'AdaptiveMtp', 'FastPrefill', 'Vision', 'NoLrfu'}
+BOOLEANS = {'AdaptiveMtp', 'FastPrefill', 'Vision', 'NoLrfu', 'PreserveThinking'}
 DECIMALS = {'LrfuLambda', 'LrfuTopFraction'}
 # Deliberately limited native escape hatch. Common options must not be duplicated.
 NATIVE = {'llamacpp': {'--threads', '--threads-batch', '--n-gpu-layers'},
@@ -84,6 +84,12 @@ def normalize(data, backends):
         raise ValueError('ThinkingMode must be default, on or off')
     if p['Backend'] == 'ninfer' and p.get('ThinkingMode') == 'on':
         raise ValueError('NInfer supports default/off at startup; thinking-on is selected by requests')
+    if p.get('ReasoningEffort') not in (None, 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+        raise ValueError('Unsupported ReasoningEffort')
+    if p['Backend'] != 'ninfer' and {'ReasoningEffort', 'PreserveThinking'} & p.keys():
+        raise ValueError('ReasoningEffort and PreserveThinking configure NInfer only')
+    if p.get('ThinkingMode') == 'off' and p.get('ReasoningEffort'):
+        raise ValueError('ReasoningEffort conflicts with ThinkingMode off')
     if p['Backend'] != 'llamacpp' and {'KvTypeK', 'KvTypeV'} & p.keys():
         raise ValueError('K/V 独立格式仅适用于 llama.cpp；NInfer 请使用 KV 格式选项。')
     if p.get('Concurrency') is not None and not 1 <= p['Concurrency'] <= (8 if p['Backend'] == 'ninfer' else 4):

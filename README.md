@@ -260,7 +260,7 @@ Source unified launcher examples:
 
 The unified launcher defaults to context=262144, B=32768, R=1024, prefill=128 and output limit=1024. NInfer uses INT8 with MTP/ngram/vision disabled; LRFU is enabled with sink=12288 and recent=1024. Enable NInfer vision/MTP explicitly with options such as `-Vision` and `-MtpDrafts`; pass llama.cpp-specific native options through `-WorkerArgs`.
 
-**The source-tree `start-ninfer.ps1` is a fixed-recipe shortcut reading `model.ninfer` from the repository root. It does not expose the packaged shortcut's extra `-Model`/`-NoVision` options.** Use the source unified launcher for custom models and settings; the earlier package quick start applies to extracted release ZIPs.
+The source-tree and newly built packages use the same `start-ninfer.ps1` shortcut. It accepts `-Model`, `-NoVision`, thinking settings and extra native arguments while retaining the 0.18 recipe. See the [Windows argument-passing guide](scripts/windows/README.md#multi-backend-launchers--多后端启动入口) for PowerShell arrays, external `-File` calls and exact JSON argument files. Previously published ZIPs retain their original scripts until updated.
 
 ### Linux / ROCm
 

@@ -635,6 +635,13 @@ UI 只提供常用设置，不复制完整原生命令行。以下名称属于 U
 
 启动器的同一设置不能同时从命名字段和 `WorkerArgs` 覆盖。未使用相应命名字段时，直接脚本仍可保留原有原生高级参数；UI 的原生参数数组继续使用小范围白名单，不开放任意参数传递。
 
+NInfer 启动器和 UI 另提供 `ReasoningEffort` 与 `PreserveThinking`，分别映射到
+`--default-reasoning-effort` 与 `--preserve-thinking`；当前两个控件只对 NInfer 开放。
+思考模式为 off 时不得设置思考强度；保留历史思考独立控制。`ThinkingBudget` 保持原有映射。
+UI 继续通过 JSON 参数数组调用内部脚本。直接脚本增加 `WorkerArgsFile`，读取 UTF-8 JSON
+字符串数组，和 `WorkerArgs` 互斥，读取后走同一套冲突校验及原生参数编码。
+外部 `-File` 调用可将多个原生参数放在最后的 `-WorkerArgs` 后；复杂值使用参数文件。
+
 ### 已实现的布局、帮助与条件联动
 
 顶部资源区展示逻辑上下文、GPU 历史预算 B 和生成预留 R；RAM 历史预算 H 放在“缓存与历史”。参数说明通过信息按钮悬浮、键盘聚焦或点击显示，Escape 或点击外部关闭，不占用表单行高。禁用控件的具体原因也通过该提示展示。
