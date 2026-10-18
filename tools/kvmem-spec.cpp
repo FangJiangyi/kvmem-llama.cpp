@@ -240,8 +240,10 @@ kvmem_spec_gen_stats kvmem_spec_generate(
         const std::vector<llama_token> & prompt,
         int n_predict,
         float temp,
-        kvmem_spec_on_token on_token) {
+        kvmem_spec_on_token on_token,
+        uint32_t seed) {
     common_params_sampling sparams;
+    sparams.seed = seed;
     if (temp <= 0.0f) {
         sparams.temp = 0.0f;
         sparams.min_p = 0.0f;
@@ -305,6 +307,9 @@ kvmem_spec_gen_stats kvmem_spec_generate(
     bool has_eos = false;
     int64_t verify_us = 0, fold_us = 0;
     uint64_t verify_calls = 0, committed_rows = 0;
+    const auto generation_start = ggml_time_us();
+    bool replaying = false;
+    st.accepted_per_position.resize(std::max(0, sess.spec_params.speculative.draft.n_max), 0);
 
     while (st.n_gen < n_predict && !has_eos) {
         if (abort && abort()) {
@@ -337,6 +342,7 @@ kvmem_spec_gen_stats kvmem_spec_generate(
             draft_params.result = &draft;
             draft_params.n_past_logical = n_past;
             common_speculative_draft(spec);
+            st.draft_tokens += draft.size();
 
             const bool host_ckpt = sess.use_ckpt_tgt
                     || (sess.n_rs_tgt > 0 && draft.size() > sess.n_rs_tgt);
@@ -398,6 +404,8 @@ kvmem_spec_gen_stats kvmem_spec_generate(
         auto ids = common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, draft);
         verify_us += ggml_time_us() - verify_start;
         ++verify_calls;
+        ++st.generation_rounds;
+        if (draft.empty()) ++st.fallback_rounds;
         ids.resize(std::min(ids.size(), (size_t) (n_predict - st.n_gen)));
         for (size_t i = 0; i < ids.size(); ++i) {
             if (llama_vocab_is_eog(vocab, ids[i])) {
@@ -412,6 +420,7 @@ kvmem_spec_gen_stats kvmem_spec_generate(
 
         if (restore) {
             ++st.n_restore;
+            replaying = true;
             llama_kvmem_decode_mean_discard();
             draft = std::move(ids);
             ckpt.load_tgt(ctx_tgt, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
@@ -465,6 +474,12 @@ kvmem_spec_gen_stats kvmem_spec_generate(
         n_past += (int) ids.size() - 1;
         st.n_drafted += (int) n_draft;
         st.n_accept += (int) ids.size() - 1;
+        const size_t accepted = ids.size() - 1 - (replaying && ids.size() > 1 ? 1 : 0);
+        st.accepted_tokens += accepted;
+        if (n_draft > 0) ++st.verification_steps;
+        st.accepted_per_position.resize(std::max(st.accepted_per_position.size(), accepted), 0);
+        for (size_t i = 0; i < accepted; ++i) ++st.accepted_per_position[i];
+        replaying = false;
 
         if (sess.use_gdn_replay) {
             if (!llama_kvmem_remove_logical(ctx_tgt, n_past, -1) ||
@@ -507,6 +522,7 @@ kvmem_spec_gen_stats kvmem_spec_generate(
         if (!sess.use_gdn_replay) llama_kvmem_truncate_cached(n_past);
     }
 
+    st.wall_ms = (ggml_time_us() - generation_start) / 1000.0;
     kvmem_diag("KVMEM_TRACE spec_stats n_gen=%d n_drafted=%d n_accept=%d n_restore=%d accept_pct=%.1f\n",
             st.n_gen, st.n_drafted, st.n_accept, st.n_restore,
             st.n_drafted > 0 ? 100.0 * st.n_accept / st.n_drafted : 0.0);

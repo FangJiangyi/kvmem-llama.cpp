@@ -848,7 +848,7 @@ index 548122fc105d63c2a13d5e86cf1ca6de817de7f8..428392585375e76da3da4391ad783869
  sampled token's top 20 from the same logits before sampling.
  
 diff --git a/docs/serving.md b/docs/serving.md
-index 66ec3957ad7b286e8b309f1e2c15699d324efc07..f15145be96467097e8ee43679c388d2f2d51135a 100644
+index 66ec3957ad7b286e8b309f1e2c15699d324efc07..d4a9fa17ca2883258d67e176826c9c164ec1db63 100644
 --- a/docs/serving.md
 +++ b/docs/serving.md
 @@ -50,7 +50,9 @@ ledger.
@@ -1081,6 +1081,27 @@ index 66ec3957ad7b286e8b309f1e2c15699d324efc07..f15145be96467097e8ee43679c388d2f
  `is_error:true` explicitly in the model prompt. For a visible Assistant tool-use turn, the next
  User turn must provide exactly one leading result for every declared ID; valid results are matched
  by ID and normalized to call order. A history that begins with results remains valid as a truncated
+@@ -2378,3 +2408,20 @@ use [structured output](#structured-output).
+ 
+ Prompt-token usage includes chat-template and expanded media tokens. Generated-token usage comes
+ from accepted output token IDs, including a stop token whose decoded text may be withheld.
++
++### KVMem statistics extension
++
++KVMem builds preserve the native `usage`, `timings`, streaming usage selection, and
++`/metrics` names and meanings. Completed Chat Completions and Responses also carry
++`kvmem.speculative`, separately from those native fields. For Chat streams it is
++on the terminal timing chunk; for Responses it is in the terminal response body.
++
++The extension exposes native proposed/accepted draft counts, verification and
++fallback counts, accepted counts by draft position, and the Engine's actual
++`generation_rounds`. `output_tokens` excludes the first output token;
++`timing_scope: "first_to_last_token"` identifies the matching `wall_ms` interval.
++`tokens_per_round` and `ms_per_round` divide those totals by the observed round
++count. Without observed rounds they are `null`, with `unavailable_reason`, rather
++than being inferred from output tokens. Acceptance is accepted draft tokens divided
++by proposed draft tokens; the bonus token is excluded. Native MTP, ngram and DFlash
++counters keep their existing meanings.
 diff --git a/docs/weight-conversion.md b/docs/weight-conversion.md
 index 7e3c99008808a9400a354837ab5ae6a354bcb8df..e9066cf76d5d22af6341de4664e8c90e49da0688 100644
 --- a/docs/weight-conversion.md
@@ -10590,11 +10611,12 @@ index b2544e2537f973e5ed8fb8e899659fa141fd7f99..64336c8c3966c471dde1e234505bc343
      ninfer::ResolvedSamplingParameters sampling;
      double prepare_seconds     = 0.0;
 diff --git a/src/serve/http_server.cpp b/src/serve/http_server.cpp
-index b539c18e2e679ec305f53677297a68f20b426092..361449d1337bfb3ea26fe2a8694beaeda58cfd39 100644
+index b539c18e2e679ec305f53677297a68f20b426092..f9935408e87737075ec27eeb9b600bd839d624d8 100644
 --- a/src/serve/http_server.cpp
 +++ b/src/serve/http_server.cpp
-@@ -1,9 +1,12 @@
+@@ -1,9 +1,13 @@
  #include "serve/http_server.h"
++#include "serve/openai_chat.h"
 +#include "kvmem/monitor.hpp"
 +#include "kvmem/monitor_hardware.hpp"
  #include "serve/slot_files.h"
@@ -10606,7 +10628,7 @@ index b539c18e2e679ec305f53677297a68f20b426092..361449d1337bfb3ea26fe2a8694beaed
  #include "serve/mcp_proxy.h"
  #include "serve/openai_common.h"
  #include "serve/request_log.h"
-@@ -13,6 +16,7 @@
+@@ -13,6 +17,7 @@
  #include <spdlog/logger.h>
  
  #include <chrono>
@@ -10614,7 +10636,7 @@ index b539c18e2e679ec305f53677297a68f20b426092..361449d1337bfb3ea26fe2a8694beaed
  #include <exception>
  #include <mutex>
  #include <stdexcept>
-@@ -30,7 +34,7 @@ constexpr std::string_view kCorsAllowedHeaders =
+@@ -30,7 +35,7 @@ constexpr std::string_view kCorsAllowedHeaders =
  // API routes keep their own 404s. Every other GET path belongs to the WebUI, whose client-side
  // router owns paths the server has no file for.
  bool is_api_path(std::string_view path) {
@@ -10623,7 +10645,7 @@ index b539c18e2e679ec305f53677297a68f20b426092..361449d1337bfb3ea26fe2a8694beaed
             path == "/stats" || path == "/slots" || path == "/props" || path == "/models" ||
             path.starts_with("/models/") || path == "/completion" || path == "/completions" ||
             path == "/tokenize" || path == "/detokenize" || path == "/apply-template" ||
-@@ -296,6 +300,8 @@ HttpServer::HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> log
+@@ -296,6 +301,8 @@ HttpServer::HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> log
        request_jsonl_(options_.request_log_jsonl, options_.artifact_path, std::move(logger),
                       static_cast<std::uint64_t>(options_.request_log_max_mib) << 20U,
                       options_.request_log_keep) {
@@ -10632,7 +10654,7 @@ index b539c18e2e679ec305f53677297a68f20b426092..361449d1337bfb3ea26fe2a8694beaed
      if (options_.log_stats_panel && panel != nullptr && panel->enabled()) {
          console_stats_ = std::make_unique<ConsoleStatsPanel>(std::move(panel));
      }
-@@ -341,16 +347,24 @@ void HttpServer::RequestLifecycle::response_failure(const RequestFailure& failur
+@@ -341,16 +348,24 @@ void HttpServer::RequestLifecycle::response_failure(const RequestFailure& failur
      owner_->record_response_failure(context_.id, failure);
  }
  
@@ -10659,20 +10681,21 @@ index b539c18e2e679ec305f53677297a68f20b426092..361449d1337bfb3ea26fe2a8694beaed
      request_jsonl_.write_request_rejected(context);
      metrics_.record_rejection();
      operational_log_.request_rejected(context);
-@@ -362,6 +376,12 @@ void HttpServer::record_request_rejected(const RequestRejectionLogContext& conte
+@@ -362,6 +377,13 @@ void HttpServer::record_request_rejected(const RequestRejectionLogContext& conte
  
  void HttpServer::record_request_done(const RequestLogContext& context,
                                       const GenerationOutcome& outcome) {
 +    const auto cached = std::min<int>(outcome.prompt_tokens, outcome.metrics.prefix_cache_hit_tokens);
++    const auto native_timings = completion_timings_json(outcome);
 +    monitor_->update(std::to_string(context.id), {{"prompt_tokens", outcome.prompt_tokens}, {"cached_tokens", cached},
 +        {"generated_tokens", outcome.completion_tokens},
-+        {"prefill_tps", outcome.metrics.prompt_wall_seconds > 0 ? nlohmann::json((outcome.prompt_tokens - cached) / outcome.metrics.prompt_wall_seconds) : nlohmann::json(nullptr)},
-+        {"decode_tps", outcome.metrics.generation_wall_seconds > 0 ? nlohmann::json(outcome.completion_tokens / outcome.metrics.generation_wall_seconds) : nlohmann::json(nullptr)}});
++        {"prefill_tps", native_timings.at("prompt_per_second")},
++        {"decode_tps", native_timings.at("predicted_per_second")}});
 +    monitor_->finish(std::to_string(context.id), "completed");
      request_jsonl_.write_request_done(context, outcome);
      metrics_.record_done(outcome);
      operational_log_.request_done(context, outcome);
-@@ -370,6 +390,7 @@ void HttpServer::record_request_done(const RequestLogContext& context,
+@@ -370,6 +392,7 @@ void HttpServer::record_request_done(const RequestLogContext& context,
  
  void HttpServer::record_request_failure(const RequestLogContext& context,
                                          const RequestFailure& failure) {
@@ -10680,7 +10703,7 @@ index b539c18e2e679ec305f53677297a68f20b426092..361449d1337bfb3ea26fe2a8694beaed
      request_jsonl_.write_request_error(context, failure.machine_message);
      metrics_.record_failure();
      operational_log_.request_failure(context, failure);
-@@ -377,6 +398,7 @@ void HttpServer::record_request_failure(const RequestLogContext& context,
+@@ -377,6 +400,7 @@ void HttpServer::record_request_failure(const RequestLogContext& context,
  }
  
  void HttpServer::record_response_failure(std::uint64_t request_id, const RequestFailure& failure) {
@@ -10688,7 +10711,7 @@ index b539c18e2e679ec305f53677297a68f20b426092..361449d1337bfb3ea26fe2a8694beaed
      operational_log_.response_failure(request_id, failure);
  }
  
-@@ -611,6 +633,13 @@ void HttpServer::register_routes() {
+@@ -611,6 +635,13 @@ void HttpServer::register_routes() {
      server_.Get("/metrics", [this](const httplib::Request& req, httplib::Response& res) {
          handle_metrics(req, res);
      });
@@ -10702,7 +10725,7 @@ index b539c18e2e679ec305f53677297a68f20b426092..361449d1337bfb3ea26fe2a8694beaed
      server_.Get("/stats", [this](const httplib::Request& req, httplib::Response& res) {
          handle_stats(req, res);
      });
-@@ -755,8 +784,10 @@ void HttpServer::handle_webui(const httplib::Request& req, httplib::Response& re
+@@ -755,8 +786,10 @@ void HttpServer::handle_webui(const httplib::Request& req, httplib::Response& re
          return;
      }
      const bool gzip         = req.get_header_value("Accept-Encoding").find("gzip") != std::string::npos;
@@ -10715,7 +10738,7 @@ index b539c18e2e679ec305f53677297a68f20b426092..361449d1337bfb3ea26fe2a8694beaed
                                    : nullptr;
      if (asset == nullptr) { asset = find_webui_asset("index.html", gzip); }
      if (asset == nullptr) {
-@@ -1038,7 +1069,7 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
+@@ -1038,7 +1071,7 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
          {"frequency_penalty", overrides.frequency_penalty.value_or(preset.frequency_penalty)},
      };
      params["seed"] = overrides.seed ? nlohmann::json(*overrides.seed) : nlohmann::json(-1);
@@ -10724,7 +10747,7 @@ index b539c18e2e679ec305f53677297a68f20b426092..361449d1337bfb3ea26fe2a8694beaed
          {"default_generation_settings",
           {{"n_ctx", facts.capacity.max_context},
            {"speculative", options.speculative.backend != ninfer::SpeculativeBackend::None},
-@@ -1055,6 +1086,36 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
+@@ -1055,6 +1088,36 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
          // The WebUI ungreys its "Use llama-server proxy" option from this flag alone.
          {"cors_proxy_enabled", options_.webui_mcp_proxy},
      };
@@ -10761,7 +10784,7 @@ index b539c18e2e679ec305f53677297a68f20b426092..361449d1337bfb3ea26fe2a8694beaed
      res.set_content(props.dump(), "application/json");
  }
  
-@@ -1349,6 +1410,26 @@ HttpServer::ModelFacts HttpServer::model_facts(const ModelRegistry::Lease& lease
+@@ -1349,6 +1412,26 @@ HttpServer::ModelFacts HttpServer::model_facts(const ModelRegistry::Lease& lease
      }
      // memory_summary() takes the Engine execution lock: computed once per Engine instance.
      ModelFacts facts;
@@ -10824,6 +10847,44 @@ index 1b940d6a2eb1e3f23730b089c0a5d8bf7bda4979..4e3d92100fda9771cedc2c0afe33a80c
      ServeMetrics metrics_;
      std::unique_ptr<ConsoleStatsPanel> console_stats_;
      httplib::Server server_;
+diff --git a/src/serve/kvmem_metrics.h b/src/serve/kvmem_metrics.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3c188b9236a0ab46d409efe3c806090378d93f2d
+--- /dev/null
++++ b/src/serve/kvmem_metrics.h
+@@ -0,0 +1,32 @@
++#pragma once
++
++#include "serve/generation_service.h"
++#include "product/speculative_options.h"
++#include <nlohmann/json.hpp>
++
++namespace ninfer::serve {
++
++// Additive diagnostics; the native usage, timings and Prometheus series stay intact.
++inline nlohmann::json kvmem_generation_metrics(const GenerationOutcome& outcome) {
++    using Json = nlohmann::json;
++    const auto& m = outcome.metrics;
++    const auto rounds = m.engine_timing.decode_rounds;
++    const auto tokens = outcome.completion_tokens > 0 ? outcome.completion_tokens - 1 : 0;
++    Json spec{{"backend", product::speculative_backend_name(m.speculative_backend)},
++              {"drafted_tokens", m.speculative_draft_tokens},
++              {"accepted_tokens", m.speculative_accepted_tokens},
++              {"verification_steps", m.speculative_rounds},
++              {"fallback_rounds", m.speculative_fallback_steps},
++              {"accepted_per_position", m.speculative_accepted_per_position},
++              {"generation_rounds", rounds}, {"output_tokens", tokens},
++              {"wall_ms", m.generation_wall_seconds * 1000.0},
++              {"timing_scope", "first_to_last_token"},
++              {"acceptance_rate", m.speculative_draft_tokens
++                   ? Json(double(m.speculative_accepted_tokens) / m.speculative_draft_tokens) : Json(nullptr)},
++              {"tokens_per_round", rounds ? Json(double(tokens) / rounds) : Json(nullptr)},
++              {"ms_per_round", rounds ? Json(m.generation_wall_seconds * 1000.0 / rounds) : Json(nullptr)}};
++    if (!rounds) spec["unavailable_reason"] = "no_decode_rounds_observed";
++    return {{"speculative", std::move(spec)}};
++}
++
++} // namespace ninfer::serve
 diff --git a/src/serve/kvmem_status_json.h b/src/serve/kvmem_status_json.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..e317a8a2b36e2aaa80cc18ee973d7ace94c17979
@@ -11020,6 +11081,42 @@ index df71ac9c0ee2a5e4fce6851cf5b0c672a8a652a2..9fd5654b813a77234a4962b41f12a713
      parse_parallel_tool_calls(body, output.generation);
      parse_messages(body, limits.assistant_prefill, output.generation);
      settle_image_details(output.generation.messages, limits, "messages", "image_url.detail");
+diff --git a/src/serve/openai_chat_response.cpp b/src/serve/openai_chat_response.cpp
+index 4800669fa3dec7341934730e4ba20f30d4adda69..9b9c96b268984bf8209740a84296be8f6096d72e 100644
+--- a/src/serve/openai_chat_response.cpp
++++ b/src/serve/openai_chat_response.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "serve/generation_service.h"
+ #include "serve/openai_common.h"
++#include "serve/kvmem_metrics.h"
+ 
+ #include <nlohmann/json.hpp>
+ 
+@@ -235,6 +236,7 @@ std::string chunk(const OpenAIChatResponseIdentity& identity, Json delta, Json f
+     if (include_usage) { payload["usage"] = nullptr; }
+     if (!timings.is_null()) { payload["timings"] = std::move(timings); }
+     add_slot_identity(payload, slot_identity);
++    if (slot_identity) payload["kvmem"] = kvmem_generation_metrics(*slot_identity);
+     return event(std::move(payload));
+ }
+ 
+@@ -245,6 +247,7 @@ std::string usage_chunk(const OpenAIChatResponseIdentity& identity, const Comple
+     payload["usage"]   = usage_json(usage);
+     payload["timings"] = std::move(timings);
+     add_slot_identity(payload, &outcome);
++    payload["kvmem"] = kvmem_generation_metrics(outcome);
+     return event(std::move(payload));
+ }
+ 
+@@ -308,6 +311,7 @@ std::string make_chat_completion_response(const OpenAIChatResponseIdentity& iden
+     payload["usage"]   = usage_json(usage_from(outcome));
+     payload["timings"] = timings_json(outcome_timings(outcome));
+     add_slot_identity(payload, &outcome);
++    payload["kvmem"] = kvmem_generation_metrics(outcome);
+     return payload.dump();
+ }
+ 
 diff --git a/src/serve/openai_common.cpp b/src/serve/openai_common.cpp
 index 2dcb4548d8fc0f5986eb6b40d3cf51a2128c9654..bf08c46635106b8f9a7a4f74ad2a68896da6135e 100644
 --- a/src/serve/openai_common.cpp
@@ -11192,10 +11289,18 @@ index dcc94aad67eef5f03afc99ab7e376111930836a7..0688675af8b468acfc31cbd858e9c8ac
                                                                    "truncation"};
      const auto& allowed = create ? create_fields : count_fields;
 diff --git a/src/serve/openai_responses_response.cpp b/src/serve/openai_responses_response.cpp
-index cd6841604ee694527c5663540a5e9ce20e0117a3..7f3bb437d7b0c5d191618c73fde75a81cb6c2a5d 100644
+index cd6841604ee694527c5663540a5e9ce20e0117a3..019a54d7718b368875fc47d3c5563c19dec879e0 100644
 --- a/src/serve/openai_responses_response.cpp
 +++ b/src/serve/openai_responses_response.cpp
-@@ -16,8 +16,6 @@ namespace {
+@@ -2,6 +2,7 @@
+ 
+ #include "serve/generation_service.h"
+ #include "serve/openai_common.h"
++#include "serve/kvmem_metrics.h"
+ 
+ #include <algorithm>
+ #include <iterator>
+@@ -16,8 +17,6 @@ namespace {
  
  using Json = nlohmann::json;
  
@@ -11204,7 +11309,7 @@ index cd6841604ee694527c5663540a5e9ce20e0117a3..7f3bb437d7b0c5d191618c73fde75a81
  std::string response_status(ninfer::FinishReason reason) {
      switch (reason) {
      case ninfer::FinishReason::OutputLimit:
-@@ -51,12 +49,6 @@ void add_wire_function_identity(Json& object, const OpenAIResponsesCreateRequest
+@@ -51,12 +50,6 @@ void add_wire_function_identity(Json& object, const OpenAIResponsesCreateRequest
      if (position->second.wire_namespace) { object["namespace"] = *position->second.wire_namespace; }
  }
  
@@ -11217,7 +11322,7 @@ index cd6841604ee694527c5663540a5e9ce20e0117a3..7f3bb437d7b0c5d191618c73fde75a81
  // Mirror raw reasoning into the opaque field requested by Harness. This is deliberately not
  // encryption; replayed prompt and cache semantics continue to come only from reasoning_text.
  void add_reasoning_encrypted_content(Json& item, const OpenAIResponsesCreateRequest& request,
-@@ -128,7 +120,8 @@ BuiltOpenAIResponse build_response(const std::string& id, std::int64_t created_a
+@@ -128,7 +121,8 @@ BuiltOpenAIResponse build_response(const std::string& id, std::int64_t created_a
              {"id", ids.reasoning},
              {"type", "reasoning"},
              {"status", reasoning_status},
@@ -11227,7 +11332,15 @@ index cd6841604ee694527c5663540a5e9ce20e0117a3..7f3bb437d7b0c5d191618c73fde75a81
              {"content",
               Json::array({Json{{"type", "reasoning_text"}, {"text", outcome.reasoning}}})}};
          add_reasoning_encrypted_content(reasoning_item, request, outcome.reasoning);
-@@ -261,40 +254,15 @@ public:
+@@ -208,6 +202,7 @@ BuiltOpenAIResponse build_response(const std::string& id, std::int64_t created_a
+              {"output_tokens", outcome.completion_tokens},
+              {"output_tokens_details", Json{{"reasoning_tokens", outcome.reasoning_tokens}}},
+              {"total_tokens", outcome.prompt_tokens + outcome.completion_tokens}};
++    response["kvmem"] = kvmem_generation_metrics(outcome);
+     built.body = std::move(response);
+     return built;
+ }
+@@ -261,40 +256,15 @@ public:
          reasoning_started               = true;
          ids.reasoning                   = new_openai_response_item_id("rs");
          reasoning_index                 = next_output_index++;
@@ -11269,7 +11382,7 @@ index cd6841604ee694527c5663540a5e9ce20e0117a3..7f3bb437d7b0c5d191618c73fde75a81
          events.push_back(
              sse(event("response.content_part.added", Json{{"item_id", ids.reasoning},
                                                            {"output_index", reasoning_index},
-@@ -312,7 +280,7 @@ public:
+@@ -312,7 +282,7 @@ public:
          Json item = {{"id", ids.reasoning},
                       {"type", "reasoning"},
                       {"status", item_status},
@@ -18433,7 +18546,7 @@ index b9397a3f3552fdd73ccebcfc2c95475503f3c35e..a788c84a87f1f3c0e9c049c4b8232782
      failures += test_contiguous_assistant_items();
      failures += test_response_output_history_round_trip();
 diff --git a/tests/test_openai_schema.cpp b/tests/test_openai_schema.cpp
-index 79825fd3e4be54941464587df11c0e952a25fea4..22e4704b6ad10484bbfc2c2148bf9f5c6ecf1404 100644
+index 79825fd3e4be54941464587df11c0e952a25fea4..0b699b1fa9fa7db3eecd919683e198dea3145878 100644
 --- a/tests/test_openai_schema.cpp
 +++ b/tests/test_openai_schema.cpp
 @@ -479,16 +479,19 @@ int test_tools() {
@@ -18620,7 +18733,29 @@ index 79825fd3e4be54941464587df11c0e952a25fea4..22e4704b6ad10484bbfc2c2148bf9f5c
      const GenerationRequest tool_image = parse(body).generation;
      failures += check(tool_image.messages.back().role == ninfer::ChatRole::Tool &&
                            tool_image.messages.back().tool_call_id == "call_capture" &&
-@@ -1481,7 +1503,12 @@ int test_assistant_continuation_mode() {
+@@ -1050,6 +1072,9 @@ GenerationOutcome sample_outcome() {
+     outcome.metrics.prefix_cache_hit_tokens     = 12;
+     outcome.metrics.prompt_wall_seconds         = 0.04;
+     outcome.metrics.generation_wall_seconds     = 0.03;
++    outcome.metrics.engine_timing.decode_rounds = 3;
++    outcome.metrics.speculative_rounds = 2;
++    outcome.metrics.speculative_fallback_steps = 1;
+     outcome.metrics.speculative_draft_tokens    = 9;
+     outcome.metrics.speculative_accepted_tokens = 6;
+     return outcome;
+@@ -1063,6 +1088,11 @@ int test_aggregate_response() {
+     int failures              = 0;
+     GenerationOutcome outcome = sample_outcome();
+     Json response             = Json::parse(make_chat_completion_response(identity(), outcome));
++    const auto& diagnostic = response["kvmem"]["speculative"];
++    failures += check(diagnostic["generation_rounds"] == 3 && diagnostic["output_tokens"] == 6 &&
++                          diagnostic["tokens_per_round"] == 2.0 && diagnostic["ms_per_round"] == 10.0 &&
++                          diagnostic["fallback_rounds"] == 1,
++                      "KVMem diagnostics retain explicit native round counts and first-token scope");
+     failures += check(response["choices"][0]["message"]["content"] == "answer" &&
+                           response["choices"][0]["message"]["reasoning_content"] == "thought" &&
+                           response["choices"][0]["message"]["refusal"].is_null(),
+@@ -1481,7 +1511,12 @@ int test_assistant_continuation_mode() {
      return failures;
  }
  

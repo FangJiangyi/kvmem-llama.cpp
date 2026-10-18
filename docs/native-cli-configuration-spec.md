@@ -698,3 +698,51 @@ UI 继续通过 JSON 参数数组调用内部脚本。直接脚本增加 `Worker
 llama 功能测试使用 RTX 5050 Laptop（`GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29`）；NInfer 27B 功能测试使用空闲 RTX 5060 Ti（`GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`）。本轮为功能验证，不形成性能比较结论。测试仅启动和关闭自身的临时服务。
 
 可复现入口：[llama 会话配额测试](../scripts/test_server_session_quota.py)、[NInfer CLI 实际请求测试](../scripts/test_ninfer_kvmem_cli.py)、[启动器测试](../scripts/windows/test-backend-launcher.ps1)、[启动配置浏览器测试](../ui/test-launcher.cjs)及[设置专项测试](../ui/test-launcher-settings.cjs)。本次实际模型验证使用纯文本和单卡，没有重新验收视觉、MTP 或多卡推理；llama 的 R 输出能力限制继续保留。
+
+## 九 推理统计与后端兼容
+
+各 worker 对齐仓库锁定版本的原生后端。HTTP 适配器读取对应后端的原生字段；
+KVMem 的扩展放在 `kvmem.speculative` 中。已有 NInfer 的 `llamacpp:` 和 `ninfer:`
+监控指标保持原样，不为了跨后端统一展示而改名。
+
+- llama worker 增加原生 `--metrics` 开关，默认关闭，`/props.endpoint_metrics` 如实报告。
+  `/metrics` 使用 Prometheus 格式，提供 prompt、cache、generation、排队/活动请求、
+  普通 decode 调用、草稿数、接受数、验证轮数及按草稿位置的接受计数。
+  累计数据在请求收尾时结算，保留已观察到的中断请求工作；速率桶每次抓取后重置。
+- llama `timings` 复用锁定上游的序列化和计算：首个输出 token 归入 prompt 阶段，
+  `predicted_n` 仍为全部输出数，生成速率和每 token 耗时使用 `predicted_n - 1`。
+  计时截至最后一个采样，后续传输、清理和末尾状态提交不延长原生生成区间。
+- llama 流式默认只在末尾携带 `timings`；`timings_per_token: true` 才逐块附带统计。
+  `stream_options.include_usage` 控制最终 usage 块；关闭时，timings 在 finish 块。
+  Responses 的最终完成/截断事件同样携带 timings。
+- NInfer 保持原生 first-to-last committed token 的计时与首 token 约定。
+  KVMem 扩展直接使用 Engine 的 decode round、verification 和 fallback 计数。
+
+扩展中的接受率只统计草稿，不含额外的 bonus token。llama 的 `generation_rounds`
+覆盖整个生成循环中的验证尝试、恢复重放和零草稿回退；`wall_ms` 包含该循环的工作，
+`timing_scope` 为 `generation_loop`。NInfer 的该字段来自 Engine decode round，
+`output_tokens` 和 `wall_ms` 不含首 token，范围为 `first_to_last_token`。
+两个范围应分别解释，不能据此直接做跨后端的严格性能比较。
+
+`verification_steps` 是原生接受流程完成的推测轮数；`restore_rounds` 单列 llama
+恢复尝试，`uncommitted_rounds` 单列在提交前中止的尝试。每轮耗时与产出必须使用
+同一范围的总时间、输出数和实际轮数。缺少轮数时，派生指标为空并注明原因。
+`tok/s` 继续表示输出速率，接受率用于解释推测解码效率，不能当作生成质量分数。
+
+核心验证入口：`kvmem-server-metrics-test`、`kvmem-server-options-test`、NInfer 原生
+Chat/Responses schema tests，以及 `scripts/test_native_metrics_http.py`。GPU 验证必须
+传入明确 UUID 和小模型路径；四层执行夹具只验证接口与执行，不形成生成质量或性能结论。
+
+### 2026-10-19 核心验证范围
+
+两项 C++ 统计/参数测试和 NInfer 原生 Chat/Responses schema tests 通过。
+GPU 验证全部使用 RTX 5050 Laptop（`GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29`）：
+llama 普通解码使用 Qwen3.5-0.8B-Q8_0；llama MTP 与 NInfer 使用已有四层执行夹具。
+覆盖单 token、普通/流式末尾统计、usage 开关、取消后恢复、Responses 终态及监控计数。
+NInfer 的 KVMem 监控直接复用其原生计时序列化，以保持首 token 和零耗时约定一致。
+
+NInfer 尝试 0.8B 模型时，其现有引擎拒绝该投影尺寸，因此改用四层夹具。
+小型 llama MTP 夹具使用支持的 snapshots 路径；27B 专用 GDN replay 路径未做 GPU 验证。
+夹具不用于生成质量判定；没有运行大模型、跨后端性能对比或完整回归套件。
+Windows 构建的声明/类型适配问题已修正；补丁打包中的行尾差异经逐文件比对后清理，
+两个后端的版本化补丁和精确源码树检查通过。

@@ -85,6 +85,7 @@ struct kvmem_server_options : kvmem::CliOptions {
     int threads_http = -1;
     bool threads_http_set = false;
     bool list_devices = false;
+    bool metrics = false;
     std::string device_names;
     int main_gpu = 0;
     bool main_gpu_set = false;
@@ -162,7 +163,9 @@ struct kvmem_server_options : kvmem::CliOptions {
     template<typename Need>
     bool parse(const std::string & arg, const Need & need) {
         if (kvmem::CliOptions::parse(arg, need)) return true;
-        if (arg == "--kvmem-conversations") {
+        if (arg == "--metrics") {
+            metrics = true;
+        } else if (arg == "--kvmem-conversations") {
             conversations = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1);
             legacy_conversations = true;
         } else if (arg == "--kvmem-conversations-gb" || arg == "--kvmem-session-ram-gb") {

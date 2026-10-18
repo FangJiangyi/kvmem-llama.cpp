@@ -58,6 +58,7 @@ static void print_usage(const char * argv0) {
             "  --kv-dtype NAME            GPU KV cache type for K and V: f16 | f32 | q8_0 | q5_0 | q4_0 (default q8_0)\n"
             "  -ctk, --cache-type-k TYPE  GPU K cache type (llama.cpp name; default q8_0)\n"
             "  -ctv, --cache-type-v TYPE  GPU V cache type (quantized: independently q8_0 | q5_0 | q4_0)\n"
+            "  --seed N                   RNG seed; -1=random (ordinary default 0, MTP random)\n"
             "  --spec-type TYPE           none | draft-mtp (default none)\n"
             "  --spec-kv-dtype TYPE       MTP K/V type (default: inherit target K/V types)\n"
             "  --spec-draft-n-max N       MTP draft tokens (default 2)\n"
@@ -104,6 +105,8 @@ int main(int argc, char ** argv) {
     ggml_type cache_type_v = GGML_TYPE_Q8_0;
     ggml_type spec_cache_type = GGML_TYPE_COUNT;
     bool spec_mtp = false;
+    uint32_t seed = 0;
+    bool seed_set = false;
     int spec_n_max = 2;
     float spec_p_min = 0.0f;
     std::string spec_draft_model;
@@ -231,6 +234,16 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "unsupported MTP cache type (want f16|q8_0|q5_0|q4_0|f32)\n");
                 return 1;
             }
+        } else if (eq(arg, "--seed") || eq(arg, "-s")) {
+            const char * value = need(arg);
+            char * end = nullptr;
+            const auto parsed = std::strtoll(value, &end, 10);
+            if (!*value || *end || parsed < -1 || (parsed >= 0 && (uint64_t)parsed > UINT32_MAX)) {
+                fprintf(stderr, "--seed requires -1 or an integer in 0..4294967295\n");
+                return 1;
+            }
+            seed = (uint32_t)parsed;
+            seed_set = true;
         } else if (eq(arg, "--spec-type")) {
             const char * t = need(arg);
             if (eq(t, "draft-mtp")) {
@@ -461,7 +474,7 @@ int main(int argc, char ** argv) {
         llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
     } else {
         llama_sampler_chain_add(smpl, llama_sampler_init_temp(temp));
-        llama_sampler_chain_add(smpl, llama_sampler_init_dist(0));
+        llama_sampler_chain_add(smpl, llama_sampler_init_dist(seed));
     }
 
     if (!tokens_only && !no_prompt) {
@@ -637,7 +650,8 @@ int main(int argc, char ** argv) {
                         fwrite(piece.data(), 1, piece.size(), stdout);
                         fflush(stdout);
                     }
-                });
+                }, seed_set ? seed : LLAMA_DEFAULT_SEED);
+        fprintf(stderr, "KVMEM_SPEC_METRICS %s\n", gst.metrics().dump().c_str());
         if (gst.failed) {
             kvmem_spec_stop(spec_sess);
             llama_sampler_free(smpl);

@@ -301,7 +301,7 @@ if (KVMEM_BUILD_LLAMA)
         target_link_libraries(kvmem-llama-backend-perf PRIVATE llama llama-common kvmem)
     endif()
 
-    add_executable(llama-kvmem-server tools/llama-kvmem-server.cpp tools/llama-kvmem-driver.cpp tools/kvmem-spec.cpp
+    add_executable(llama-kvmem-server tools/kvmem-server-metrics.cpp tools/llama-kvmem-server.cpp tools/llama-kvmem-driver.cpp tools/kvmem-spec.cpp
         tools/kvmem-vision.cpp tools/kvmem-responses.cpp tools/kvmem-responses-stream.cpp
         backends/llamacpp/tools/server/server-common.cpp
         backends/llamacpp/tools/server/server-chat.cpp)
@@ -442,6 +442,12 @@ if (KVMEM_BUILD_SERVER_TESTS)
     target_include_directories(kvmem-monitor-test PRIVATE kvmem/include backends/llamacpp/vendor ${CUDAToolkit_INCLUDE_DIRS})
     target_link_libraries(kvmem-monitor-test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
     add_test(NAME kvmem-monitor-test COMMAND kvmem-monitor-test)
+    add_executable(kvmem-server-metrics-test tests/server-metrics-test.cpp
+        tools/kvmem-server-metrics.cpp backends/llamacpp/tools/server/server-common.cpp)
+    target_include_directories(kvmem-server-metrics-test PRIVATE tools backends/llamacpp/tools/server
+        backends/llamacpp/tools/mtmd backends/llamacpp/vendor backends/llamacpp/vendor/cpp-httplib)
+    target_link_libraries(kvmem-server-metrics-test PRIVATE llama-common mtmd cpp-httplib)
+    add_test(NAME kvmem-server-metrics-test COMMAND kvmem-server-metrics-test)
     add_executable(kvmem-server-progress-test tests/server-progress-test.cpp)
     target_include_directories(kvmem-server-progress-test PRIVATE tools backends/llamacpp/vendor)
     target_link_libraries(kvmem-server-progress-test PRIVATE Threads::Threads)

@@ -40,6 +40,7 @@ inline const std::vector<kvmem_env_option> & kvmem_env_options() {
         {"LLAMA_ARG_TENSOR_SPLIT", "--tensor-split"}, {"LLAMA_ARG_MAIN_GPU", "--main-gpu"},
         {"LLAMA_ARG_ALIAS", "--alias"}, {"LLAMA_ARG_HOST", "--host"}, {"LLAMA_ARG_PORT", "--port"},
         {"LLAMA_ARG_STATIC_PATH", "--ui-dir"}, {"LLAMA_ARG_UI", "--ui", "--no-ui"},
+        {"LLAMA_ARG_ENDPOINT_METRICS", "--metrics", ""},
         {"LLAMA_API_KEY", "--api-key"}, {"LLAMA_ARG_API_KEY_FILE", "--api-key-file"},
         {"LLAMA_ARG_TIMEOUT", "--timeout"}, {"LLAMA_ARG_THREADS_HTTP", "--threads-http"},
         {"LLAMA_ARG_JINJA", "--jinja", "--no-jinja"},

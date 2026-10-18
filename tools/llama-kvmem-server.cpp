@@ -12,6 +12,7 @@
 #include "kvmem-server-options.h"
 #include "kvmem-server-auth.h"
 #include "kvmem-server-progress.h"
+#include "kvmem-server-metrics.h"
 #include "kvmem/monitor.hpp"
 #include "kvmem/monitor_hardware.hpp"
 #include "kvmem-lane-pool.h"
@@ -112,6 +113,7 @@ static void print_usage(const char * argv0) {
             "  --main-gpu, -mg N         main device index (default 0)\n"
             "  --split-mode, -sm MODE    none | layer | tensor (multi-GPU requires layer or tensor)\n"
             "  --tensor-split, -ts N,... proportions, one per selected GPU\n"
+            "  --metrics                   enable native Prometheus metrics\n"
             "  Aliases: --usage, --predict, -s, -mm, --no-webui, --path\n"
             "  Environment: supported LLAMA_ARG_* settings apply before CLI; API keys append.\n"
             "  --ui / --webui            enable UI (overrides LLAMA_ARG_UI=0)\n"
@@ -1501,6 +1503,8 @@ int main(int argc, char ** argv) {
     }
     auto preparation_templates = common_chat_templates_init(st.model, chat_template);
     std::mutex preparation_templates_mutex;
+    kvmem_server_metrics native_metrics;
+    const auto metrics_started = std::time(nullptr);
     httplib::Server svr;
     svr.set_read_timeout(options.timeout, 0);
     svr.set_write_timeout(options.timeout, 0);
@@ -1586,7 +1590,7 @@ int main(int argc, char ** argv) {
         {"modalities", {{"vision", st.vision != nullptr}, {"audio", false},
                         {"video", st.vision && options.parallel == 1 && st.vision->supports_video()}}},
         {"media_marker", mtmd_default_marker()},
-        {"endpoint_slots", true}, {"endpoint_props", false}, {"endpoint_metrics", false},
+        {"endpoint_slots", true}, {"endpoint_props", false}, {"endpoint_metrics", options.metrics},
         {"ui", !no_ui},
         {"ui_settings", json::object()},
         {"chat_template", common_chat_templates_source(st.tmpls.get())},
@@ -1644,6 +1648,18 @@ int main(int argc, char ** argv) {
         if (lane_conversations) current["kvmem"]["usage"] = lane_conversations->status();
         res.set_header("Cache-Control", "no-store");
         res.set_content(current.dump(), "application/json");
+    });
+    svr.Get("/metrics", [&](const httplib::Request &, httplib::Response & res) {
+        if (!options.metrics) {
+            res.status = 501;
+            res.set_content(json{{"error", {{"code", 501}, {"type", "not_supported_error"},
+                {"message", "This server does not support metrics endpoint. Start it with `--metrics`"}}}}.dump(), "application/json");
+            return;
+        }
+        res.set_header("Process-Start-Time-Unix", std::to_string(metrics_started));
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(native_metrics.render(true),
+                "text/plain; version=0.0.4; charset=utf-8");
     });
     svr.Get("/health", [](const httplib::Request &, httplib::Response & res) {
         res.set_content("{\"status\":\"ok\"}", "application/json");
@@ -1762,6 +1778,7 @@ int main(int argc, char ** argv) {
     };
 
     auto handle_chat = [&](const httplib::Request & req, httplib::Response & res) {
+        auto request_metrics = std::make_shared<kvmem_metrics_lease>(native_metrics);
         const auto monitor_id = monitor.begin(req.path);
         // The synchronous scope covers validation and non-streaming completion. Streaming
         // transfers finalization to httplib's resource releaser, including failed writes.
@@ -1830,6 +1847,7 @@ int main(int argc, char ** argv) {
         }
 
         const auto cancelled = [&req] { return req.is_connection_closed && req.is_connection_closed(); };
+        request_metrics->queue();
         monitor.update(monitor_id, {{"status", "queued"}, {"limit", cr.max_tokens}});
         auto ticket = lane_pool.enqueue(cr.conversation_id);
         auto cache_reference = lane_conversations ? lane_conversations->pin(cr.conversation_id) : nullptr;
@@ -1952,6 +1970,7 @@ int main(int argc, char ** argv) {
             res.set_content(json{{"error", e.what()}}.dump(), "application/json"); return;
         }
         if (!lease) return;
+        request_metrics->admit();
         ServerState & st = *lanes[lease->index];
         std::shared_ptr<kvmem_server_slot_guard> slot;
         try {
@@ -2083,35 +2102,30 @@ int main(int argc, char ** argv) {
         auto timings = std::make_shared<json>(json::object());
         // 1:1 upstream timings block (server-context.cpp): prompt/predicted counts, ms, per-token and per-second rates.
         // 中文：对齐上游的 timings 统计块——prompt/predicted 的计数、耗时、每 token 与每秒速率，供 /v1 响应回传
-        auto make_emit_gen_wall = [timings, &st, &monitor, monitor_id, n_prompt = (int) toks.size()](
+        auto make_emit_gen_wall = [timings, request_metrics, &st, &monitor, monitor_id, n_prompt = (int) toks.size()](
                 std::chrono::steady_clock::time_point t_turn0,
                 std::chrono::steady_clock::time_point t_pf1,
                 double prefill_ms, int n_cache_hit) {
             const int cache_n = std::clamp(n_cache_hit, 0, n_prompt);
+            const int64_t prefilled_us = ggml_time_us();
+            request_metrics->stats.start(prefilled_us - (int64_t)(prefill_ms * 1000.0));
+            request_metrics->stats.prefilled(n_prompt, cache_n, prefilled_us);
             const int prompt_n = n_prompt - cache_n;
             st.progress.prefilled(cache_n);
             monitor.update(monitor_id, {{"status", "generating"}, {"cached_tokens", cache_n},
                 {"prefill_tps", prefill_ms > 0 ? json(1000.0 * prompt_n / prefill_ms) : json(nullptr)}});
             st.log.start_generation();
-            return [timings, &st, &monitor, monitor_id, t_turn0, t_pf1, prefill_ms, n_prompt, prompt_n, cache_n](int n_gen, bool verbose = true) {
+            return [timings, request_metrics, &st, &monitor, monitor_id, t_turn0, t_pf1, prefill_ms, n_prompt, prompt_n, cache_n](int n_gen, bool verbose = true, int64_t sampled_us = 0) {
+                if ((uint64_t)n_gen > request_metrics->stats.native.n_gen)
+                    request_metrics->stats.token(n_gen, sampled_us ? sampled_us : ggml_time_us());
                 st.progress.generated(n_gen);
                 st.log.generated(n_gen);
                 const auto now = std::chrono::steady_clock::now();
                 const double gen_ms = std::chrono::duration<double, std::milli>(now - t_pf1).count();
                 const double prompt_per_second = prefill_ms > 0.0 ? 1000.0 * (double) prompt_n / prefill_ms : 0.0;
                 const double predicted_per_second = gen_ms > 0.0 ? 1000.0 * (double) n_gen / gen_ms : 0.0;
-                monitor.update(monitor_id, {{"generated_tokens", n_gen}, {"decode_tps", predicted_per_second}});
-                *timings = {
-                    {"prompt_n", prompt_n},
-                    {"prompt_ms", prefill_ms},
-                    {"prompt_per_token_ms", prompt_n > 0 ? prefill_ms / (double) prompt_n : 0.0},
-                    {"prompt_per_second", prompt_per_second},
-                    {"predicted_n", n_gen},
-                    {"predicted_ms", gen_ms},
-                    {"predicted_per_token_ms", n_gen > 0 ? gen_ms / (double) n_gen : 0.0},
-                    {"predicted_per_second", predicted_per_second},
-                    {"cache_n", cache_n}
-                };
+                *timings = request_metrics->stats.timings();
+                monitor.update(monitor_id, {{"generated_tokens", n_gen}, {"decode_tps", (*timings)["predicted_per_second"]}});
                 if (!verbose) {
                     return;
                 }
@@ -2129,6 +2143,15 @@ int main(int argc, char ** argv) {
             };
         };
 
+        auto set_spec_metrics = [request_metrics, timings](const kvmem_spec_gen_stats & gst) {
+            auto & stats = request_metrics->stats;
+            stats.native.n_draft_tokens = gst.draft_tokens;
+            stats.native.n_draft_accepted = gst.accepted_tokens;
+            stats.native.n_draft_verif_steps = gst.verification_steps;
+            stats.accepted_per_position = gst.accepted_per_position;
+            stats.speculative = gst.metrics();
+            *timings = stats.timings();
+        };
         int n_cache_hit = 0;
         auto emit_json = [&](const std::string & content, int n_gen, bool hit_limit) {
             common_chat_msg msg = parse_assistant_output(content, formatted);
@@ -2164,6 +2187,8 @@ int main(int argc, char ** argv) {
                     }},
                 };
                 out["timings"] = *timings;
+                if (!request_metrics->stats.speculative.is_null())
+                    out["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
                 res.set_content(out.dump(), "application/json");
                 return;
             }
@@ -2190,10 +2215,22 @@ int main(int argc, char ** argv) {
                 {"usage", usage_json((int) toks.size(), n_gen, n_cache_hit)},
             };
             out["timings"] = *timings;
+            if (!request_metrics->stats.speculative.is_null())
+                out["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
             res.set_content(out.dump(), "application/json");
         };
 
+        if (cr.stream && ((body.contains("timings_per_token") && !body["timings_per_token"].is_boolean()) ||
+                (body.contains("stream_options") && (!body["stream_options"].is_object() ||
+                    (body["stream_options"].contains("include_usage") && !body["stream_options"]["include_usage"].is_boolean()))))) {
+            res.status = 400;
+            res.set_content(json{{"error", "timings_per_token and stream_options.include_usage must be booleans"}}.dump(), "application/json");
+            return;
+        }
         if (cr.stream) {
+            const bool timings_per_token = body.value("timings_per_token", false);
+            const auto stream_options = body.value("stream_options", json::object());
+            const bool include_usage = stream_options.value("include_usage", false);
             const int max_tokens = cr.max_tokens;
             const bool spec_stream = use_spec;
             res.set_header("Cache-Control", "no-cache");
@@ -2201,10 +2238,16 @@ int main(int argc, char ** argv) {
             auto monitor_error = std::make_shared<std::atomic<bool>>(false);
             res.set_chunked_content_provider("text/event-stream",
                 [slot, &st, &req, toks, cid, request_id, created, max_tokens, sparams, formatted, stops,
-                 spec_stream, ctx, vocab, make_emit_gen_wall, timings, is_responses, monitor_error](size_t, httplib::DataSink & sink) mutable {
+                 spec_stream, ctx, vocab, make_emit_gen_wall, timings, request_metrics, set_spec_metrics, timings_per_token, include_usage, is_responses, monitor_error](size_t, httplib::DataSink & sink) mutable {
                     kvmem_execution_scope execution(st.execution.get());
                     StreamIo io;
-                    io.on_prefill = [&st](int rows, int remaining) { st.log.prefilled(rows, remaining); };
+                    io.on_prefill = [&st, request_metrics](int rows, int remaining) {
+                        st.log.prefilled(rows, remaining);
+                        auto & partial = request_metrics->stats.native;
+                        partial.n_prompt_processed += rows;
+                        partial.t_prompt_last = ggml_time_us();
+                    };
+                    request_metrics->stats.start(ggml_time_us());
                     io.sink = &sink;
                     io.req = &req;
                     auto send = [&](const std::string & payload) -> bool {
@@ -2219,7 +2262,17 @@ int main(int argc, char ** argv) {
                     // Responses events arrive pre-framed ("event: ..\ndata: ..\n\n");
                     // Chat Completions keeps the bare "data: <json>" framing.
                     auto send_raw = [&](const std::string & framed) -> bool {
-                        if (!sink.write(framed.data(), framed.size())) {
+                        std::string wire = framed;
+                        if (framed.rfind("event: response.completed\n", 0) == 0 ||
+                                framed.rfind("event: response.incomplete\n", 0) == 0) {
+                            const auto data = framed.find("data: ") + 6;
+                            auto event = json::parse(framed.substr(data));
+                            event["timings"] = *timings;
+                            if (!request_metrics->stats.speculative.is_null())
+                                event["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
+                            wire = framed.substr(0, data) + event.dump() + "\n\n";
+                        }
+                        if (!sink.write(wire.data(), wire.size())) {
                             io.aborted = true;
                             return false;
                         }
@@ -2288,13 +2341,14 @@ int main(int argc, char ** argv) {
                                 } else {
                                     auto deltas = sco.set_text(content, true);
                                     for (size_t i = 0; i < deltas.size(); ++i) {
-                                        const json * ts = (i + 1 == deltas.size()) ? &*timings : nullptr;
+                                        const json * ts = timings_per_token && i + 1 == deltas.size() ? &*timings : nullptr;
                                         send(stream_choice_chunk(cid, st.model_name, created, deltas[i], nullptr, ts).dump());
                                     }
                                 }
                             },
                             [&]() { return !stream_heartbeat(&io); },
                             st.active_prompt->model_pos(toks.size()) - (llama_pos) toks.size());
+                        set_spec_metrics(gst);
                         aborted = io.aborted || gst.failed;
                         st.mm_live_row = gst.n_past;
                         if (gst.failed) send(json{{"error", "speculative decode failed"}}.dump());
@@ -2328,6 +2382,7 @@ int main(int argc, char ** argv) {
                                 break;
                             }
                             llama_token id = common_sampler_sample(smpl, ctx, -1);
+                            const int64_t sampled_us = ggml_time_us();
                             common_sampler_accept(smpl, id, true);
                             if (llama_vocab_is_eog(vocab, id)) {
                                 stopped = true;
@@ -2343,7 +2398,8 @@ int main(int argc, char ** argv) {
                             content += piece;
                             gen.push_back(id);
                             hit_stop = strip_stop(content, stops);
-                            emit_gen_wall((int) gen.size(), false);
+                            ++request_metrics->stats.decode_calls;
+                            emit_gen_wall((int) gen.size(), false, sampled_us);
                             if (is_responses) {
                                 for (const std::string & ev : responses->set_text(content, !hit_stop)) {
                                     if (!send_raw(ev)) {
@@ -2353,7 +2409,7 @@ int main(int argc, char ** argv) {
                             } else {
                                 auto deltas = sco.set_text(content, !hit_stop);
                                 for (size_t i = 0; i < deltas.size(); ++i) {
-                                    const json * ts = (i + 1 == deltas.size()) ? &*timings : nullptr;
+                                    const json * ts = timings_per_token && i + 1 == deltas.size() ? &*timings : nullptr;
                                     send(stream_choice_chunk(cid, st.model_name, created, deltas[i], nullptr, ts).dump());
                                 }
                             }
@@ -2394,7 +2450,7 @@ int main(int argc, char ** argv) {
                         const bool hit_limit = (int) gen.size() >= max_tokens;
                         auto flush_deltas = sco.set_text(content, false);
                         for (size_t i = 0; i < flush_deltas.size(); ++i) {
-                            const json * ts = (i + 1 == flush_deltas.size()) ? &*timings : nullptr;
+                            const json * ts = timings_per_token && i + 1 == flush_deltas.size() ? &*timings : nullptr;
                             send(stream_choice_chunk(cid, st.model_name, created, flush_deltas[i], nullptr, ts).dump());
                         }
                         const char * finish = sco.finish_reason(hit_limit);
@@ -2405,10 +2461,15 @@ int main(int argc, char ** argv) {
                         llama_kvmem_decode_mean_flush();
                         emit_gen_wall((int) gen.size());
                         llama_driver_commit(st, toks, gen);
-                        send(stream_choice_chunk(cid, st.model_name, created, json::object(), finish).dump());
+                        auto final_chunk = stream_choice_chunk(cid, st.model_name, created, json::object(), finish, include_usage ? nullptr : &*timings);
+                        if (!include_usage && !request_metrics->stats.speculative.is_null())
+                            final_chunk["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
+                        send(final_chunk.dump());
                         auto usage = stream_usage_chunk(cid, st.model_name, created, (int) toks.size(), (int) gen.size(), n_cache_hit);
                         usage["timings"] = *timings;
-                        send(usage.dump());
+                        if (!request_metrics->stats.speculative.is_null())
+                            usage["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
+                        if (include_usage) send(usage.dump());
                         sink.write("data: [DONE]\n\n", 14);
                         llama_driver_finish(st);
                         slot->unlock();
@@ -2447,7 +2508,7 @@ int main(int argc, char ** argv) {
                     const bool hit_limit = (int) gen.size() >= max_tokens;
                     auto flush_deltas = sco.set_text(content, false);
                     for (size_t i = 0; i < flush_deltas.size(); ++i) {
-                        const json * ts = (i + 1 == flush_deltas.size()) ? &*timings : nullptr;
+                        const json * ts = timings_per_token && i + 1 == flush_deltas.size() ? &*timings : nullptr;
                         send(stream_choice_chunk(cid, st.model_name, created, flush_deltas[i], nullptr, ts).dump());
                     }
                     const char * finish = sco.finish_reason(hit_limit);
@@ -2457,16 +2518,22 @@ int main(int argc, char ** argv) {
                             sco.prev.content.size(), sco.prev.reasoning_content.size());
                     emit_gen_wall((int) gen.size());
                     llama_driver_commit(st, toks, gen);
-                    send(stream_choice_chunk(cid, st.model_name, created, json::object(), finish).dump());
+                    auto final_chunk = stream_choice_chunk(cid, st.model_name, created, json::object(), finish, include_usage ? nullptr : &*timings);
+                    if (!include_usage && !request_metrics->stats.speculative.is_null())
+                        final_chunk["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
+                    send(final_chunk.dump());
                     auto usage = stream_usage_chunk(cid, st.model_name, created, (int) toks.size(), (int) gen.size(), n_cache_hit);
                     usage["timings"] = *timings;
-                    send(usage.dump());
+                    if (!request_metrics->stats.speculative.is_null())
+                        usage["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
+                    if (include_usage) send(usage.dump());
                     sink.write("data: [DONE]\n\n", 14);
                     llama_driver_finish(st);
                     slot->unlock();
                     sink.done();
                     return true;
-                }, [&, monitor_id, monitor_error](bool success) {
+                }, [&, monitor_id, monitor_error, request_metrics](bool success) {
+                    request_metrics->finish();
                     monitor.finish(monitor_id, monitor_error->load() ? "error" : success ? "completed" : "disconnected");
                 });
             monitor_stream = true;
@@ -2478,7 +2545,13 @@ int main(int argc, char ** argv) {
             ~request_guard() { llama_driver_finish(st); }
         } guard {st};
         StreamIo io;
-        io.on_prefill = [&st](int rows, int remaining) { st.log.prefilled(rows, remaining); };
+        io.on_prefill = [&st, request_metrics](int rows, int remaining) {
+            st.log.prefilled(rows, remaining);
+            auto & partial = request_metrics->stats.native;
+            partial.n_prompt_processed += rows;
+            partial.t_prompt_last = ggml_time_us();
+        };
+        request_metrics->stats.start(ggml_time_us());
         io.req = &req;
         const auto t_turn0 = std::chrono::steady_clock::now();
         if (!llama_driver_prepare(st, toks, &io, &n_cache_hit)) {
@@ -2511,6 +2584,7 @@ int main(int argc, char ** argv) {
                         emit_gen_wall((int) gen.size(), false);
                     }, [&]() { return !stream_heartbeat(&io); },
                     st.active_prompt->model_pos(toks.size()) - (llama_pos) toks.size());
+            set_spec_metrics(gst);
             if (gst.failed) {
                 res.status = 500;
                 res.set_content("{\"error\":\"speculative decode failed\"}", "application/json");
@@ -2541,8 +2615,9 @@ int main(int argc, char ** argv) {
         }
 
         int next_row = (int) toks.size();
-        auto gen_one = [ctx, smpl, vocab, &st, &next_row](std::string & piece, bool & stopped, llama_token & id_out) -> bool {
+        auto gen_one = [ctx, smpl, vocab, &st, &next_row](std::string & piece, bool & stopped, llama_token & id_out, int64_t & sampled_us) -> bool {
             llama_token id = common_sampler_sample(smpl, ctx, -1);
+            sampled_us = ggml_time_us();
             common_sampler_accept(smpl, id, true);
             if (llama_vocab_is_eog(vocab, id)) {
                 stopped = true;
@@ -2567,7 +2642,8 @@ int main(int argc, char ** argv) {
             }
             std::string piece;
             llama_token id = 0;
-            if (!gen_one(piece, stopped, id)) {
+            int64_t sampled_us = 0;
+            if (!gen_one(piece, stopped, id, sampled_us)) {
                 common_sampler_free(smpl);
                 res.status = 500;
                 res.set_content("{\"error\":\"decode failed\"}", "application/json");
@@ -2578,7 +2654,8 @@ int main(int argc, char ** argv) {
             }
             content += piece;
             gen.push_back(id);
-            emit_gen_wall((int) gen.size(), false);
+            ++request_metrics->stats.decode_calls;
+            emit_gen_wall((int) gen.size(), false, sampled_us);
             if (strip_stop(content, stops)) {
                 break;
             }

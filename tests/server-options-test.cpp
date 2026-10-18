@@ -131,6 +131,9 @@ int main() {
     check(args.size() == 6 && args[0].value == "--model" && args[1].value == "model with spaces.gguf");
     check(args[0].source == "env:LLAMA_ARG_MODEL");
     check(std::any_of(args.begin(), args.end(), [](const kvmem_start_arg & a) { return a.value == "--no-ui"; }));
+    environment["LLAMA_ARG_ENDPOINT_METRICS"] = "true";
+    auto with_metrics = kvmem_environment_args(lookup);
+    check(std::any_of(with_metrics.begin(), with_metrics.end(), [](const kvmem_start_arg & a) { return a.value == "--metrics"; }));
     environment["LLAMA_ARG_UI"] = "sometimes";
     rejects([&] { kvmem_environment_args(lookup); });
     check(kvmem_config_key("-ngl") == "--n-gpu-layers");
@@ -180,5 +183,8 @@ int main() {
         parse(flag, "1");
         check(o.parallel == 1);
     }
+    check(!o.metrics);
+    parse("--metrics", "");
+    check(o.metrics);
     std::puts("server options: passed");
 }
