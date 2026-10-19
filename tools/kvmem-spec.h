@@ -11,6 +11,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include "nlohmann/json.hpp"
 
 struct kvmem_spec_opts {
     int32_t n_max = 2;
@@ -79,7 +80,27 @@ struct kvmem_spec_gen_stats {
     int n_drafted = 0;
     int n_accept = 0;
     int n_restore = 0;
+    // Native draft counters exclude the bonus token and internal replay proposals.
+    uint64_t draft_tokens = 0;
+    uint64_t accepted_tokens = 0;
+    uint64_t verification_steps = 0;
+    uint64_t generation_rounds = 0;
+    uint64_t fallback_rounds = 0;
+    std::vector<uint64_t> accepted_per_position;
+    double wall_ms = 0.0;
     bool failed = false;
+    nlohmann::json metrics() const {
+        return {{"backend", "draft-mtp"}, {"timing_scope", "generation_loop"}, {"drafted_tokens", draft_tokens},
+            {"accepted_tokens", accepted_tokens}, {"verification_steps", verification_steps},
+            {"generation_rounds", generation_rounds}, {"fallback_rounds", fallback_rounds},
+            {"restore_rounds", n_restore},
+            {"uncommitted_rounds", generation_rounds - verification_steps - fallback_rounds - (uint64_t)n_restore},
+            {"accepted_per_position", accepted_per_position},
+            {"output_tokens", n_gen}, {"wall_ms", wall_ms},
+            {"acceptance_rate", draft_tokens ? nlohmann::json((double) accepted_tokens / draft_tokens) : nlohmann::json(nullptr)},
+            {"tokens_per_round", generation_rounds ? nlohmann::json((double) n_gen / generation_rounds) : nlohmann::json(nullptr)},
+            {"ms_per_round", generation_rounds ? nlohmann::json(wall_ms / generation_rounds) : nlohmann::json(nullptr)}};
+    }
 };
 
 // `prompt` is the full prompt; the last token is id_last and must not already
@@ -91,7 +112,8 @@ kvmem_spec_gen_stats kvmem_spec_generate(
         const std::vector<llama_token> & prompt,
         int n_predict,
         float temp,
-        kvmem_spec_on_token on_token);
+        kvmem_spec_on_token on_token,
+        uint32_t seed = LLAMA_DEFAULT_SEED);
 
 // Same as above, but uses a fully-specified sampler (grammar / lazy triggers).
 // `abort` if set: stop the generate loop when it returns true (not a failure).
