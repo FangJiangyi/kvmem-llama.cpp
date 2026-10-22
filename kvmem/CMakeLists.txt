@@ -50,6 +50,7 @@ function(kvmem_add_test name)
 endfunction()
 
 kvmem_add_test(backend_rebind_test)
+kvmem_add_test(auto_tune_test)
 kvmem_add_test(kvmem_store_test)
 kvmem_add_test(pinned_kv_tier_test)
 kvmem_add_test(memory_contract_test)

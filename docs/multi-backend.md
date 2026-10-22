@@ -113,6 +113,147 @@ ngram 默认关闭。
 
 旧 `--lookup-ngram` 在 KVMem ninfer 中明确禁用，统一使用 `--ngram-draft-tokens` 与 `--ngram-min-match`；启动脚本对应 `-NgramDrafts` 和 `-NgramMinMatch`。经 `WorkerArgs` 传入旧参数也会被拦截。直接运行服务或调用 Engine 时，非零 lookup 配置会明确报错并指向新参数；未启用 MTP 或同时启用新 ngram 也不能放行旧路径。
 
+## ninfer 按硬件资源自动调参
+
+直接运行新构建的 worker，可用 `--kvmem-auto` 启用资源规划：
+
+```sh
+ninfer-serve /path/to/model.ninfer --kvmem-auto --max-context 65536 --kv-dtype int8
+# 固定 B，自动选择 R、prefill 和 H；显存不足时明确拒绝，而非改写 B。
+ninfer-serve /path/to/model.ninfer --kvmem-auto --max-context 65536 --kvmem-budget 8192
+```
+
+这是显式选择的保守容量规划策略，原有 `--kvmem` 和手动启动参数保持原来的含义。
+`--kvmem-auto` 的 B/R/prefill 选择只做资源核算，不运行请求测速；
+ninfer 自带的 DeviceProfile 设置独立，沿用用户配置。
+适用于当前已支持的 Qwen3.5/3.6/3.8 路径，含 layer pipeline、MTP、resident/CPU vision；
+不扩展到 Flash-Next、Gemma、host/disk 专家或原生前缀缓存。
+现有 Windows `start-backend.ps1` 会显式传入 B/R/H/prefill，因此使用自动模式时请直接运行 worker。
+
+### 规划规则与边界
+
+1. CLI 先构造合法的最小 KVMem 形状用于能力检查；最终 B/R/H 在权重加载后、Program 分配前解析。
+   不支持的组合仍走原有能力检查，未知可用 RAM 时拒绝自动规划。
+2. B 的软目标沿用 32768，受逻辑上下文和 R 限制；sink/recent 的硬下限优先。
+   为每个候选 prefill 以整页二分求可容纳的最大 B，再按 B 优先、相同 B 时较大 prefill 优先选择。
+   这是历史容量优先的启发式，不是质量或延迟实测结论。
+3. B/R 按 64-token 页对齐，prefill 按 128 对齐且不超过 R；R 还覆盖 MTP/ngram 验证宽度。
+   每请求 B+R 不超过逻辑上下文，全局物理容量受 ninfer 的 int32 约束。
+   各卡分别留下默认 1024 MiB 固定余量，并为预计运行开销另外留出 10% 增长空间；
+   检查 `运行开销 + ceil(运行开销/10) + 固定余量 <= 权重加载后的空闲显存`。
+   增长空间用于吸收形状相关 Graph/分配器变化，不是连续内存保证。
+   以最紧张的一卡约束共同配置，不能将显存简单相加。自动 prefill 上限为 512。
+4. H 之外预估活动/保留会话的统计索引、五类检查点及未发布替换、token 前缀、页目录、
+   pinned KV 搬运缓冲、StateImage 暂存和 SSD scratch；图像开启时还扣除媒体缓存上限。
+   这些 Host 预估含保守增长余量，不是进程内存的精确上限。
+   再留默认 2048 MiB RAM，自动 H 取剩余空间的 50%，最多 16 GiB，并按原生页向下对齐。
+   自动 H 至少须容纳所有活动 lane 的完整逻辑上下文原生 KV 历史，不能只够一次稀疏换页。
+   显式 H 可主动限制历史容量，但仍至少容纳所有活动 lane 的一次 B+R 窗口；请求继续受 H/D 准入检查。
+5. 显式 `--kvmem-budget`、`--kvmem-gen-reserve`、`--kvmem-host-mib`、`--prefill-chunk` 各自锁定，
+   无论和 `--kvmem-auto` 的先后顺序；`--prefill-chunk 0` 按原生语义委托自动选择。
+   显式值也必须满足资源预算；不会偷偷改小。
+   sink/recent、保留会话数、LRFU、量化格式、并发与 SSD 路径/配额保持用户选择。
+6. `--kvmem-auto-vram-reserve-mib` 和 `--kvmem-auto-ram-reserve-mib` 可调整余量。
+   `--no-kvmem`、`--kv-capacity`、原生 KV headroom/Host cache、WDDM evictable 与自动模式冲突。
+   启动日志报告 B/R/prefill/H、候选数、每卡规划与可用字节；`/props.kvmem` 报告解析后的值。
+
+公共核心的 `auto_tune_test` 用穷举可行集合核对候选搜索，覆盖单/多卡瓶颈、并发、RAM 不足、
+显式参数、整页边界和溢出；ninfer 的 `ninfer_kvmem_auto_test` 验证 CLI 与资源请求的连接。
+
+### 独立 256K 配置验收脚本
+
+`scripts/autoconfigure_ninfer_kvmem.py` 复用已编译的 `ninfer-serve` 和现有 `.ninfer` 模型，
+不编译 CUDA、不下载权重、不停止其他服务。目前限定 Linux、单 NVIDIA GPU、单路文本、MTP 关闭；
+默认 INT8 KV、Graph 开启、DeviceProfile 关闭，保留后端默认检索与前缀复用策略。
+
+```sh
+python3.11 scripts/autoconfigure_ninfer_kvmem.py \
+  --server build-auto-ninfer-cuda/apps/ninfer-serve \
+  --model models/auto-qwen38-iq4xs.ninfer \
+  --out results/ninfer-autoconfigure-256k
+```
+
+第一组采用现有 worker 的默认 B32768/R1024/prefill1024，显式固定三项，开启 `--kvmem-auto`
+让原生规划器在真实权重加载后检查资源。默认值未通过时，脚本首先固定 R/prefill，
+让原生规划器搜索可容纳的 B；必要时按 512/256/128 缩小 prefill 并联动 R，再重新原生规划。
+Python 不复刻页格式或显存成本公式。当前二进制没有 plan-only 接口，每个候选都重启 worker、
+重载权重；规划阶段的通用拒绝保留为 `planner_rejected_unspecified`，不能据此断言是 GPU 或 Host 不足。
+
+验收直接读取 `backends/ninfer/examples/cli/messages/long_niah_256k.json` 和 manifest 中的精确答案，
+核对文件身份及本模型实际模板化 token 数，执行冷 prefill。通过后运行原有 Task 2：约 8K token
+一轮的固定工具回放，接近 262144 总窗口，检查上下文增长、前缀复用、SSE 完整性和最后 512-token 生成。
+本脚本通过 `scripts/task2_workload.py` 复用从原入口抽出的 Task 2；
+原 `multimodal_canary.py` 保持原有实现，没有另造长文语料。
+Task 2 不检查最终生成程序功能，NIAH 只覆盖一个中间位置的精确检索，
+通过结论限定于这两个已有工作负载，不能推广为通用长文质量保证。
+
+默认逐卡显存余量 1024MiB、Host RAM 余量 2048MiB；公共工具位于 `scripts/ninfer_kvmem_resources.py`，
+提供 NVML/RSS/RAM 采样、Host/cgroup 可用内存查询、硬件信息、端口检查和结果写入。
+原生规划器另外沿用 10% 运行开销增长余量。H 默认仍由已编译后端的 auto-H 策略决定，
+`--host-mib` 可显式锁定；完整历史 Host 不足不会伪装成显存不足并继续缩 B。
+GPU 资源拒绝进入受限候选搜索；NIAH 质量失败提高后续 B 下限并优先尝试更大 B；Host 不足、
+Task 2 不完整、未知执行错误或超时停止并保留证据。`--budget/--reserve/--prefill` 显式锁定对应项。
+默认 B 搜索下限 8192（不是质量保证），最多 12 次启动、总时限 3 小时，均可显式调整。
+
+第一组 NIAH、完整 Task 2 和内存检查均通过即结束，不做速度排名。新建的空输出目录保存
+`report.json`、逐候选服务日志、请求与原始回复、`long-context.json`；仅成功时生成
+`selected-config.json` 和 `selected-command.txt`。输出命令固定实测 B/R/prefill，H 未锁定时仍在
+下一次权重加载后重新规划。失败不生成通过配置；新运行必须使用新的输出目录。
+中断或接口错误修正后，可用 `--resume-report <旧目录/report.json>` 加新 `--out` 继续：
+核对模型/worker/Task 2 指纹、硬件、执行条件及验收门槛，保留原候选记录和证据目录，
+重试最后一组实际参数。先复用 Task 2 的两轮诊断模式检查流式统计及真实缓存命中，
+诊断运行不会被计为 256K 通过。已完整执行的冷 NIAH 仅在实际 B/R/prefill 相同、答案与原始文件
+一致、源进程内存监控合格、当前 H 足以容纳该历史时才可复用；来源路径及源进程内存摘要明确记录。
+未完成的 NIAH 不复用，完整 Task 2 始终从头重跑，不将部分回放升级为成功。
+Task 2 的 ninfer HTTP 适配显式请求 `stream_options.include_usage=true`，避免将正常流式生成
+误判为缺少 token 统计；把 `prompt_tokens_details.cached_tokens` 映射给原 Task 2 的平铺缓存字段，
+同时保留原始 usage 和 SSE。缺失/矛盾的缓存统计、没有 usage 或缺少 `[DONE]` 仍拒绝验收。
+原回放的 `reasoning_budget_tokens=128` 在 ninfer 适配层转换为原生 `thinking_budget=128`，
+其余采样参数及输出限制沿用原工作负载；逐候选 `requests.jsonl` 保存后端实际解析的请求信息。
+
+2026-10-21 本机 RTX 4070 Ti SUPER 16GB、32GB RAM、Qwen3.8-27B IQ4_XS、INT8 KV、
+单路、Graph 开启、MTP 关闭完成验收，直接复用 10 月 19 日编译的 worker。默认
+B32768/R1024/prefill1024 被原生规划器通用资源检查拒绝；随后原生拟合得到
+**B17216/R1024/prefill1024**。最终运行的自动 H 为 **8984.25MiB**，没有继续做速度排序。
+
+冷 NIAH 的实际输入 260096、输出 17，精确返回 `ORCHID=493817; COLOR=COBALT`；
+两次完整冷请求均答对，最终配置复用 `results/ninfer-autoconfigure-256k-02/002/` 的完整原始证据。
+本次完整 Task 2 位于 `results/ninfer-autoconfigure-256k-05/004/`：33 请求、32 工具轮，
+末轮输入 **261544**、输出 **512**，合计 **262056/262144**；32 工具轮均有前缀命中。
+协议预检会预热 Task 2 的最初约 16K 前缀，完整回放仍从基础请求开始，冷长输入由 NIAH 单独验收；
+本结果没有用于性能比较。
+
+NIAH 来源进程与本次完整回放进程分别监控，合并取最差观测：最低空闲显存 **1108.625MiB**、
+最低可用 RAM **12.828GiB**、最高 worker RSS/HWM **13.148GiB**。这些是约 50ms 采样结果，
+不是连续峰值上界。未触发资源门槛，最终 worker 正常退出，测试后无残留计算进程。
+`results/ninfer-autoconfigure-256k-05/report.json` 保留全部参数尝试和旧证据来源，
+同目录的 `selected-config.json`、`selected-command.txt` 保存首个完整通过的配置。
+
+过程中暴露并修复了流式 usage 请求选项、嵌套缓存计数、原生思考预算映射，以及同参数多次恢复被
+重复过滤的问题；先前失败/主动中断和未启动 worker 的报告保存在 `-01` 至 `-04`，未标为通过。
+Python 3.12.14 上 17 项控制流程/Task 2/协议/恢复回归、`py_compile`、旧 Task 2 入口 `--help`
+及 `git diff --check` 通过。3.11 完成语法解析检查，本机未提供可执行的 3.11 解释器。
+验证范围仅上述本机模型与两个既有工作负载；不证明通用长文推理、其他 KV 格式或多并发质量。
+
+该独立验收流程与公共资源工具不依赖离线性能校准入口。可运行以下无模型回归：
+
+```sh
+python3.11 -m unittest discover -s scripts -p test_autoconfigure_ninfer_kvmem.py
+python3.11 -m unittest discover -s scripts -p test_ninfer_kvmem_resources.py
+```
+
+2026-10-22 公共工具抽取后，在 Python 3.12.14 上通过 17 项验收流程回归和 6 项资源工具测试，
+并通过 Python 3.11 语法检查。原生规划器及 ninfer CLI 规划连接测试通过。
+此次未改变候选顺序、Task 2 或后端执行逻辑，复用上述 256K 原始验收证据，没有重新运行长请求。
+
+### 原生规划的既有验证记录
+
+保守资源策略曾在本机 RTX 4070 Ti SUPER / Qwen3.8-27B IQ4_XS 上通过 9 项实模检查，
+包括 INT8/BF16、显式参数、MTP1、两路并发、短上下文边界及预期 Host 资源拒绝。
+默认单路 INT8 另完成近 65K 的检索、历史复用、取消恢复与内存余量检查。
+原始报告保留在 `results/ninfer-conservative-auto-04/report.json`；它与上述 256K 验收是不同运行，
+不能把单路质量结论推广到 MTP、并发或其他硬件。旧的额外实模验收入口已移除。
+
 ## API 与状态
 
 `POST /v1/chat/completions` 使用原生 ninfer 的 tokenizer、chat template、采样器和协议实现。`stream: true` 返回 SSE，断开请求会触发取消；下次提交完整 messages 可恢复可信历史。`GET /health` 查询就绪状态，`GET /v1/models` 查询模型，`GET /props` 提供 `backend`、`kvmem` 预算和能力；`/stats`、`/v1/load` 提供原生运行统计及 KVMem 当前历史的 payload、mean 统计、checkpoint 图像用量。历史换入/换出计数随历史替换重置。
